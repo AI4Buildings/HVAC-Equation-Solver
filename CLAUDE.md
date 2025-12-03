@@ -132,7 +132,7 @@ Hyperbolische Funktionen (`sinh`, `cosh`, `tanh`) verwenden Radiant.
 
 ## GUI-Features
 
-- File: New, Open, Save, Save As (.ees, .txt)
+- File: New, Open, Save, Save As (.tes, .txt)
 - View: Schriftgröße 6-36pt (Standard: 16pt)
 - Solve: F5 oder Button, Initial Values Dialog
 - Plot: Diagramme für Parameterstudien (erfordert matplotlib)

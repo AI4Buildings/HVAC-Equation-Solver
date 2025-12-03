@@ -548,14 +548,14 @@ BEISPIELE:
     def open_file(self):
         """Öffnet eine Datei."""
         filetypes = [
-            ("EES Files", "*.ees"),
+            ("TES Files", "*.tes"),
             ("Text Files", "*.txt"),
             ("All Files", "*.*")
         ]
         filepath = filedialog.askopenfilename(
             title="Datei öffnen",
             filetypes=filetypes,
-            defaultextension=".ees"
+            defaultextension=".tes"
         )
 
         if filepath:
@@ -582,14 +582,14 @@ BEISPIELE:
     def save_file_as(self):
         """Speichert die Datei unter neuem Namen."""
         filetypes = [
-            ("EES Files", "*.ees"),
+            ("TES Files", "*.tes"),
             ("Text Files", "*.txt"),
             ("All Files", "*.*")
         ]
         filepath = filedialog.asksaveasfilename(
             title="Datei speichern",
             filetypes=filetypes,
-            defaultextension=".ees"
+            defaultextension=".tes"
         )
 
         if filepath:
