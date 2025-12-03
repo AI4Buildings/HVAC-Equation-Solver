@@ -103,6 +103,14 @@ def _blackbody_single(T_kelvin, lambda1, lambda2):
     # Bei lambda1 = 0: verwende sehr kleine untere Grenze (Singularität bei 0)
     lambda1_eff = max(lambda1, 1e-6)
 
+    # Praktische Obergrenze für Integration:
+    # Bei sehr großen Wellenlängen ist praktisch keine Strahlungsenergie mehr vorhanden.
+    # Wien'sches Verschiebungsgesetz: λ_max ≈ 2898/T µm
+    # Bei 100 * λ_max ist >99.9999% der Strahlung erfasst
+    # Praktische Obergrenze: 10000 µm (10 mm) reicht für alle Temperaturen > -173°C
+    lambda_max_practical = max(10000.0, 100 * 2898.0 / T_kelvin)
+    lambda2_eff = min(lambda2, lambda_max_practical)
+
     # Gesamte emittierte Leistung nach Stefan-Boltzmann
     total_power = SIGMA * T_kelvin**4
 
@@ -110,9 +118,9 @@ def _blackbody_single(T_kelvin, lambda1, lambda2):
     result, error = integrate.quad(
         _blackbody_integrand,
         lambda1_eff,
-        lambda2,
+        lambda2_eff,
         args=(T_kelvin,),
-        limit=100
+        limit=200
     )
 
     # Normiere auf Gesamtleistung
