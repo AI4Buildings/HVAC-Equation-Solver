@@ -97,6 +97,22 @@ equation_solver/
 | Wellenlänge λ | µm |
 | Spektrale Emission Eb | W/(m²·µm) |
 | Gesamtemission E | W/m² |
+| **Winkel (Trigonometrie)** | **Grad (°)** |
+
+### Trigonometrische Funktionen
+
+Alle trigonometrischen Funktionen verwenden **Grad** (wie EES):
+
+```
+cos(60) = 0.5       {60°}
+sin(30) = 0.5       {30°}
+tan(45) = 1.0       {45°}
+acos(0.5) = 60      {Ergebnis in Grad}
+asin(0.5) = 30      {Ergebnis in Grad}
+atan(1) = 45        {Ergebnis in Grad}
+```
+
+Hyperbolische Funktionen (`sinh`, `cosh`, `tanh`) verwenden Radiant.
 
 ## Bekannte Einschränkungen / Design-Entscheidungen
 

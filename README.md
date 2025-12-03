@@ -127,6 +127,7 @@ Der Solver verwendet eine robuste Block-Dekomposition:
 | Temperatur T | °C |
 | Druck p | bar |
 | Enthalpie h | kJ/kg |
+| Winkel (sin, cos, tan) | Grad (°) |
 | Entropie s | kJ/(kg·K) |
 | Dichte rho | kg/m³ |
 | Dampfqualität x | - (0-1) |

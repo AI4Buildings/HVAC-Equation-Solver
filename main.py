@@ -1045,6 +1045,19 @@ BEISPIELE:
 
             self.write_solution(f"\nStatus: {msg}\n\n")
 
+            # Spezialfall: Keine Gleichungen, aber Konstanten berechnet
+            if not valid and len(equations) == 0 and initial_values:
+                self.write_solution("=== Berechnete Konstanten ===\n", "info")
+                for var in sorted(initial_values.keys()):
+                    val = initial_values[var]
+                    if abs(val) >= 1e6 or (abs(val) < 1e-4 and val != 0):
+                        self.write_solution(f"{var} = {val:.6e}\n")
+                    else:
+                        self.write_solution(f"{var} = {val:.6g}\n")
+                self.last_solution = initial_values.copy()
+                self.status_var.set("Konstanten berechnet")
+                return
+
             if not valid:
                 self.write_solution("FEHLER: ", "error")
                 self.write_solution(f"{msg}\n")

@@ -8,9 +8,34 @@ Unterstützt Parameterstudien (Sweeps) mit Vektor-Variablen.
 import numpy as np
 from scipy.optimize import fsolve
 from typing import List, Set, Dict, Tuple, Optional, Any, Union
-from numpy import sin, cos, tan, exp, log, log10, sqrt, pi
-from numpy import arcsin as asin, arccos as acos, arctan as atan
+from numpy import exp, log, log10, sqrt, pi
 from numpy import sinh, cosh, tanh
+
+
+# Trigonometrische Funktionen in GRAD (wie EES)
+def sin(x):
+    """Sinus mit Argument in Grad."""
+    return np.sin(np.radians(x))
+
+def cos(x):
+    """Cosinus mit Argument in Grad."""
+    return np.cos(np.radians(x))
+
+def tan(x):
+    """Tangens mit Argument in Grad."""
+    return np.tan(np.radians(x))
+
+def asin(x):
+    """Arcussinus, Ergebnis in Grad."""
+    return np.degrees(np.arcsin(x))
+
+def acos(x):
+    """Arcuscosinus, Ergebnis in Grad."""
+    return np.degrees(np.arccos(x))
+
+def atan(x):
+    """Arcustangens, Ergebnis in Grad."""
+    return np.degrees(np.arctan(x))
 
 # Importiere Thermodynamik-Funktionen
 try:

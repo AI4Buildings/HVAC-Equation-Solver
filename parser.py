@@ -321,12 +321,22 @@ def parse_equations(text: str) -> Tuple[List[str], Set[str], dict, dict]:
             except ValueError:
                 # Versuche als arithmetischen Ausdruck auszuwerten
                 try:
+                    # Trigonometrische Funktionen in GRAD (wie EES)
+                    def _sin(x): return np.sin(np.radians(x))
+                    def _cos(x): return np.cos(np.radians(x))
+                    def _tan(x): return np.tan(np.radians(x))
+                    def _asin(x): return np.degrees(np.arcsin(x))
+                    def _acos(x): return np.degrees(np.arccos(x))
+                    def _atan(x): return np.degrees(np.arctan(x))
+
                     # Nur sichere mathematische Operationen erlauben
                     value = eval(right, {"__builtins__": {}}, {
                         'pi': np.pi, 'e': np.e,
-                        'sin': np.sin, 'cos': np.cos, 'tan': np.tan,
+                        'sin': _sin, 'cos': _cos, 'tan': _tan,
+                        'asin': _asin, 'acos': _acos, 'atan': _atan,
                         'sqrt': np.sqrt, 'log': np.log, 'log10': np.log10,
-                        'exp': np.exp, 'abs': abs
+                        'exp': np.exp, 'abs': abs,
+                        'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh
                     })
                     if isinstance(value, (int, float)) and np.isfinite(value):
                         initial_values[var_name] = float(value)
