@@ -1,6 +1,6 @@
 # HVAC Equation Solver
 
-EES-ähnlicher Gleichungslöser mit CoolProp-Integration für thermodynamische Stoffdaten und Feuchte-Luft-Berechnungen.
+Equation solver for teaching and rapid calculation of thermodynamic state changes in HVAC systems. Integrates CoolProp for thermodynamic properties and humid air calculations. Also used for developing benchmark tests for AI agents in building services engineering.
 
 ## Installation
 
@@ -29,7 +29,7 @@ python3 main.py
 ```
 equation_solver/
 ├── main.py           # Tkinter GUI (Hauptanwendung)
-├── parser.py         # EES-Syntax → Python Konvertierung
+├── parser.py         # Equation syntax → Python conversion
 ├── solver.py         # Block-Dekomposition + Bracket-Suche Solver
 ├── thermodynamics.py # CoolProp Wrapper mit Einheitenumrechnung
 ├── humid_air.py      # CoolProp HumidAirProp Wrapper für feuchte Luft
@@ -39,12 +39,12 @@ equation_solver/
 ## Kernfunktionen
 
 ### Parser (parser.py)
-- Konvertiert EES-Syntax zu Python: `^` → `**`, `ln` → `log`
-- Kommentare: `"..."` und `{...}`
-- Thermodynamik-Funktionsaufrufe: `enthalpy(water, T=100, p=1)` → `enthalpy('water', T=100, p=1)`
-- Extrahiert Variablen aus Gleichungen (filtert Funktionsnamen und Parameter-Keys)
-- Vektor-Syntax: `T = 0:10:100` (start:step:end) oder `T = 0:100` (start:end, step=1)
-- **Direkte Zuweisungen** wie `T_1 = 450` oder `m = 10000/3600` werden als Konstanten behandelt
+- Converts equation syntax to Python: `^` → `**`, `ln` → `log`
+- Comments: `"..."` and `{...}`
+- Thermodynamic function calls: `enthalpy(water, T=100, p=1)` → `enthalpy('water', T=100, p=1)`
+- Extracts variables from equations (filters function names and parameter keys)
+- Vector syntax: `T = 0:10:100` (start:step:end) or `T = 0:100` (start:end, step=1)
+- **Direct assignments** like `T_1 = 450` or `m = 10000/3600` are treated as constants
 
 ### Solver (solver.py)
 
@@ -59,7 +59,7 @@ equation_solver/
 - **Bracket-Suche**: ~1200 Testpunkte über Größenordnungen von 0.01 bis 10,000,000
 - **Adaptive Verfeinerung**: Bei großen Funktionsänderungen wird das Intervall verfeinert
 - **Brent's Methode**: Robuste Wurzelfindung bei Vorzeichenwechsel (funktioniert auch bei Singularitäten)
-- **Standard-Startwert**: 1.0 für alle Variablen (wie EES)
+- **Standard-Startwert**: 1.0 für alle Variablen
 
 #### Parameterstudien
 - Sweep-Variablen werden als Konstanten für jeden Punkt behandelt
@@ -67,9 +67,9 @@ equation_solver/
 - Vektorisierte Auswertung für direkte Funktionen ohne Iteration
 
 ### Thermodynamik (thermodynamics.py)
-- CoolProp-Wrapper mit EES-kompatibler Syntax
-- Funktionen: `enthalpy`, `entropy`, `density`, `volume`, `intenergy`, `quality`, `temperature`, `pressure`, `viscosity`, `conductivity`, `prandtl`, `cp`, `cv`, `soundspeed`
-- Input-Parameter: `T`, `p`, `h`, `s`, `x`, `rho`, `d`, `u`, `v`
+- CoolProp wrapper with intuitive syntax
+- Functions: `enthalpy`, `entropy`, `density`, `volume`, `intenergy`, `quality`, `temperature`, `pressure`, `viscosity`, `conductivity`, `prandtl`, `cp`, `cv`, `soundspeed`
+- Input parameters: `T`, `p`, `h`, `s`, `x`, `rho`, `d`, `u`, `v`
 
 ### Humid Air (humid_air.py)
 - CoolProp HumidAirProp wrapper for psychrometric calculations
@@ -155,7 +155,7 @@ rho = HumidAir(rho_tot, T=25, rh=0.5, p_tot=1)
 
 ### Trigonometrische Funktionen
 
-Alle trigonometrischen Funktionen verwenden **Grad** (wie EES):
+Alle trigonometrischen Funktionen verwenden **Grad**:
 
 ```
 cos(60) = 0.5       {60°}

@@ -1,37 +1,37 @@
 # HVAC Equation Solver
 
-Ein EES-ähnlicher (Engineering Equation Solver) Gleichungslöser mit CoolProp-Integration für thermodynamische Stoffdaten und Feuchte-Luft-Berechnungen.
+Equation solver for teaching and rapid calculation of thermodynamic state changes in HVAC systems. Also used for developing benchmark tests for AI agents in building services engineering.
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
 ## Features
 
-- **EES-kompatible Syntax**: Gleichungen in natürlicher Form (`h = enthalpy(water, T=100, p=1)`)
-- **Thermodynamische Stoffdaten**: Über 100 Fluide via CoolProp
-- **Feuchte Luft**: Psychrometrische Berechnungen (`h = HumidAir(h, T=25, rh=0.5, p_tot=1)`)
-- **Robuster Solver**: Block-Dekomposition mit Bracket-Suche und Brent's Methode
-- **Parameterstudien**: Einfache Sweep-Syntax (`p = 25:5:50`)
-- **Schwarzkörper-Strahlung**: Planck'sche Strahlungsfunktionen
-- **GUI**: Tkinter-basierte Benutzeroberfläche mit Plot-Funktionen
+- **Intuitive Syntax**: Equations in natural form (`h = enthalpy(water, T=100, p=1)`)
+- **Thermodynamic Properties**: Over 100 fluids via CoolProp
+- **Humid Air**: Psychrometric calculations (`h = HumidAir(h, T=25, rh=0.5, p_tot=1)`)
+- **Robust Solver**: Block decomposition with bracket search and Brent's method
+- **Parameter Studies**: Simple sweep syntax (`p = 25:5:50`)
+- **Blackbody Radiation**: Planck's radiation functions
+- **GUI**: Tkinter-based user interface with plotting capabilities
 
 ## Installation
 
-### Erforderliche Bibliotheken
+### Required Libraries
 
 ```bash
 pip install numpy scipy CoolProp matplotlib
 ```
 
-| Bibliothek | Version | Zweck |
-|------------|---------|-------|
-| numpy | >= 1.20 | Array-Operationen, mathematische Funktionen |
-| scipy | >= 1.7 | Numerische Solver (fsolve, brentq) |
-| CoolProp | >= 6.4 | Thermodynamische Stoffdaten |
-| matplotlib | >= 3.5 | Diagramme und Plots (optional) |
-| tkinter | - | GUI (in Python Standard-Library enthalten) |
+| Library | Version | Purpose |
+|---------|---------|---------|
+| numpy | >= 1.20 | Array operations, mathematical functions |
+| scipy | >= 1.7 | Numerical solvers (fsolve, brentq) |
+| CoolProp | >= 6.4 | Thermodynamic property data |
+| matplotlib | >= 3.5 | Diagrams and plots (optional) |
+| tkinter | - | GUI (included in Python standard library) |
 
-### Programm starten
+### Start the Program
 
 ```bash
 python3 main.py
@@ -39,42 +39,42 @@ python3 main.py
 
 ## Screenshot
 
-Die Anwendung bietet eine intuitive Oberfläche zur Eingabe von Gleichungen und Anzeige der Ergebnisse:
+The application provides an intuitive interface for entering equations and displaying results:
 
-- **Linkes Fenster**: Gleichungseingabe mit EES-Syntax
-- **Rechtes Fenster**: Lösungsergebnisse
-- **Plot-Funktion**: Für Parameterstudien
+- **Left Panel**: Equation input
+- **Right Panel**: Solution results
+- **Plot Function**: For parameter studies
 
-## Architektur
+## Architecture
 
 ```
 HVAC-Equation-Solver/
-├── main.py           # Tkinter GUI (Hauptanwendung)
-├── parser.py         # EES-Syntax → Python Konvertierung
-├── solver.py         # Block-Dekomposition + Bracket-Suche Solver
-├── thermodynamics.py # CoolProp Wrapper mit Einheitenumrechnung
-├── humid_air.py      # CoolProp HumidAirProp Wrapper
-├── radiation.py      # Schwarzkörper-Strahlungsfunktionen
-├── CLAUDE.md         # Technische Dokumentation
-└── README.md         # Diese Datei
+├── main.py           # Tkinter GUI (main application)
+├── parser.py         # Equation syntax → Python conversion
+├── solver.py         # Block decomposition + bracket search solver
+├── thermodynamics.py # CoolProp wrapper with unit conversion
+├── humid_air.py      # CoolProp HumidAirProp wrapper
+├── radiation.py      # Blackbody radiation functions
+├── CLAUDE.md         # Technical documentation
+└── README.md         # This file
 ```
 
-## Schnellstart
+## Quick Start
 
-### Einfaches Beispiel
+### Simple Example
 
 ```
-{Wasserdampf bei 100°C und 1 bar}
+{Steam at 100°C and 1 bar}
 T = 100
 p = 1
 h = enthalpy(water, T=T, p=p)
 s = entropy(water, T=T, p=p)
 ```
 
-### Feuchte Luft Beispiel
+### Humid Air Example
 
 ```
-{Feuchte Luft bei 25°C und 50% rel. Feuchte}
+{Humid air at 25°C and 50% relative humidity}
 T = 25
 rh = 0.5
 p_tot = 1
@@ -83,14 +83,14 @@ w = HumidAir(w, T=T, rh=rh, p_tot=p_tot)
 T_dp = HumidAir(T_dp, T=T, rh=rh, p_tot=p_tot)
 ```
 
-### Gleichungssystem
+### System of Equations
 
 ```
 x + y = 10
 x - y = 2
 ```
 
-### Parameterstudie
+### Parameter Study
 
 ```
 T = 0:10:100
@@ -98,27 +98,27 @@ p = 1
 h = enthalpy(water, T=T, p=p)
 ```
 
-## Dampfkraftprozess Beispiel
+## Steam Power Cycle Example
 
 ```
-{Frischdampf}
+{Live steam}
 m_dot = 10000/3600
 T_1 = 450
 p_1 = 30
 h_1 = enthalpy(water, p=p_1, T=T_1)
 s_1 = entropy(water, p=p_1, T=T_1)
 
-{Turbine mit isentropem Wirkungsgrad}
+{Turbine with isentropic efficiency}
 p_2 = 2.5
 eta_s = 0.8
 h_2s = enthalpy(water, p=p_2, s=s_1)
 eta_s = (h_2-h_1)/(h_2s-h_1)
 
-{Turbinenleistung}
+{Turbine power}
 W_dot = m_dot*(h_1-h_2)
 ```
 
-## Klimaanlage Beispiel
+## Air Conditioning Example
 
 ```
 {Outdoor air}
@@ -140,63 +140,63 @@ m_dot_a = 1000/3600
 Q_dot_cool = m_dot_a*(h_1-h_2)
 ```
 
-## Solver-Strategie
+## Solver Strategy
 
-Der Solver verwendet eine robuste Block-Dekomposition:
+The solver uses robust block decomposition:
 
-1. **Konstanten zuweisen**: Explizite Definitionen wie `T_1 = 450`
-2. **Direkte Auswertung**: Gleichungen der Form `var = ausdruck` werden sequentiell berechnet
-3. **Einzelne Unbekannte**: Bracket-Suche + Brent's Methode
-4. **Blockweise Lösung**: Zusammenhängende Gleichungsblöcke mit `scipy.fsolve`
-5. **Iteration**: Schritte 2-4 werden wiederholt bis alle Gleichungen gelöst sind
+1. **Assign Constants**: Explicit definitions like `T_1 = 450`
+2. **Direct Evaluation**: Equations of the form `var = expression` are calculated sequentially
+3. **Single Unknowns**: Bracket search + Brent's method
+4. **Block-wise Solution**: Connected equation blocks with `scipy.fsolve`
+5. **Iteration**: Steps 2-4 are repeated until all equations are solved
 
-### Robuste Wurzelfindung
+### Robust Root Finding
 
-- ~1200 Testpunkte über Größenordnungen von 0.01 bis 10,000,000
-- Adaptive Verfeinerung bei Singularitäten
-- Standard-Startwert 1.0 für alle Variablen (wie EES)
+- ~1200 test points across magnitudes from 0.01 to 10,000,000
+- Adaptive refinement at singularities
+- Default initial value 1.0 for all variables
 
-## Einheiten
+## Units
 
-| Größe | Einheit |
-|-------|---------|
-| Temperatur T | °C |
-| Druck p | bar |
-| Enthalpie h | kJ/kg |
-| Winkel (sin, cos, tan) | Grad (°) |
-| Entropie s | kJ/(kg·K) |
-| Dichte rho | kg/m³ |
-| Dampfqualität x | - (0-1) |
+| Property | Unit |
+|----------|------|
+| Temperature T | °C |
+| Pressure p | bar |
+| Enthalpy h | kJ/kg |
+| Angles (sin, cos, tan) | Degrees (°) |
+| Entropy s | kJ/(kg·K) |
+| Density rho | kg/m³ |
+| Vapor quality x | - (0-1) |
 
-### Feuchte Luft Einheiten
+### Humid Air Units
 
-| Größe | Einheit |
-|-------|---------|
-| Enthalpie h | kJ/kg_dry_air |
+| Property | Unit |
+|----------|------|
+| Enthalpy h | kJ/kg_dry_air |
 | Humidity ratio w | kg_water/kg_dry_air |
 | Relative humidity rh | - (0-1) |
 | Dew point T_dp | °C |
 | Wet bulb T_wb | °C |
 
-## Verfügbare Funktionen
+## Available Functions
 
-### Thermodynamik
+### Thermodynamics
 `enthalpy`, `entropy`, `density`, `volume`, `intenergy`, `quality`, `temperature`, `pressure`, `viscosity`, `conductivity`, `prandtl`, `cp`, `cv`, `soundspeed`
 
-### Feuchte Luft (HumidAir)
+### Humid Air (HumidAir)
 Output: `T`, `h`, `rh`, `w`, `p_w`, `rho_tot`, `rho_a`, `rho_w`, `T_dp`, `T_wb`
 Input: `T`, `p_tot`, `rh`, `w`, `p_w`, `h`
 
-### Mathematik
+### Mathematics
 `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log10`, `sqrt`, `abs`, `pi`
 
-### Strahlung
+### Radiation
 `Eb`, `Blackbody`, `Blackbody_cumulative`, `Wien`, `Stefan_Boltzmann`
 
-## Lizenz
+## License
 
 MIT License
 
-## Beiträge
+## Contributions
 
-Beiträge sind willkommen! Bitte erstellen Sie einen Pull Request oder öffnen Sie ein Issue.
+Contributions are welcome! Please create a pull request or open an issue.
