@@ -184,7 +184,7 @@ Der Solver verwendet eine robuste Block-Dekomposition:
 `enthalpy`, `entropy`, `density`, `volume`, `intenergy`, `quality`, `temperature`, `pressure`, `viscosity`, `conductivity`, `prandtl`, `cp`, `cv`, `soundspeed`
 
 ### Feuchte Luft (HumidAir)
-Output: `h`, `rh`, `w`, `p_w`, `rho_tot`, `rho_a`, `rho_w`, `T_dp`, `T_wb`
+Output: `T`, `h`, `rh`, `w`, `p_w`, `rho_tot`, `rho_a`, `rho_w`, `T_dp`, `T_wb`
 Input: `T`, `p_tot`, `rh`, `w`, `p_w`, `h`
 
 ### Mathematik

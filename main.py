@@ -471,6 +471,7 @@ HUMID AIR FUNCTIONS (CoolProp HumidAirProp):
 Syntax: HumidAir(property, T=..., rh=..., p_tot=...)
 
 Output Properties (first argument):
+  T        Dry bulb temperature [C]
   h        Specific enthalpy [kJ/kg_dry_air]
   rh       Relative humidity [-] (0-1)
   w        Humidity ratio [kg_water/kg_dry_air]
@@ -492,6 +493,7 @@ Input Parameters (exactly 3 required):
 Examples:
   h = HumidAir(h, T=25, rh=0.5, p_tot=1)
   w = HumidAir(w, T=30, rh=0.6, p_tot=1)
+  T = HumidAir(T, h=50, rh=0.5, p_tot=1)
   T_dp = HumidAir(T_dp, T=25, w=0.01, p_tot=1)
   T_wb = HumidAir(T_wb, T=30, rh=0.5, p_tot=1)
   rho = HumidAir(rho_tot, T=25, rh=0.5, p_tot=1)

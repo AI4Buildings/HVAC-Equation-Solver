@@ -75,6 +75,7 @@ equation_solver/
 - CoolProp HumidAirProp wrapper for psychrometric calculations
 - Syntax: `HumidAir(property, T=..., rh=..., p_tot=...)`
 - **Output properties** (first argument):
+  - `T` - Dry bulb temperature [°C]
   - `h` - Specific enthalpy [kJ/kg_dry_air]
   - `rh` - Relative humidity [-] (0-1)
   - `w` - Humidity ratio [kg_water/kg_dry_air]
@@ -97,6 +98,9 @@ equation_solver/
 ```
 {Calculate enthalpy}
 h = HumidAir(h, T=25, rh=0.5, p_tot=1)
+
+{Calculate temperature from enthalpy}
+T = HumidAir(T, h=50, rh=0.5, p_tot=1)
 
 {Dew point temperature}
 T_dp = HumidAir(T_dp, T=30, w=0.012, p_tot=1)
