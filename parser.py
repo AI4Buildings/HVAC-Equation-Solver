@@ -298,34 +298,35 @@ def extract_variables(equation: str) -> Set[str]:
             replacement = ' '.join(str(v) for v in values if not v.replace('.', '').isdigit())
             temp_eq = temp_eq.replace(match, replacement)
 
-    # Entferne Funktionsnamen aus der Suche
+    # Entferne Funktionsnamen aus der Suche - NUR wenn sie als Funktionen verwendet werden
+    # (d.h. mit Klammern dahinter), nicht wenn sie als Variablen verwendet werden
     for func in MATH_FUNCTIONS:
-        temp_eq = re.sub(rf'\b{func}\b', '', temp_eq)
+        # Entferne nur func(...) Aufrufe, nicht alleinstehende func
+        temp_eq = re.sub(rf'\b{func}\s*\(', '(', temp_eq)
 
     for func in THERMO_FUNCTIONS:
-        temp_eq = re.sub(rf'\b{func}\b', '', temp_eq, flags=re.IGNORECASE)
+        # Entferne nur func(...) Aufrufe, nicht alleinstehende func
+        temp_eq = re.sub(rf'\b{func}\s*\(', '(', temp_eq, flags=re.IGNORECASE)
 
     for func in RADIATION_FUNCTIONS:
-        temp_eq = re.sub(rf'\b{func}\b', '', temp_eq, flags=re.IGNORECASE)
+        # Entferne nur func(...) Aufrufe, nicht alleinstehende func
+        temp_eq = re.sub(rf'\b{func}\s*\(', '(', temp_eq, flags=re.IGNORECASE)
 
     for func in HUMID_AIR_FUNCTIONS:
-        temp_eq = re.sub(rf'\b{func}\b', '', temp_eq, flags=re.IGNORECASE)
+        # Entferne nur func(...) Aufrufe, nicht alleinstehende func
+        temp_eq = re.sub(rf'\b{func}\s*\(', '(', temp_eq, flags=re.IGNORECASE)
 
     # Finde alle Bezeichner (Variablen)
     # Variablen können Buchstaben, Zahlen und Unterstriche enthalten
     # aber nicht mit einer Zahl beginnen
     variables = set(re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', temp_eq))
 
-    # Entferne Python-Keywords und math functions
-    # NICHT die thermo_param_keys entfernen - diese können auch Variablennamen sein!
-    # Die Parameter-Keys innerhalb von Thermo-Funktionen wurden bereits oben entfernt
+    # Entferne Python-Keywords
+    # NICHT die Funktionsnamen entfernen - sie können als Variablen verwendet werden
+    # (z.B. cp = cv + R). Die Funktionsaufrufe wurden bereits oben aus temp_eq entfernt.
     python_keywords = {'and', 'or', 'not', 'True', 'False', 'None', 'log', 'log10'}
 
     variables -= python_keywords
-    variables -= MATH_FUNCTIONS
-    variables -= THERMO_FUNCTIONS
-    variables -= RADIATION_FUNCTIONS
-    variables -= HUMID_AIR_FUNCTIONS
 
     return variables
 
