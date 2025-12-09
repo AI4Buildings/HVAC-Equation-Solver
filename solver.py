@@ -8,7 +8,7 @@ Unterstützt Parameterstudien (Sweeps) mit Vektor-Variablen.
 import numpy as np
 from scipy.optimize import fsolve
 from typing import List, Set, Dict, Tuple, Optional, Any, Union
-from numpy import exp, log, log10, sqrt, pi, e
+from numpy import exp, log, log10, sqrt, pi
 from numpy import sinh, cosh, tanh
 
 
@@ -91,7 +91,7 @@ def create_equation_function(equations: List[str], variables: List[str],
             'asin': asin, 'acos': acos, 'atan': atan,
             'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
             'exp': exp, 'log': log, 'log10': log10,
-            'sqrt': sqrt, 'abs': np.abs, 'pi': pi, 'e': e
+            'sqrt': sqrt, 'abs': np.abs, 'pi': pi
         })
 
         # Füge Thermodynamik-Funktionen hinzu
@@ -335,7 +335,7 @@ def create_equation_function_with_sweep(
             'asin': asin, 'acos': acos, 'atan': atan,
             'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
             'exp': exp, 'log': log, 'log10': log10,
-            'sqrt': sqrt, 'abs': np.abs, 'pi': pi, 'e': e
+            'sqrt': sqrt, 'abs': np.abs, 'pi': pi
         })
 
         # Füge Thermodynamik-Funktionen hinzu
@@ -371,7 +371,7 @@ def _get_eval_context():
         'asin': asin, 'acos': acos, 'atan': atan,
         'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
         'exp': exp, 'log': log, 'log10': log10,
-        'sqrt': sqrt, 'abs': np.abs, 'pi': pi, 'e': e
+        'sqrt': sqrt, 'abs': np.abs, 'pi': pi
     }
     if THERMO_AVAILABLE:
         context.update(THERMO_FUNCTIONS)

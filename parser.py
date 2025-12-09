@@ -326,7 +326,7 @@ def extract_variables(equation: str) -> Set[str]:
     # (z.B. cp = cv + R). Die Funktionsaufrufe wurden bereits oben aus temp_eq entfernt.
     # Aber pi und e sind Konstanten (keine Funktionen), daher hier filtern.
     python_keywords = {'and', 'or', 'not', 'True', 'False', 'None', 'log', 'log10'}
-    math_constants = {'pi', 'e'}  # Mathematische Konstanten (keine Funktionen)
+    math_constants = {'pi'}  # Mathematische Konstanten (keine Funktionen), e bleibt Variable
 
     variables -= python_keywords
     variables -= math_constants
