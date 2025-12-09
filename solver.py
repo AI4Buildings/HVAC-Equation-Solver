@@ -390,6 +390,107 @@ def _get_equation_unknowns(equation: str, known_vars: Set[str], all_vars: Set[st
     return (found_vars & all_vars) - known_vars
 
 
+def _find_minimal_coupled_core(
+    equations: List[str],
+    variables: Set[str],
+    known_vars: Set[str]
+) -> Tuple[List[str], Set[str]]:
+    """
+    Findet den minimalen gekoppelten Kern eines Gleichungsblocks.
+
+    Der Kern besteht aus Variablen, die in mehreren Gleichungen vorkommen
+    und daher wirklich simultan gelöst werden müssen. Variablen die nur
+    in einer Gleichung als Unbekannte vorkommen, können sequentiell
+    nach dem Kern gelöst werden.
+
+    Returns:
+        (equations, variables) für den minimalen Kern
+    """
+    import re
+
+    # Zähle wie oft jede Variable als Unbekannte in Gleichungen vorkommt
+    var_occurrence = {}
+    eq_to_unknowns = {}
+
+    for eq in equations:
+        unknowns = _get_equation_unknowns(eq, known_vars, variables)
+        eq_to_unknowns[eq] = unknowns
+        for var in unknowns:
+            var_occurrence[var] = var_occurrence.get(var, 0) + 1
+
+    # Finde Variablen die in mehr als einer Gleichung vorkommen (wirklich gekoppelt)
+    coupled_vars = {var for var, count in var_occurrence.items() if count > 1}
+
+    if not coupled_vars:
+        # Keine gekoppelten Variablen - nimm den kleinsten Block
+        # (sollte nicht passieren wenn wir hier sind)
+        return equations, variables
+
+    # Finde Gleichungen die gekoppelte Variablen enthalten
+    # und prüfe welche Variable sie "definieren" (links allein)
+    core_eqs = []
+    core_vars = set()
+
+    for eq in equations:
+        unknowns = eq_to_unknowns[eq]
+
+        # Prüfe welche Variable diese Gleichung definiert
+        match = re.match(r'^\(([a-zA-Z_][a-zA-Z0-9_]*)\)\s*-\s*\(', eq)
+        defined_var = match.group(1) if match and match.group(1) in unknowns else None
+
+        # Gleichung gehört zum Kern wenn:
+        # 1. Sie eine gekoppelte Variable definiert, ODER
+        # 2. Sie mehrere gekoppelte Variablen enthält (ohne eine zu definieren)
+        coupled_in_eq = unknowns & coupled_vars
+
+        if defined_var and defined_var in coupled_vars:
+            core_eqs.append(eq)
+            core_vars.add(defined_var)
+        elif len(coupled_in_eq) > 1 and not defined_var:
+            # Gleichung verbindet mehrere gekoppelte Variablen
+            core_eqs.append(eq)
+            core_vars.update(coupled_in_eq)
+
+    # Stelle sicher dass alle gekoppelten Variablen im Kern sind
+    # und wir gleich viele Gleichungen wie Variablen haben
+    if len(core_eqs) == len(core_vars) and core_vars:
+        return core_eqs, core_vars
+
+    # Fallback: Iterativ den kleinsten zusammenhängenden Block finden
+    # Starte mit einer gekoppelten Variable und expandiere minimal
+    if coupled_vars:
+        start_var = min(coupled_vars, key=lambda v: var_occurrence[v])
+        core_vars = {start_var}
+        core_eqs = []
+
+        # Finde alle Gleichungen die diese Variable enthalten
+        for eq in equations:
+            if start_var in eq_to_unknowns[eq]:
+                core_eqs.append(eq)
+                core_vars.update(eq_to_unknowns[eq])
+
+        # Iterativ expandieren bis Block quadratisch ist
+        max_iter = len(equations)
+        for _ in range(max_iter):
+            if len(core_eqs) == len(core_vars):
+                break
+
+            # Füge Gleichungen hinzu für Variablen die noch nicht genug Gleichungen haben
+            for var in list(core_vars):
+                var_eqs = [eq for eq in equations if var in eq_to_unknowns[eq]]
+                for eq in var_eqs:
+                    if eq not in core_eqs:
+                        core_eqs.append(eq)
+                        core_vars.update(eq_to_unknowns[eq])
+                        break
+
+        if len(core_eqs) == len(core_vars):
+            return core_eqs, core_vars
+
+    # Wenn nichts funktioniert, gib den ursprünglichen Block zurück
+    return equations, variables
+
+
 def _find_equation_blocks(
     equations: List[str],
     variables: Set[str],
@@ -469,11 +570,156 @@ def _solve_equation_block(
     """
     Löst einen Block von Gleichungen mit gemeinsamen Unbekannten.
 
+    Bei größeren Blöcken wird zuerst versucht, den Block iterativ zu zerlegen
+    und kleinere Sub-Blöcke sequentiell zu lösen.
+
     Args:
         manual_initial: Manuelle Startwerte (haben Priorität)
 
     Returns:
         (success, solution_dict, message)
+    """
+    if not equations or not variables:
+        return True, {}, "Leerer Block"
+
+    n_vars = len(variables)
+    n_eqs = len(equations)
+
+    if n_eqs != n_vars:
+        return False, {}, f"Block nicht quadratisch: {n_eqs} Gleichungen, {n_vars} Unbekannte"
+
+    # Bei größeren Blöcken: Versuche iterative Zerlegung
+    if n_vars > 3:
+        success, solution, msg = _solve_block_iteratively(
+            equations, variables, known_values, context, manual_initial
+        )
+        if success:
+            return success, solution, msg
+
+    # Fallback: Löse den gesamten Block simultan
+    return _solve_block_simultaneously(
+        equations, variables, known_values, context, manual_initial
+    )
+
+
+def _solve_block_iteratively(
+    equations: List[str],
+    variables: Set[str],
+    known_values: Dict[str, float],
+    context: dict,
+    manual_initial: Dict[str, float] = None
+) -> Tuple[bool, Dict[str, float], str]:
+    """
+    Versucht einen Block iterativ zu lösen, indem nach jeder gelösten
+    Gleichung geprüft wird, ob weitere Gleichungen direkt oder mit
+    nur einer Unbekannten lösbar sind.
+    """
+    remaining_eqs = list(equations)
+    remaining_vars = set(variables)
+    local_known = known_values.copy()
+    solved_values = {}
+    stats = {'direct': 0, 'single': 0, 'subblocks': []}
+
+    max_iterations = len(equations) * 2 + 1
+    iteration = 0
+
+    while remaining_eqs and iteration < max_iterations:
+        iteration += 1
+        made_progress = False
+
+        # Phase 1: Direkte Auswertung für Gleichungen der Form "(var) - (expr)"
+        for eq in remaining_eqs[:]:
+            for var in list(remaining_vars):
+                if eq.startswith(f"({var}) - ("):
+                    expr = eq[len(f"({var}) - "):]
+                    if expr.startswith("(") and expr.endswith(")"):
+                        expr = expr[1:-1]
+
+                    try:
+                        local_context = context.copy()
+                        local_context.update(local_known)
+                        result = eval(expr, {"__builtins__": {}}, local_context)
+
+                        if np.isfinite(result):
+                            solved_values[var] = float(result)
+                            local_known[var] = float(result)
+                            remaining_vars.discard(var)
+                            remaining_eqs.remove(eq)
+                            stats['direct'] += 1
+                            made_progress = True
+                            break
+                    except Exception:
+                        pass
+
+        if made_progress:
+            continue
+
+        # Phase 2: Gleichungen mit einer Unbekannten iterativ lösen
+        for eq in remaining_eqs[:]:
+            unknowns = _get_equation_unknowns(eq, set(local_known.keys()), remaining_vars)
+            if len(unknowns) == 1:
+                unknown = list(unknowns)[0]
+                success, value = _solve_single_unknown(
+                    eq, unknown, local_known, context, manual_initial
+                )
+                if success:
+                    solved_values[unknown] = value
+                    local_known[unknown] = value
+                    remaining_vars.discard(unknown)
+                    remaining_eqs.remove(eq)
+                    stats['single'] += 1
+                    made_progress = True
+                    break
+
+        if made_progress:
+            continue
+
+        # Phase 3: Finde und löse den minimalen gekoppelten Kern
+        if remaining_eqs:
+            core_eqs, core_vars = _find_minimal_coupled_core(
+                remaining_eqs, remaining_vars, set(local_known.keys())
+            )
+
+            if core_vars and len(core_eqs) == len(core_vars):
+                success, sub_solution, _ = _solve_block_simultaneously(
+                    core_eqs, core_vars, local_known, context, manual_initial
+                )
+
+                if success:
+                    solved_values.update(sub_solution)
+                    local_known.update(sub_solution)
+                    remaining_vars -= core_vars
+                    for eq in core_eqs:
+                        if eq in remaining_eqs:
+                            remaining_eqs.remove(eq)
+                    stats['subblocks'].append(len(core_vars))
+                    made_progress = True
+
+        if not made_progress:
+            break
+
+    if not remaining_eqs:
+        msg_parts = []
+        if stats['direct'] > 0:
+            msg_parts.append(f"{stats['direct']} direkt")
+        if stats['single'] > 0:
+            msg_parts.append(f"{stats['single']} iterativ")
+        if stats['subblocks']:
+            msg_parts.append(f"Sub-Blöcke: {'+'.join(str(b) for b in stats['subblocks'])}")
+        return True, solved_values, f"Block zerlegt ({', '.join(msg_parts)})"
+
+    return False, solved_values, f"Iterative Zerlegung unvollständig"
+
+
+def _solve_block_simultaneously(
+    equations: List[str],
+    variables: Set[str],
+    known_values: Dict[str, float],
+    context: dict,
+    manual_initial: Dict[str, float] = None
+) -> Tuple[bool, Dict[str, float], str]:
+    """
+    Löst einen Block von Gleichungen simultan mit fsolve.
     """
     if not equations or not variables:
         return True, {}, "Leerer Block"
