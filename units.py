@@ -220,6 +220,12 @@ def _convert_to_standard(quantity) -> Tuple[float, str]:
         if unit_str in ('micrometer', 'um', 'µm', 'micron'):
             return (float(quantity.magnitude), 'µm')
 
+        # Spezialfall: Kelvin für Strahlungsberechnungen nicht zu °C konvertieren
+        # Stefan-Boltzmann und Planck-Funktionen benötigen absolute Temperatur
+        # Wenn Benutzer explizit K angibt, soll der Wert in K bleiben
+        if unit_str in ('kelvin', 'K'):
+            return (float(quantity.magnitude), 'K')
+
         dim_str = str(quantity.dimensionality)
 
         # Suche passende Standard-Einheit

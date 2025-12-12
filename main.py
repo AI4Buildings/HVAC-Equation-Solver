@@ -1015,25 +1015,37 @@ class EquationSolverApp(ctk.CTk):
                         break
 
                 # Phase 2.5: Constraint-Propagation für implizite Gleichungen
+                # Mehrere Durchläufe, da neue Einheiten weitere Ableitungen ermöglichen
                 if CONSTRAINT_PROPAGATION_AVAILABLE:
-                    known_units = {var: uv.original_unit for var, uv in self.current_unit_values.items()
-                                   if uv.original_unit}
-                    # Füge Konstanten ohne Einheit als dimensionslos hinzu
-                    for var in constants:
-                        if var not in known_units:
-                            known_units[var] = ''  # dimensionslos
-                    inferred = propagate_all_units(original_equations, known_units)
-                    for var, unit in inferred.items():
-                        if var in solution:
-                            # Aktualisiere auch wenn schon vorhanden aber ohne Einheit
-                            existing = self.current_unit_values.get(var)
-                            if existing is None or not existing.original_unit:
-                                val = solution[var]
-                                # Für Arrays: Verwende ersten Wert für UnitValue
-                                if isinstance(val, np.ndarray):
-                                    self.current_unit_values[var] = UnitValue.from_si(float(val[0]), unit)
-                                else:
-                                    self.current_unit_values[var] = UnitValue.from_si(val, unit)
+                    for propagation_pass in range(5):  # Max 5 Durchläufe
+                        known_units = {var: uv.original_unit for var, uv in self.current_unit_values.items()
+                                       if uv.original_unit}
+                        # Füge Konstanten ohne Einheit als dimensionslos hinzu
+                        for var in constants:
+                            if var not in known_units:
+                                known_units[var] = ''  # dimensionslos
+
+                        inferred = propagate_all_units(original_equations, known_units)
+
+                        if not inferred:
+                            break  # Keine neuen Einheiten gefunden
+
+                        found_new = False
+                        for var, unit in inferred.items():
+                            if var in solution and unit:  # Nur wenn unit nicht leer ist
+                                # Aktualisiere auch wenn schon vorhanden aber ohne Einheit
+                                existing = self.current_unit_values.get(var)
+                                if existing is None or not existing.original_unit:
+                                    val = solution[var]
+                                    # Für Arrays: Verwende ersten Wert für UnitValue
+                                    if isinstance(val, np.ndarray):
+                                        self.current_unit_values[var] = UnitValue.from_si(float(val[0]), unit)
+                                    else:
+                                        self.current_unit_values[var] = UnitValue.from_si(val, unit)
+                                    found_new = True
+
+                        if not found_new:
+                            break  # Keine neuen Einheiten hinzugefügt
 
                 # Phase 3: Einheiten-Konsistenzprüfung
                 if CONSTRAINT_PROPAGATION_AVAILABLE and analysis:

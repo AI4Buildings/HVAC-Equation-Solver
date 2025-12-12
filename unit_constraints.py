@@ -77,9 +77,9 @@ def unit_from_quantity(quantity) -> str:
 
         # Bekannte Dimensionen zu HVAC-Einheiten mappen
         if dim == ureg.watt.dimensionality:
-            return 'kW'
+            return 'kW'  # Leistung in kW (HVAC-Standard)
         if dim == ureg.joule.dimensionality:
-            return 'kJ'
+            return 'kJ'  # Energie in kJ (HVAC-Standard)
         if dim == ureg.pascal.dimensionality:
             return 'bar'
         if dim == ureg('kg/s').dimensionality:
@@ -489,6 +489,27 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
                 left_var = left_ast.body.id
                 if left_var not in known_units and right_dim.is_known:
                     inferred[left_var] = right_dim.unit
+            # NEU: Prüfe ob linke Seite eine Potenz einer Variable ist (z.B. T_3^4)
+            elif isinstance(left_ast.body, ast.BinOp) and isinstance(left_ast.body.op, ast.Pow):
+                if isinstance(left_ast.body.left, ast.Name):
+                    left_var = left_ast.body.left.id
+                    if left_var not in known_units and right_dim.is_known and right_dim.quantity is not None:
+                        # Extrahiere den Exponenten
+                        exp_value = None
+                        if isinstance(left_ast.body.right, ast.Constant):
+                            exp_value = left_ast.body.right.value
+                        elif isinstance(left_ast.body.right, ast.Num):
+                            exp_value = left_ast.body.right.n
+
+                        if exp_value is not None and exp_value != 0:
+                            # var^n = expr → var = expr^(1/n)
+                            try:
+                                var_quantity = right_dim.quantity ** (1.0 / exp_value)
+                                var_unit = unit_from_quantity(var_quantity)
+                                if var_unit:
+                                    inferred[left_var] = var_unit
+                            except:
+                                pass
         except:
             pass
 
@@ -499,6 +520,27 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
                 right_var = right_ast.body.id
                 if right_var not in known_units and left_dim.is_known:
                     inferred[right_var] = left_dim.unit
+            # NEU: Prüfe ob rechte Seite eine Potenz einer Variable ist
+            elif isinstance(right_ast.body, ast.BinOp) and isinstance(right_ast.body.op, ast.Pow):
+                if isinstance(right_ast.body.left, ast.Name):
+                    right_var = right_ast.body.left.id
+                    if right_var not in known_units and left_dim.is_known and left_dim.quantity is not None:
+                        # Extrahiere den Exponenten
+                        exp_value = None
+                        if isinstance(right_ast.body.right, ast.Constant):
+                            exp_value = right_ast.body.right.value
+                        elif isinstance(right_ast.body.right, ast.Num):
+                            exp_value = right_ast.body.right.n
+
+                        if exp_value is not None and exp_value != 0:
+                            # expr = var^n → var = expr^(1/n)
+                            try:
+                                var_quantity = left_dim.quantity ** (1.0 / exp_value)
+                                var_unit = unit_from_quantity(var_quantity)
+                                if var_unit:
+                                    inferred[right_var] = var_unit
+                            except:
+                                pass
         except:
             pass
 
@@ -510,6 +552,21 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
                 right_ast = ast.parse(right_str, mode='eval')
                 reverse_inferred = _infer_from_mult_div(right_ast.body, left_dim, known_dims)
                 inferred.update(reverse_inferred)
+                # Auch Addition/Subtraktion behandeln
+                reverse_inferred_add = _infer_from_addition(right_ast.body, left_dim, known_dims)
+                inferred.update(reverse_inferred_add)
+            except:
+                pass
+
+        # NEU: Rückwärts-Inferenz für linke Seite wenn rechte Seite bekannt ist
+        if right_dim.is_known:
+            try:
+                left_ast = ast.parse(left_str, mode='eval')
+                reverse_inferred = _infer_from_mult_div(left_ast.body, right_dim, known_dims)
+                inferred.update(reverse_inferred)
+                # Auch Addition/Subtraktion behandeln
+                reverse_inferred_add = _infer_from_addition(left_ast.body, right_dim, known_dims)
+                inferred.update(reverse_inferred_add)
             except:
                 pass
 
@@ -594,6 +651,104 @@ def _infer_from_mult_div(node, target_dim: DimensionInfo, known_dims: Dict[str, 
                     inferred.update(sub_inferred)
             except:
                 pass
+
+    return inferred
+
+
+def _infer_from_addition(node, target_dim: DimensionInfo, known_dims: Dict[str, DimensionInfo]) -> Dict[str, str]:
+    """
+    Rückwärts-Inferenz für Addition/Subtraktion (rekursiv).
+
+    Bei Addition/Subtraktion haben alle Terme die gleiche Dimension wie das Ergebnis.
+    target = a + b → a und b haben beide target's Dimension
+    """
+    if not PINT_AVAILABLE:
+        return {}
+
+    inferred = {}
+
+    if not isinstance(node, ast.BinOp):
+        # Einzelne Variable oder Zahl
+        if isinstance(node, ast.Name):
+            var_name = node.id
+            if var_name not in known_dims and target_dim.is_known:
+                unit = target_dim.unit if target_dim.unit else ""
+                if unit:
+                    inferred[var_name] = unit
+        return inferred
+
+    if isinstance(node.op, (ast.Add, ast.Sub)):
+        # Bei Addition/Subtraktion: Alle Terme haben gleiche Dimension
+        # Rekursiv beide Seiten mit target_dim inferieren
+        left_inferred = _infer_from_addition(node.left, target_dim, known_dims)
+        inferred.update(left_inferred)
+
+        right_inferred = _infer_from_addition(node.right, target_dim, known_dims)
+        inferred.update(right_inferred)
+
+    elif isinstance(node.op, ast.Mult):
+        # Bei Multiplikation: a * b = target
+        # Wenn b dimensionslos und bekannt → a = target
+        # Wenn a dimensionslos und bekannt → b = target
+        left_dim = _get_dimension(node.left, known_dims)
+        right_dim = _get_dimension(node.right, known_dims)
+
+        # Wenn left dimensionslos (bekannt), dann hat right die target Dimension
+        if left_dim.is_known and left_dim.is_dimensionless and not right_dim.is_known:
+            right_inferred = _infer_from_addition(node.right, target_dim, known_dims)
+            inferred.update(right_inferred)
+
+        # Wenn right dimensionslos (bekannt), dann hat left die target Dimension
+        if right_dim.is_known and right_dim.is_dimensionless and not left_dim.is_known:
+            left_inferred = _infer_from_addition(node.left, target_dim, known_dims)
+            inferred.update(left_inferred)
+
+        # Spezialfall: sigma * T^4 → wenn sigma bekannt, kann T abgeleitet werden
+        # left hat Einheit, right ist Potenz einer Variable
+        if left_dim.is_known and left_dim.quantity is not None:
+            if isinstance(node.right, ast.BinOp) and isinstance(node.right.op, ast.Pow):
+                if isinstance(node.right.left, ast.Name):
+                    var_name = node.right.left.id
+                    if var_name not in known_dims:
+                        # Extrahiere Exponenten
+                        exp_value = None
+                        if isinstance(node.right.right, ast.Constant):
+                            exp_value = node.right.right.value
+                        elif isinstance(node.right.right, ast.Num):
+                            exp_value = node.right.right.n
+
+                        if exp_value is not None and exp_value != 0 and target_dim.quantity is not None:
+                            try:
+                                # target = left * var^exp → var^exp = target / left
+                                pow_quantity = target_dim.quantity / left_dim.quantity
+                                var_quantity = pow_quantity ** (1.0 / exp_value)
+                                unit = unit_from_quantity(var_quantity)
+                                if unit:
+                                    inferred[var_name] = unit
+                            except:
+                                pass
+
+        # Symmetrisch: right hat Einheit, left ist Potenz
+        if right_dim.is_known and right_dim.quantity is not None:
+            if isinstance(node.left, ast.BinOp) and isinstance(node.left.op, ast.Pow):
+                if isinstance(node.left.left, ast.Name):
+                    var_name = node.left.left.id
+                    if var_name not in known_dims:
+                        exp_value = None
+                        if isinstance(node.left.right, ast.Constant):
+                            exp_value = node.left.right.value
+                        elif isinstance(node.left.right, ast.Num):
+                            exp_value = node.left.right.n
+
+                        if exp_value is not None and exp_value != 0 and target_dim.quantity is not None:
+                            try:
+                                pow_quantity = target_dim.quantity / right_dim.quantity
+                                var_quantity = pow_quantity ** (1.0 / exp_value)
+                                unit = unit_from_quantity(var_quantity)
+                                if unit:
+                                    inferred[var_name] = unit
+                            except:
+                                pass
 
     return inferred
 
