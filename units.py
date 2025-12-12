@@ -33,12 +33,12 @@ ureg.define('@alias second = s')
 ureg.define('@alias liter = L = l')
 
 
-# Einheiten-Mapping für CoolProp-Funktionen (Ausgabe-Einheiten)
+# Einheiten-Mapping für CoolProp-Funktionen (Ausgabe-Einheiten, Temperatur in K intern)
 COOLPROP_UNITS = {
     'enthalpy': 'kJ/kg',
     'entropy': 'kJ/(kg*K)',
     'density': 'kg/m^3',
-    'temperature': 'degC',
+    'temperature': 'K',
     'pressure': 'bar',
     'cp': 'kJ/(kg*K)',
     'cv': 'kJ/(kg*K)',
@@ -51,14 +51,14 @@ COOLPROP_UNITS = {
     'soundspeed': 'm/s',
 }
 
-# Einheiten für HumidAir-Funktionen
+# Einheiten für HumidAir-Funktionen (Temperaturen in K intern)
 HUMID_AIR_UNITS = {
     'h': 'kJ/kg',
     'w': 'kg/kg',
     'rh': '',  # dimensionslos (0-1)
-    't': 'degC',
-    't_dp': 'degC',
-    't_wb': 'degC',
+    't': 'K',
+    't_dp': 'K',
+    't_wb': 'K',
     'rho_tot': 'kg/m^3',
     'rho_a': 'kg/m^3',
     'rho_w': 'kg/m^3',
