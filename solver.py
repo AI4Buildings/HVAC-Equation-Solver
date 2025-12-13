@@ -1100,14 +1100,17 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
 
     try:
         x = initial_guess
-        h = 1e-8  # Schrittweite für numerische Ableitung
 
         for iteration in range(30):  # Max 30 Iterationen
             fx = func(x)
 
-            # Prüfe ob bereits Lösung gefunden
-            if abs(fx) < 1e-10:
+            # Prüfe ob bereits Lösung gefunden (relative Toleranz für große Werte)
+            if abs(fx) < 1e-10 * max(1.0, abs(x)):
                 return True, x
+
+            # Skalierte Schrittweite für numerische Ableitung
+            # Bei großen x-Werten (z.B. 1e6) brauchen wir größere h
+            h = max(1e-12, 1e-8 * max(1.0, abs(x)))
 
             # Numerische Ableitung
             fx_plus = func(x + h)
@@ -1142,23 +1145,37 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
         pass  # Newton fehlgeschlagen, verwende Bracket-Suche
 
     # === Phase 2: Robuste Bracket-Suche (Fallback) ===
+    # Bestimme Skalierung basierend auf bekannten Werten
+    # Bei SI-Einheiten können Werte sehr groß sein (z.B. 1e6 für Pa oder J/kg)
+    max_known = max((abs(v) for v in known_values.values() if isinstance(v, (int, float))), default=1.0)
+    scale = max(1.0, 10 ** (int(np.log10(max_known + 1)) - 1)) if max_known > 10 else 1.0
+
     # Erzeuge Testpunkte mit dichter Abdeckung
     test_points = set()
 
-    # Logarithmische Skalierung für extreme Bereiche
-    for exp in range(-2, 8):
-        test_points.update([10**exp, -10**exp, 0.5 * 10**exp, 2 * 10**exp])
+    # Logarithmische Skalierung für extreme Bereiche (erweitert bis 1e9)
+    for exp in range(-2, 10):
+        base = 10**exp
+        test_points.update([base, -base, 0.5*base, 2*base, 5*base, -0.5*base, -2*base, -5*base])
 
-    # Dichte Abdeckung (0-500 in 1er Schritten, 500-1000 in 10er Schritten)
+    # Feine Abdeckung im Bereich 0-100
+    test_points.update([i * 0.1 for i in range(-1000, 1001)])
+
+    # Dichte Abdeckung im skalierten Bereich (0 bis scale)
+    if scale > 1:
+        for i in range(0, 1001):
+            test_points.add(i * scale / 1000)
+            test_points.add(-i * scale / 1000)
+        # Gröbere Abdeckung bis 10*scale
+        for i in range(100, 1001, 10):
+            test_points.add(i * scale / 100)
+            test_points.add(-i * scale / 100)
+
+    # Standard-Abdeckung für kleinere Werte
     test_points.update(range(0, 501, 1))
     test_points.update(range(-500, 0, 1))
     test_points.update(range(500, 1001, 10))
     test_points.update(range(-1000, -500, 10))
-
-    # Feinere Abdeckung im Bereich 0-10
-    test_points.update([i * 0.1 for i in range(-100, 101)])
-
-    # Gröbere Abdeckung für größere Werte
     test_points.update(range(1000, 10001, 100))
     test_points.update(range(-10000, -1000, 100))
 
@@ -1253,15 +1270,22 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
     if best_root is not None and best_residual < 1e-4:
         return True, float(best_root)
 
-    # Fallback: fsolve mit Standard-Startwert 1.0
+    # Fallback: fsolve mit verschiedenen Startwerten
+    # Erweiterte Startwerte basierend auf Skalierung für große SI-Werte
     import warnings
-    for x0 in [1.0, 0.1, 10.0, 100.0]:
+    fallback_starts = [1.0, 0.1, 10.0, 100.0, 1000.0, 10000.0]
+    if scale > 1:
+        fallback_starts.extend([scale, scale * 0.1, scale * 0.5, scale * 2, scale * 10])
+
+    for x0 in fallback_starts:
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 solution, info, ier, _ = fsolve(func, x0, full_output=True)
             residual = abs(info['fvec'][0])
-            if ier == 1 and np.isfinite(solution[0]) and residual < 1e-8:
+            # Relative Toleranz für große Werte
+            tol = 1e-8 * max(1.0, abs(solution[0]))
+            if ier == 1 and np.isfinite(solution[0]) and residual < tol:
                 return True, float(solution[0])
         except Exception:
             pass

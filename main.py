@@ -132,6 +132,9 @@ class EquationSolverApp(ctk.CTk):
         self.value_labels = {}  # Referenzen auf Value-Labels (für Unit-Änderung)
         self.unit_dropdowns = {}  # Referenzen auf Unit-Dropdowns
         self.temp_display_unit = ctk.StringVar(value="degC")  # Standard-Anzeigeeinheit für Temperaturen (°C)
+        self.pressure_display_unit = ctk.StringVar(value="bar")  # Standard: bar (statt Pa)
+        self.energy_display_unit = ctk.StringVar(value="kJ")  # Standard: kJ (statt J)
+        self.power_display_unit = ctk.StringVar(value="kW")  # Standard: kW (statt W)
 
         # Grid-Konfiguration
         self.grid_columnconfigure(0, weight=1)
@@ -1171,9 +1174,26 @@ class EquationSolverApp(ctk.CTk):
             has_unit = UNITS_AVAILABLE and unit_value and unit_value.original_unit
 
             # Wert für Anzeige bestimmen
-            # Prüfe ob es sich um eine Temperatur handelt
+            # Prüfe Einheiten-Typen für bevorzugte Anzeige
             temp_units = {'K', 'degC', 'degF', 'kelvin', 'celsius', 'fahrenheit', '°C', '°F'}
+            pressure_units = {'Pa', 'bar', 'kPa', 'MPa', 'mbar', 'atm', 'psi'}
+            energy_units = {'J', 'kJ', 'J/kg', 'kJ/kg', 'J/(kg*K)', 'kJ/(kg*K)', 'J/kg/K', 'kJ/kg/K'}
+            power_units = {'W', 'kW', 'MW', 'W/m^2', 'kW/m^2', 'W/m²', 'kW/m²'}
+
             is_temperature = has_unit and unit_value.original_unit in temp_units
+            is_pressure = has_unit and unit_value.original_unit in pressure_units
+            is_energy = has_unit and any(eu in unit_value.original_unit for eu in ['J/kg', 'J/(kg', 'J/m'])
+            is_power = has_unit and any(pu in unit_value.original_unit for pu in ['W/m', 'W/(m'])
+
+            # Spezifischere Prüfung für reine J und W Einheiten
+            if has_unit:
+                unit_str = unit_value.original_unit
+                if unit_str in {'J', 'kJ', 'MJ'} or unit_str.startswith('J/') or unit_str.startswith('kJ/'):
+                    is_energy = True
+                if unit_str in {'W', 'kW', 'MW'} or unit_str.startswith('W/') or unit_str.startswith('kW/'):
+                    is_power = True
+                if unit_str in {'Pa', 'bar', 'kPa', 'MPa'}:
+                    is_pressure = True
 
             if isinstance(val, np.ndarray):
                 # Für Arrays: Zeige Bereich (min → max) für bessere Übersicht
@@ -1185,12 +1205,30 @@ class EquationSolverApp(ctk.CTk):
                     val_text = f"[{len(val)}× {min_val:.4g}→{max_val:.4g}]"
                 display_val = val
             else:
-                # Bei Einheiten: Original-Wert in Original-Einheit anzeigen
+                # Bei Einheiten: Bevorzugte Anzeige-Einheit verwenden
                 if has_unit:
                     # Für Temperaturen: Setting-Einheit als Standard verwenden
                     if is_temperature:
                         preferred_unit = self.temp_display_unit.get()
                         display_val = unit_value.to(preferred_unit)
+                    # Für Druck: bar oder Pa je nach Setting
+                    elif is_pressure:
+                        preferred_unit = self.pressure_display_unit.get()
+                        display_val = unit_value.to(preferred_unit)
+                    # Für Energie: kJ oder J je nach Setting
+                    elif is_energy:
+                        if self.energy_display_unit.get() == "kJ":
+                            # Konvertiere J-basierte Einheiten zu kJ
+                            display_val = unit_value.calc_value / 1000
+                        else:
+                            display_val = unit_value.calc_value
+                    # Für Leistung: kW oder W je nach Setting
+                    elif is_power:
+                        if self.power_display_unit.get() == "kW":
+                            # Konvertiere W-basierte Einheiten zu kW
+                            display_val = unit_value.calc_value / 1000
+                        else:
+                            display_val = unit_value.calc_value
                     else:
                         display_val = unit_value.original_value
                 else:
@@ -1205,9 +1243,29 @@ class EquationSolverApp(ctk.CTk):
             if has_unit and not isinstance(val, np.ndarray):
                 compatible_units = get_compatible_units(unit_value.original_unit)
 
-                # Für Temperaturen: Setting-Einheit als Standard im Dropdown
+                # Bevorzugte Einheit basierend auf Settings bestimmen
                 if is_temperature:
                     default_unit = self.temp_display_unit.get()
+                elif is_pressure:
+                    default_unit = self.pressure_display_unit.get()
+                elif is_energy:
+                    # Konvertiere J/kg -> kJ/kg etc.
+                    base_unit = unit_value.original_unit
+                    if self.energy_display_unit.get() == "kJ" and base_unit.startswith('J'):
+                        default_unit = 'k' + base_unit
+                    elif self.energy_display_unit.get() == "J" and base_unit.startswith('kJ'):
+                        default_unit = base_unit[1:]  # Remove 'k'
+                    else:
+                        default_unit = base_unit
+                elif is_power:
+                    # Konvertiere W -> kW etc.
+                    base_unit = unit_value.original_unit
+                    if self.power_display_unit.get() == "kW" and base_unit.startswith('W'):
+                        default_unit = 'k' + base_unit
+                    elif self.power_display_unit.get() == "W" and base_unit.startswith('kW'):
+                        default_unit = base_unit[1:]  # Remove 'k'
+                    else:
+                        default_unit = base_unit
                 else:
                     default_unit = unit_value.original_unit
 
@@ -1298,7 +1356,7 @@ class EquationSolverApp(ctk.CTk):
         """Zeigt den Settings Dialog."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Settings")
-        dialog.geometry("320x280")
+        dialog.geometry("360x520")  # Größer für alle Einheiten-Optionen
         dialog.transient(self)
         dialog.grab_set()
 
@@ -1347,6 +1405,58 @@ class EquationSolverApp(ctk.CTk):
             text_color=COLORS["text_dim"],
             justify="left"
         ).pack(padx=40, anchor="w", pady=(2, 0))
+
+        # Separator
+        separator2 = ctk.CTkFrame(dialog, height=2, fg_color=COLORS["bg_frame"])
+        separator2.pack(fill="x", padx=20, pady=15)
+
+        # Pressure Display Unit
+        ctk.CTkLabel(dialog, text="Pressure Display:", font=ctk.CTkFont(size=13)).pack(pady=(5, 10))
+
+        pressure_unit_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        pressure_unit_frame.pack(padx=20, anchor="w")
+
+        ctk.CTkRadioButton(
+            pressure_unit_frame, text="Pa", variable=self.pressure_display_unit,
+            value="Pa", font=ctk.CTkFont(size=12), fg_color=COLORS["accent"]
+        ).pack(side="left", padx=(0, 20))
+
+        ctk.CTkRadioButton(
+            pressure_unit_frame, text="bar", variable=self.pressure_display_unit,
+            value="bar", font=ctk.CTkFont(size=12), fg_color=COLORS["accent"]
+        ).pack(side="left")
+
+        # Energy Display Unit
+        ctk.CTkLabel(dialog, text="Energy Display:", font=ctk.CTkFont(size=13)).pack(pady=(15, 10))
+
+        energy_unit_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        energy_unit_frame.pack(padx=20, anchor="w")
+
+        ctk.CTkRadioButton(
+            energy_unit_frame, text="J (J/kg, J/(kg·K))", variable=self.energy_display_unit,
+            value="J", font=ctk.CTkFont(size=12), fg_color=COLORS["accent"]
+        ).pack(side="left", padx=(0, 20))
+
+        ctk.CTkRadioButton(
+            energy_unit_frame, text="kJ (kJ/kg, kJ/(kg·K))", variable=self.energy_display_unit,
+            value="kJ", font=ctk.CTkFont(size=12), fg_color=COLORS["accent"]
+        ).pack(side="left")
+
+        # Power Display Unit
+        ctk.CTkLabel(dialog, text="Power Display:", font=ctk.CTkFont(size=13)).pack(pady=(15, 10))
+
+        power_unit_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        power_unit_frame.pack(padx=20, anchor="w")
+
+        ctk.CTkRadioButton(
+            power_unit_frame, text="W", variable=self.power_display_unit,
+            value="W", font=ctk.CTkFont(size=12), fg_color=COLORS["accent"]
+        ).pack(side="left", padx=(0, 20))
+
+        ctk.CTkRadioButton(
+            power_unit_frame, text="kW", variable=self.power_display_unit,
+            value="kW", font=ctk.CTkFont(size=12), fg_color=COLORS["accent"]
+        ).pack(side="left")
 
         # Close Button
         ctk.CTkButton(dialog, text="Close", command=dialog.destroy).pack(pady=20)
