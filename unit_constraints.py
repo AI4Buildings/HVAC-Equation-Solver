@@ -1695,11 +1695,13 @@ def compute_expression_dimension(expr: str, unit_map: Dict[str, str]) -> Tuple[A
     # Ersetze func(...) durch FUNC_PLACEHOLDER
     expr_for_vars = expr
 
-    # Entferne Thermodynamik-Funktionsaufrufe (inkl. Argumente)
+    # Entferne Thermodynamik- und Strahlungs-Funktionsaufrufe (inkl. Argumente)
     thermo_funcs = ['enthalpy', 'entropy', 'density', 'pressure', 'temperature',
                     'volume', 'intenergy', 'quality', 'cp', 'cv',
                     'viscosity', 'conductivity', 'prandtl', 'soundspeed',
-                    'HumidAir', 'humidair']
+                    'HumidAir', 'humidair',
+                    # Strahlungsfunktionen
+                    'Eb', 'Blackbody', 'Blackbody_cumulative', 'Wien', 'Stefan_Boltzmann']
     for func in thermo_funcs:
         expr_for_vars = re.sub(rf'\b{func}\s*\([^)]*\)', 'FUNC_RESULT', expr_for_vars, flags=re.IGNORECASE)
 
@@ -1767,6 +1769,17 @@ def compute_expression_dimension(expr: str, unit_map: Dict[str, str]) -> Tuple[A
         'conductivity': 'watt/(meter*kelvin)',
         'prandtl': 'dimensionless',
         'soundspeed': 'meter/second',
+        # Strahlungsfunktionen
+        'Eb': 'watt/(meter**2*micrometer)',      # Spektrale Emissionsleistung W/(m²·µm)
+        'eb': 'watt/(meter**2*micrometer)',      # Alias lowercase
+        'Blackbody': 'dimensionless',            # Anteil der Strahlung (0-1)
+        'blackbody': 'dimensionless',            # Alias lowercase
+        'Blackbody_cumulative': 'dimensionless', # Kumulativer Anteil
+        'blackbody_cumulative': 'dimensionless', # Alias lowercase
+        'Wien': 'micrometer',                    # Wellenlänge maximaler Emission
+        'wien': 'micrometer',                    # Alias lowercase
+        'Stefan_Boltzmann': 'watt/meter**2',     # Gesamtemission W/m²
+        'stefan_boltzmann': 'watt/meter**2',     # Alias lowercase
     }
 
     for func, unit in thermo_units.items():
@@ -1896,20 +1909,28 @@ def check_equation_dimensions(equation: str, unit_map: Dict[str, str]) -> Option
             'equation': equation
         }
 
-    # SCHRITT 2: Prüfe ob linke Seite NUR EINE Variable ist (ohne Einheit in unit_map)
-    # In diesem Fall erbt die Variable die Dimension der rechten Seite
-    # → Keine Warnung nötig!
+    # SCHRITT 2: Prüfe ob linke Seite NUR EINE Variable ist
     left_stripped = left.strip()
-
-    # Prüfe ob linke Seite eine einzelne Variable ist (Variablenname-Muster)
     var_pattern = r'^[a-zA-Z_][a-zA-Z0-9_]*$'
+
     if re.match(var_pattern, left_stripped):
         # Linke Seite ist eine einzelne Variable
+
+        # FALL A: Variable nicht in unit_map → erbt Dimension von rechts
         if left_stripped not in unit_map:
             # Die Variable ist nicht in unit_map, aber die rechte Seite ist berechenbar
             # → Die Variable ERBT die Dimension der rechten Seite
             # → Keine Warnung, da dimensional konsistent per Definition
             # (z.B. eta_th = W1/W2 → eta_th erbt "dimensionless")
+            return None
+
+        # FALL B: Rechte Seite ist dimensionslos (nur Zahlen/Konstanten)
+        # Bei Konstantenzuweisungen wie "G = 1000" mit "G: W/m²" keine Warnung
+        # Der User definiert explizit einen Wert mit bekannter Einheit
+        dimensionless_dim = ureg.dimensionless.dimensionality
+        if right_dim == dimensionless_dim:
+            # Rechte Seite ist nur eine Zahl → Konstantenzuweisung
+            # Keine dimensionale Prüfung nötig
             return None
 
     # SCHRITT 3: Normale Prüfung - berechne Dimension der linken Seite
