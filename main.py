@@ -1079,8 +1079,9 @@ class EquationSolverApp(ctk.CTk):
                 # Phase 3: Einheiten-Konsistenzprüfung
                 if CONSTRAINT_PROPAGATION_AVAILABLE and analysis:
                     # Verwende calc_unit für konsistente Prüfung
+                    # WICHTIG: Auch leere Einheiten ('') bedeuten "dimensionslos" und müssen enthalten sein!
                     known_units = {var: uv.calc_unit for var, uv in self.current_unit_values.items()
-                                   if uv.calc_unit}
+                                   if uv.calc_unit is not None}
                     # Füge Konstanten ohne Einheit als dimensionslos hinzu
                     for var in constants:
                         if var not in known_units:
