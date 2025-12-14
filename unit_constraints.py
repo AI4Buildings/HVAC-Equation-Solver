@@ -88,6 +88,10 @@ def unit_from_quantity(quantity) -> str:
             return 'm^3/s'
         if dim == ureg('m/s').dimensionality:
             return 'm/s'
+        if dim == ureg('m/s^2').dimensionality:  # Beschleunigung
+            return 'm/s^2'
+        if dim == ureg('N').dimensionality:  # Kraft (kg*m/s²)
+            return 'N'
         if dim == ureg('kg/m^3').dimensionality:
             return 'kg/m^3'
         if dim == ureg('J/kg').dimensionality:
@@ -307,6 +311,66 @@ class DimensionInferrer(ast.NodeVisitor):
         """Funktionsaufrufe."""
         if isinstance(node.func, ast.Name):
             func_name = node.func.id
+            func_lower = func_name.lower()
+
+            # CoolProp Thermodynamik-Funktionen (SI-Einheiten)
+            THERMO_FUNCTIONS = {
+                'enthalpy': 'J/kg',
+                'entropy': 'J/(kg*K)',
+                'pressure': 'Pa',
+                'temperature': 'K',
+                'density': 'kg/m^3',
+                'volume': 'm^3/kg',
+                'quality': '',  # dimensionslos
+                'intenergy': 'J/kg',
+                'cp': 'J/(kg*K)',
+                'cv': 'J/(kg*K)',
+                'viscosity': 'Pa*s',
+                'conductivity': 'W/(m*K)',
+                'soundspeed': 'm/s',
+                'prandtl': '',  # dimensionslos
+            }
+
+            if func_lower in THERMO_FUNCTIONS:
+                unit = THERMO_FUNCTIONS[func_lower]
+                if unit and PINT_AVAILABLE:
+                    try:
+                        quantity = get_dimension_from_unit(unit)
+                        return DimensionInfo(unit, quantity)
+                    except:
+                        pass
+                return DimensionInfo(unit if unit else "", ureg.Quantity(1.0, 'dimensionless') if PINT_AVAILABLE else None)
+
+            # HumidAir-Funktion - Einheit hängt vom ersten Argument ab
+            HUMID_AIR_UNITS = {
+                'h': 'J/kg',
+                'w': '',  # kg/kg ist dimensionslos
+                'rh': '',  # dimensionslos (0-1)
+                't': 'K',
+                't_dp': 'K',
+                't_wb': 'K',
+                'rho_tot': 'kg/m^3',
+                'rho_a': 'kg/m^3',
+                'rho_w': 'kg/m^3',
+                'p_w': 'Pa',
+                'p_tot': 'Pa',
+            }
+
+            if func_lower in ('humidair',):
+                # Erstes Argument bestimmt die Ausgabe-Einheit
+                if node.args:
+                    first_arg = node.args[0]
+                    if isinstance(first_arg, ast.Name):
+                        prop = first_arg.id.lower()
+                        unit = HUMID_AIR_UNITS.get(prop, '')
+                        if unit and PINT_AVAILABLE:
+                            try:
+                                quantity = get_dimension_from_unit(unit)
+                                return DimensionInfo(unit, quantity)
+                            except:
+                                pass
+                        return DimensionInfo(unit if unit else "", ureg.Quantity(1.0, 'dimensionless') if PINT_AVAILABLE else None)
+                return DimensionInfo(None)
 
             # Trigonometrische und transzendente Funktionen
             if func_name in ('sin', 'cos', 'tan', 'asin', 'acos', 'atan',
@@ -318,6 +382,37 @@ class DimensionInferrer(ast.NodeVisitor):
             if func_name in ('Blackbody', 'blackbody', 'Blackbody_cumulative', 'blackbody_cumulative'):
                 # Gibt Bruchteil (0-1) zurück, dimensionslos
                 return DimensionInfo("", ureg.Quantity(1.0, 'dimensionless') if PINT_AVAILABLE else None)
+
+            # Strahlungs-Funktionen mit Einheiten
+            if func_lower == 'eb':
+                # Spektrale Emissionsleistung [W/(m²·µm)]
+                if PINT_AVAILABLE:
+                    try:
+                        quantity = ureg.Quantity(1.0, 'W/(m^2*micrometer)')
+                        return DimensionInfo('W/(m^2*um)', quantity)
+                    except:
+                        pass
+                return DimensionInfo('W/(m^2*um)', None)
+
+            if func_lower == 'wien':
+                # Wellenlänge [µm]
+                if PINT_AVAILABLE:
+                    try:
+                        quantity = ureg.Quantity(1.0, 'micrometer')
+                        return DimensionInfo('um', quantity)
+                    except:
+                        pass
+                return DimensionInfo('um', None)
+
+            if func_lower == 'stefan_boltzmann':
+                # Gesamtemission [W/m²]
+                if PINT_AVAILABLE:
+                    try:
+                        quantity = ureg.Quantity(1.0, 'W/m^2')
+                        return DimensionInfo('W/m^2', quantity)
+                    except:
+                        pass
+                return DimensionInfo('W/m^2', None)
 
             # sqrt
             if func_name == 'sqrt':
@@ -819,6 +914,143 @@ def propagate_all_units(equations: Dict[str, str], known_units: Dict[str, str],
 
 
 # ============================================================================
+# Function Argument Analysis for Bidirectional Unit Inference
+# ============================================================================
+
+# Einheiten für Funktionsargumente (SI-Einheiten)
+FUNCTION_ARGUMENT_UNITS = {
+    # CoolProp Thermodynamik-Argumente
+    'T': 'K',           # Temperatur
+    'p': 'Pa',          # Druck
+    'h': 'J/kg',        # Enthalpie
+    's': 'J/(kg*K)',    # Entropie
+    'x': '',            # Dampfqualität (dimensionslos)
+    'rho': 'kg/m^3',    # Dichte
+    'd': 'kg/m^3',      # Dichte (Alias)
+    'v': 'm^3/kg',      # Spezifisches Volumen
+    'u': 'J/kg',        # Innere Energie
+
+    # HumidAir Argumente
+    't': 'K',           # Temperatur (HumidAir verwendet lowercase)
+    'p_tot': 'Pa',      # Gesamtdruck
+    'rh': '',           # Relative Feuchte (dimensionslos)
+    'w': '',            # Feuchtebeladung (kg/kg, oft als dimensionslos behandelt)
+    'p_w': 'Pa',        # Partialdruck Wasserdampf
+}
+
+
+def infer_units_from_function_arguments(equation: str, known_units: Dict[str, str]) -> Dict[str, str]:
+    """
+    Leitet Einheiten aus Funktionsargumenten ab (bidirektional).
+
+    Bei einem Aufruf wie `h = enthalpy(water, T=T_1, p=p_2)`:
+    - T_1 muss Einheit K haben (weil T-Argument)
+    - p_2 muss Einheit Pa haben (weil p-Argument)
+
+    Args:
+        equation: Gleichung die Funktionsaufrufe enthalten kann
+        known_units: Dict bereits bekannter Einheiten
+
+    Returns:
+        Dict von neu abgeleiteten {variable: unit}
+    """
+    inferred = {}
+
+    # Entferne Kommentare
+    equation = _remove_comments(equation)
+
+    try:
+        # Parse die Gleichung
+        tree = ast.parse(equation.replace('^', '**'), mode='exec')
+
+        # Finde alle Funktionsaufrufe
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                func_name = node.func.id.lower()
+
+                # Nur relevante Funktionen analysieren
+                thermo_funcs = {'enthalpy', 'entropy', 'pressure', 'temperature',
+                               'density', 'volume', 'quality', 'intenergy',
+                               'cp', 'cv', 'viscosity', 'conductivity', 'soundspeed', 'prandtl'}
+                humid_funcs = {'humidair'}
+
+                if func_name not in thermo_funcs and func_name not in humid_funcs:
+                    continue
+
+                # Analysiere keyword-Argumente
+                for keyword in node.keywords:
+                    arg_name = keyword.arg
+                    if arg_name is None:
+                        continue
+
+                    arg_lower = arg_name.lower()
+
+                    # Finde die erwartete Einheit für dieses Argument
+                    expected_unit = FUNCTION_ARGUMENT_UNITS.get(arg_lower)
+                    if expected_unit is None:
+                        continue
+
+                    # Prüfe ob der Wert eine Variable ist
+                    if isinstance(keyword.value, ast.Name):
+                        var_name = keyword.value.id
+                        # Nur wenn Variable noch keine bekannte Einheit hat
+                        if var_name not in known_units and var_name not in inferred:
+                            if expected_unit:  # Nicht-leere Einheit
+                                inferred[var_name] = expected_unit
+
+    except Exception:
+        pass
+
+    return inferred
+
+
+def propagate_all_units_complete(equations: Dict[str, str], known_units: Dict[str, str],
+                                  max_iterations: int = 15) -> Dict[str, str]:
+    """
+    Vollständige Einheiten-Propagation mit allen Quellen.
+
+    Kombiniert:
+    1. Funktionsrückgabewerte (enthalpy → J/kg)
+    2. Funktionsargumente bidirektional (T=T_1 → T_1: K)
+    3. Arithmetische Constraint-Propagation (a + b = c → alle gleiche Einheit)
+
+    Args:
+        equations: Dict von {parsed_equation: original_equation}
+        known_units: Dict von {variable: unit} bekannter Einheiten
+
+    Returns:
+        Dict von ALLEN Einheiten (bekannte + abgeleitete)
+    """
+    if not PINT_AVAILABLE:
+        return known_units.copy()
+
+    all_units = known_units.copy()
+
+    for iteration in range(max_iterations):
+        found_new = False
+
+        for parsed_eq, original_eq in equations.items():
+            # 1. Funktionsargument-Analyse (bidirektional)
+            arg_inferred = infer_units_from_function_arguments(original_eq, all_units)
+            for var, unit in arg_inferred.items():
+                if var not in all_units:
+                    all_units[var] = unit
+                    found_new = True
+
+            # 2. Standard-Gleichungsanalyse (Rückgabewerte + Arithmetik)
+            eq_inferred = analyze_equation(original_eq, all_units)
+            for var, unit in eq_inferred.items():
+                if var not in all_units and unit is not None:
+                    all_units[var] = unit
+                    found_new = True
+
+        if not found_new:
+            break
+
+    return all_units
+
+
+# ============================================================================
 # Unit Consistency Checking
 # ============================================================================
 
@@ -1250,6 +1482,23 @@ def check_unit_consistency(var: str, units_per_eq: Dict[str, str]) -> Optional['
             if abs(factor - 1.0) > 0.01:  # Mehr als 1% Unterschied
                 # Zeige den intuitiveren Faktor (immer >= 1)
                 display_factor = factor if factor >= 1.0 else 1.0 / factor
+
+                # WICHTIG: Prüfe ob der Faktor ein bekannter SI-Präfix-Faktor ist
+                # Da intern alle Berechnungen in SI erfolgen, sind Faktoren wie
+                # 1000 (kJ vs J, kW vs W, kPa vs Pa) oder 1e5 (bar vs Pa)
+                # KEINE echten Fehler, sondern nur Anzeige-Unterschiede
+                si_prefix_factors = {1000, 1e6, 1e9, 1e-3, 1e-6, 1e-9, 1e5, 1e-5}
+                is_prefix_factor = any(abs(display_factor - f) < 0.01 or abs(display_factor - 1/f) < 0.01
+                                       for f in si_prefix_factors if f != 0)
+
+                # Prüfe ob beide Einheiten die gleiche physikalische Größe repräsentieren
+                # (gleiche Dimensionalität = gleiche physikalische Größe)
+                same_dimension = reference_qty.dimensionality == other_qty.dimensionality
+
+                # Wenn gleiche Dimension UND bekannter Präfix-Faktor → kein echter Fehler
+                if same_dimension and is_prefix_factor:
+                    continue  # Überspringe - das ist nur ein Anzeige-Unterschied
+
                 incompatible.append((eqs[i], other_unit, display_factor))
                 conversion_factors[eqs[i]] = display_factor
         except pint.DimensionalityError:
@@ -1370,10 +1619,10 @@ def check_all_unit_consistency(solution: Dict[str, float],
                                 equations: Dict[str, str],
                                 known_units: Dict[str, str]) -> list:
     """
-    Prüft die Einheiten-Konsistenz für alle Variablen in der Lösung.
+    Prüft die Einheiten-Konsistenz für alle Gleichungen mittels dimensionaler Analyse.
 
-    Für jede Variable wird geprüft, ob sie in verschiedenen Gleichungen
-    konsistente Einheiten hat.
+    Neuer Ansatz: Statt String-Vergleich wird mit pint geprüft, ob jede Gleichung
+    dimensional konsistent ist (Dimension links == Dimension rechts).
 
     Args:
         solution: Dict von {variable: value} der Lösung
@@ -1381,35 +1630,351 @@ def check_all_unit_consistency(solution: Dict[str, float],
         known_units: Dict von {variable: unit} bekannter Einheiten
 
     Returns:
-        Liste von UnitWarning für inkonsistente Variablen
+        Liste von UnitWarning für dimensionale Inkonsistenzen
     """
     from solver import UnitWarning
 
+    if not PINT_AVAILABLE:
+        return []
+
     warnings = []
 
-    if not PINT_AVAILABLE:
-        return warnings
+    for parsed_eq, original_eq in equations.items():
+        error = check_equation_dimensions(original_eq, known_units)
 
-    for var in solution.keys():
-        # Finde alle Gleichungen mit dieser Variable
-        var_equations = find_equations_for_variable(var, equations)
-
-        if len(var_equations) < 2:
-            continue  # Nur in einer Gleichung - keine Konsistenzprüfung möglich
-
-        # Leite Einheit für jede Gleichung ab
-        units_per_eq = {}
-        for original_eq, parsed_eq in var_equations.items():
-            unit, explanation = infer_unit_for_var_in_equation(var, original_eq, known_units)
-            if unit is not None:
-                units_per_eq[original_eq] = unit
-
-        # Prüfe Konsistenz
-        warning = check_unit_consistency(var, units_per_eq)
-        if warning:
-            warnings.append(warning)
+        if error:
+            if error['type'] == 'missing_units':
+                # Sammle fehlende Variablen - nur warnen wenn es viele sind
+                # Einzelne fehlende Variablen sind oft OK (dimensionslose Konstanten)
+                missing = error['variables']
+                if len(missing) > 0:
+                    # Format: {equation: "fehlende Variablen: x, y, z"}
+                    missing_info = f"Einheit unbekannt: {', '.join(sorted(missing))}"
+                    warnings.append(UnitWarning(
+                        variable='Unbekannte Einheiten',
+                        equations=[original_eq],
+                        units={original_eq: missing_info},
+                        explanation=f"Einheit unbekannt für: {', '.join(sorted(missing))}",
+                        conversion_factor=0
+                    ))
+            elif error['type'] == 'dimension_mismatch':
+                # Format: {equation: "links [dim] ≠ rechts [dim]"}
+                # Zeigt die Gleichung mit Dimensionsinformation
+                dim_info = f"links: {error['left_dim']} ≠ rechts: {error['right_dim']}"
+                warnings.append(UnitWarning(
+                    variable='⚠ Dimensionsfehler',
+                    equations=[original_eq],
+                    units={original_eq: dim_info},
+                    explanation=f"Dimensionsfehler: {error['left_dim']} ≠ {error['right_dim']}",
+                    conversion_factor=0
+                ))
 
     return warnings
+
+
+# ============================================================================
+# Generische dimensionale Konsistenzprüfung mit pint
+# ============================================================================
+
+def compute_expression_dimension(expr: str, unit_map: Dict[str, str]) -> Tuple[Any, list]:
+    """
+    Berechnet die Dimension eines mathematischen Ausdrucks.
+
+    Args:
+        expr: Mathematischer Ausdruck als String, z.B. "m_zu * h_zu"
+        unit_map: Dict {variable: unit_string} für alle bekannten Variablen
+
+    Returns:
+        (dimensionality, missing_vars) - pint Dimensionality und Liste fehlender Variablen
+        Bei Fehler: (None, missing_vars)
+    """
+    if not PINT_AVAILABLE:
+        return None, []
+
+    # Entferne zuerst Funktionsaufrufe aus dem Ausdruck für die Variablen-Erkennung
+    # Ersetze func(...) durch FUNC_PLACEHOLDER
+    expr_for_vars = expr
+
+    # Entferne Thermodynamik-Funktionsaufrufe (inkl. Argumente)
+    thermo_funcs = ['enthalpy', 'entropy', 'density', 'pressure', 'temperature',
+                    'volume', 'intenergy', 'quality', 'cp', 'cv',
+                    'viscosity', 'conductivity', 'prandtl', 'soundspeed',
+                    'HumidAir', 'humidair']
+    for func in thermo_funcs:
+        expr_for_vars = re.sub(rf'\b{func}\s*\([^)]*\)', 'FUNC_RESULT', expr_for_vars, flags=re.IGNORECASE)
+
+    # Finde alle Variablen im bereinigten Ausdruck
+    var_pattern = r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b'
+    tokens = set(re.findall(var_pattern, expr_for_vars))
+
+    # Filtere bekannte Funktionen, Konstanten und Platzhalter
+    known_tokens = {
+        # Mathematische Funktionen
+        'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
+        'sinh', 'cosh', 'tanh',
+        'exp', 'log', 'log10', 'sqrt', 'abs',
+        'pi', 'e',
+        # Platzhalter für Funktionsergebnisse
+        'FUNC_RESULT',
+        # Fluids (falls sie außerhalb von Funktionen vorkommen)
+        'water', 'steam', 'air', 'Water', 'Air',
+        'R134a', 'R1234yf', 'CO2', 'Ammonia', 'Nitrogen',
+        # Einheiten-Suffixe die manchmal erkannt werden
+        'C', 'K', 'F',  # Temperatur-Einheiten
+        'kg', 'g', 'm', 's', 'Pa', 'bar', 'J', 'W', 'kJ', 'kW',
+    }
+    variables = tokens - known_tokens
+
+    # Prüfe auf fehlende Einheiten
+    # HINWEIS: Fehlende Variablen werden hier gesammelt, aber die Entscheidung
+    # ob gewarnt wird erfolgt in check_equation_dimensions() - dort wird geprüft
+    # ob die Variable durch die Gleichung abgeleitet werden kann
+    missing = [v for v in variables if v not in unit_map]
+    if missing:
+        return None, missing
+
+    # Ersetze Variablen durch pint Quantities (längste zuerst um Teilmatches zu vermeiden)
+    expr_modified = expr
+
+    # Ersetze ^ durch ** für Python
+    expr_modified = expr_modified.replace('^', '**')
+
+    for var in sorted(variables, key=len, reverse=True):
+        unit = unit_map.get(var, '')
+        if unit and unit not in ('', 'dimensionless'):
+            # Normalisiere die Einheit für pint
+            normalized = normalize_unit(unit) if 'normalize_unit' in dir() else unit
+            replacement = f"(_Q_(1.0, '{normalized}'))"
+        else:
+            # Dimensionslose Variable
+            replacement = "1.0"
+        expr_modified = re.sub(rf'\b{re.escape(var)}\b', replacement, expr_modified)
+
+    # Ersetze Thermodynamik-Funktionsaufrufe durch ihre Ergebnis-Einheiten
+    # enthalpy(...) → J/kg, pressure(...) → Pa, etc.
+    thermo_units = {
+        'enthalpy': 'joule/kilogram',
+        'entropy': 'joule/(kilogram*kelvin)',
+        'density': 'kilogram/meter**3',
+        'pressure': 'pascal',
+        'temperature': 'kelvin',
+        'volume': 'meter**3/kilogram',
+        'intenergy': 'joule/kilogram',
+        'quality': 'dimensionless',
+        'cp': 'joule/(kilogram*kelvin)',
+        'cv': 'joule/(kilogram*kelvin)',
+        'viscosity': 'pascal*second',
+        'conductivity': 'watt/(meter*kelvin)',
+        'prandtl': 'dimensionless',
+        'soundspeed': 'meter/second',
+    }
+
+    for func, unit in thermo_units.items():
+        # Ersetze func(...) durch Quantity mit entsprechender Einheit
+        pattern = rf'\b{func}\s*\([^)]*\)'
+        if unit == 'dimensionless':
+            replacement = '1.0'
+        else:
+            replacement = f"(_Q_(1.0, '{unit}'))"
+        expr_modified = re.sub(pattern, replacement, expr_modified, flags=re.IGNORECASE)
+
+    # HumidAir Funktionen - Output-Einheit hängt vom ersten Argument ab
+    # HumidAir(property, T=..., rh=..., p_tot=...)
+    humidair_units = {
+        'h': 'joule/kilogram',           # Enthalpie
+        't': 'kelvin',                   # Temperatur
+        't_dp': 'kelvin',                # Taupunkt
+        't_wb': 'kelvin',                # Feuchtkugel
+        'w': 'dimensionless',            # Feuchte kg/kg (dimensionslos)
+        'rh': 'dimensionless',           # Relative Feuchte
+        'p_w': 'pascal',                 # Partialdruck
+        'rho_tot': 'kilogram/meter**3',  # Dichte
+        'rho_a': 'kilogram/meter**3',    # Dichte Trockenluft
+        'rho_w': 'kilogram/meter**3',    # Dichte Wasserdampf
+    }
+
+    def replace_humidair(match):
+        """Ersetzt HumidAir(...) durch die richtige Einheit basierend auf dem ersten Argument."""
+        full_match = match.group(0)
+        # Extrahiere das erste Argument (die Output-Property)
+        inner = re.search(r'\(\s*(\w+)', full_match)
+        if inner:
+            prop = inner.group(1).lower()
+            unit = humidair_units.get(prop, 'joule/kilogram')  # Default: J/kg
+            if unit == 'dimensionless':
+                return '1.0'
+            return f"(_Q_(1.0, '{unit}'))"
+        return "(_Q_(1.0, 'joule/kilogram'))"
+
+    expr_modified = re.sub(r'\bHumidAir\s*\([^)]*\)', replace_humidair, expr_modified, flags=re.IGNORECASE)
+
+    try:
+        # Sichere Auswertung mit pint
+        def _Q_(val, unit):
+            """Helper für Quantity-Erstellung."""
+            return ureg.Quantity(val, unit)
+
+        safe_context = {
+            '__builtins__': {},
+            '_Q_': _Q_,
+            'sin': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'cos': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'tan': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'exp': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'log': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'sqrt': lambda x: x ** 0.5 if hasattr(x, 'magnitude') else x ** 0.5,
+            'abs': lambda x: abs(x),
+            'pi': 3.14159265359,
+            'e': 2.71828182846,
+        }
+
+        result = eval(expr_modified, safe_context)
+
+        if hasattr(result, 'dimensionality'):
+            return result.dimensionality, []
+        else:
+            # Dimensionslos
+            return ureg.dimensionless.dimensionality, []
+
+    except pint.DimensionalityError as e:
+        # Dimensionsfehler innerhalb des Ausdrucks (z.B. T + h mit verschiedenen Dimensionen)
+        # Gib einen speziellen Marker zurück
+        return 'DIMENSION_ERROR_IN_EXPR', []
+
+    except Exception as e:
+        # Bei anderen Fehlern: Gib None zurück
+        return None, []
+
+
+def check_equation_dimensions(equation: str, unit_map: Dict[str, str]) -> Optional[Dict]:
+    """
+    Prüft ob eine Gleichung dimensional konsistent ist.
+
+    GENERISCHER ANSATZ: Bei "var = ausdruck" wird die Einheit von var
+    aus dem Ausdruck ABGELEITET, nicht als "fehlend" gemeldet.
+
+    Args:
+        equation: Gleichung als String, z.B. "W_v + m_zu*h_zu = U_2-U_1"
+        unit_map: Dict {variable: unit_string} für alle Variablen
+
+    Returns:
+        None wenn konsistent, sonst Dict mit Fehlerinfo:
+        - {'type': 'missing_units', 'variables': [...], 'equation': ...}
+        - {'type': 'dimension_mismatch', 'left_dim': ..., 'right_dim': ..., 'equation': ...}
+    """
+    if not PINT_AVAILABLE:
+        return None
+
+    if '=' not in equation:
+        return None
+
+    # Teile in links und rechts
+    parts = equation.split('=', 1)
+    if len(parts) != 2:
+        return None
+
+    left = parts[0].strip()
+    right = parts[1].strip()
+
+    # SCHRITT 1: Berechne Dimension der RECHTEN Seite zuerst
+    right_dim, right_missing = compute_expression_dimension(right, unit_map)
+
+    # Wenn rechte Seite fehlende Variablen hat → diese melden
+    if right_missing:
+        return {
+            'type': 'missing_units',
+            'variables': right_missing,
+            'equation': equation
+        }
+
+    # Prüfe auf Dimensionsfehler in der rechten Seite (z.B. T + h mit verschiedenen Dimensionen)
+    if right_dim == 'DIMENSION_ERROR_IN_EXPR':
+        return {
+            'type': 'dimension_mismatch',
+            'left_dim': '(linke Seite)',
+            'right_dim': 'Inkompatible Terme werden addiert/subtrahiert',
+            'equation': equation
+        }
+
+    # SCHRITT 2: Prüfe ob linke Seite NUR EINE Variable ist (ohne Einheit in unit_map)
+    # In diesem Fall erbt die Variable die Dimension der rechten Seite
+    # → Keine Warnung nötig!
+    left_stripped = left.strip()
+
+    # Prüfe ob linke Seite eine einzelne Variable ist (Variablenname-Muster)
+    var_pattern = r'^[a-zA-Z_][a-zA-Z0-9_]*$'
+    if re.match(var_pattern, left_stripped):
+        # Linke Seite ist eine einzelne Variable
+        if left_stripped not in unit_map:
+            # Die Variable ist nicht in unit_map, aber die rechte Seite ist berechenbar
+            # → Die Variable ERBT die Dimension der rechten Seite
+            # → Keine Warnung, da dimensional konsistent per Definition
+            # (z.B. eta_th = W1/W2 → eta_th erbt "dimensionless")
+            return None
+
+    # SCHRITT 3: Normale Prüfung - berechne Dimension der linken Seite
+    left_dim, left_missing = compute_expression_dimension(left, unit_map)
+
+    # Wenn linke Seite fehlende Variablen hat → diese melden
+    if left_missing:
+        return {
+            'type': 'missing_units',
+            'variables': left_missing,
+            'equation': equation
+        }
+
+    # Prüfe auf Dimensionsfehler in der linken Seite (z.B. T + h mit verschiedenen Dimensionen)
+    # (rechte Seite wurde bereits oben geprüft)
+    if left_dim == 'DIMENSION_ERROR_IN_EXPR':
+        return {
+            'type': 'dimension_mismatch',
+            'left_dim': 'Inkompatible Terme werden addiert/subtrahiert',
+            'right_dim': '(rechte Seite)',
+            'equation': equation
+        }
+
+    # Wenn eine Seite None ist (Berechnungsfehler), überspringe
+    if left_dim is None or right_dim is None:
+        return None
+
+    # Vergleiche Dimensionen
+    # Sonderfall: Eine Seite ist "dimensionless" (typisch bei "= 0")
+    # In diesem Fall: Wenn die andere Seite eine echte Dimension hat,
+    # prüfen wir ob der Ausdruck nur aus "0" besteht - dann ist es OK
+    # (physikalisch: 0 kg/s = 0 ist sinnvoll)
+    dimensionless_dim = ureg.dimensionless.dimensionality
+
+    if left_dim != right_dim:
+        # Sonderfall: "= 0" oder "0 = ..."
+        # Wenn eine Seite nur "0" ist, ist das dimensional OK
+        right_stripped = right.strip()
+        left_stripped = left.strip()
+
+        # Prüfe ob rechte Seite nur "0" ist
+        if right_stripped == '0' and left_dim != dimensionless_dim:
+            # OK: "etwas = 0" ist immer dimensional konsistent
+            return None
+
+        # Prüfe ob linke Seite nur "0" ist
+        if left_stripped == '0' and right_dim != dimensionless_dim:
+            # OK: "0 = etwas" ist immer dimensional konsistent
+            return None
+
+        # Sonderfall: dimensionless auf einer Seite
+        # Bei Wirkungsgrad-Berechnungen: W/W = dimensionless ist OK
+        if left_dim == dimensionless_dim or right_dim == dimensionless_dim:
+            # Nur Fehler wenn BEIDE Seiten Dimensionen haben und unterschiedlich sind
+            # Wenn eine Seite dimensionless ist (durch Division), ist es OK
+            pass  # Weiter zum Fehler
+
+        return {
+            'type': 'dimension_mismatch',
+            'left_dim': str(left_dim),
+            'right_dim': str(right_dim),
+            'equation': equation
+        }
+
+    return None  # OK - dimensional konsistent
 
 
 # Test

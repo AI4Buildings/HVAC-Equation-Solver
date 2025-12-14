@@ -74,6 +74,140 @@ RADIATION_UNITS = {
     'stefan_boltzmann': 'W/m^2',      # Gesamtemission [W/m²]
 }
 
+# Typische Startwerte basierend auf Einheiten (SI-Einheiten)
+# Diese werden für die automatische Initialisierung von Variablen verwendet
+UNIT_TYPICAL_VALUES = {
+    # Temperatur
+    'K': 350.0,                  # ~77°C - typische HVAC-Temperatur
+
+    # Druck
+    'Pa': 500000.0,              # 5 bar - typischer HVAC-Druck
+
+    # Spezifische Größen (Enthalpie, innere Energie)
+    'J/kg': 1000000.0,           # 1000 kJ/kg - typische Enthalpie
+    'J/(kg*K)': 3000.0,          # 3 kJ/(kg·K) - typische spez. Wärmekapazität
+
+    # Massenströme
+    'kg/s': 1.0,                 # 1 kg/s Massenstrom
+    'kg/h': 3600.0,              # 3600 kg/h = 1 kg/s
+
+    # Leistung/Energie
+    'W': 100000.0,               # 100 kW
+    'J': 100000.0,               # 100 kJ
+
+    # Volumenströme
+    'm^3/s': 0.1,                # 0.1 m³/s
+    'm^3/h': 360.0,              # 360 m³/h = 0.1 m³/s
+
+    # Stoffeigenschaften
+    'kg/m^3': 1.0,               # 1 kg/m³ (Luft-Dichte)
+    'm^3/kg': 0.5,               # 0.5 m³/kg spez. Volumen
+    'Pa*s': 0.001,               # 0.001 Pa·s dynamische Viskosität
+    'W/(m*K)': 0.5,              # 0.5 W/(m·K) Wärmeleitfähigkeit
+    'm/s': 300.0,                # 300 m/s Schallgeschwindigkeit
+
+    # Geometrie
+    'm': 1.0,                    # 1 m Länge
+    'm^2': 1.0,                  # 1 m² Fläche
+    'm^3': 1.0,                  # 1 m³ Volumen
+
+    # Mechanik
+    'N': 100.0,                  # 100 N Kraft
+    'm/s^2': 9.81,               # 9.81 m/s² Beschleunigung (Erdbeschleunigung)
+
+    # Wärmeübertragung
+    'W/m^2': 1000.0,             # 1000 W/m² Wärmestromdichte
+    'W/(m^2*K)': 10.0,           # 10 W/(m²·K) Wärmeübergangskoeffizient
+
+    # Strahlung
+    'um': 5.0,                   # 5 µm Wellenlänge
+    'W/(m^2*um)': 1000.0,        # Spektrale Emissionsleistung
+
+    # Zeit
+    's': 1.0,                    # 1 Sekunde
+    'h': 1.0,                    # 1 Stunde
+}
+
+
+def get_initial_from_unit(unit_str: str) -> float:
+    """
+    Liefert einen typischen Startwert basierend auf der Einheit.
+
+    Diese Funktion ist generisch und hängt NICHT von Variablennamen ab.
+    Stattdessen wird die physikalische Größe aus der Einheit abgeleitet.
+
+    Args:
+        unit_str: Einheit als String (z.B. 'K', 'Pa', 'J/kg')
+
+    Returns:
+        Typischer Startwert für diese Einheit
+
+    Examples:
+        >>> get_initial_from_unit('K')
+        350.0
+        >>> get_initial_from_unit('Pa')
+        500000.0
+        >>> get_initial_from_unit('J/kg')
+        1000000.0
+        >>> get_initial_from_unit('')  # dimensionslos
+        0.5
+    """
+    if not unit_str or unit_str in ('', 'dimensionless', '???'):
+        # Dimensionslose Größen: Wirkungsgrad, Qualität, relative Feuchte
+        return 0.5
+
+    # Normalisiere Einheit für Vergleich
+    unit_normalized = unit_str.strip()
+
+    # Exakter Match
+    if unit_normalized in UNIT_TYPICAL_VALUES:
+        return UNIT_TYPICAL_VALUES[unit_normalized]
+
+    # Versuche partielle Matches (für Varianten wie 'J/(kg*K)' vs 'J/(kg·K)')
+    unit_lower = unit_normalized.lower().replace(' ', '').replace('·', '*')
+
+    for pattern, value in UNIT_TYPICAL_VALUES.items():
+        pattern_normalized = pattern.lower().replace(' ', '').replace('·', '*')
+        if pattern_normalized in unit_lower or unit_lower in pattern_normalized:
+            return value
+
+    # Versuche dimensionale Analyse mit pint
+    try:
+        quantity = ureg.Quantity(1.0, normalize_unit(unit_str))
+        dim = quantity.dimensionality
+
+        # Prüfe bekannte Dimensionen
+        if dim == ureg.kelvin.dimensionality:
+            return 350.0  # Temperatur
+        if dim == ureg.pascal.dimensionality:
+            return 500000.0  # Druck
+        if dim == ureg('J/kg').dimensionality:
+            return 1000000.0  # Spezifische Energie
+        if dim == ureg('J/(kg*K)').dimensionality:
+            return 3000.0  # Spezifische Wärme
+        if dim == ureg('kg/s').dimensionality:
+            return 1.0  # Massenstrom
+        if dim == ureg.watt.dimensionality:
+            return 100000.0  # Leistung
+        if dim == ureg('kg/m^3').dimensionality:
+            return 1.0  # Dichte
+        if dim == ureg('m^3/kg').dimensionality:
+            return 0.5  # Spez. Volumen
+        if dim == ureg.meter.dimensionality:
+            return 1.0  # Länge
+        if dim == ureg('m^2').dimensionality:
+            return 1.0  # Fläche
+        if dim == ureg('m^3').dimensionality:
+            return 1.0  # Volumen
+        if quantity.dimensionless:
+            return 0.5  # Dimensionslos
+
+    except Exception:
+        pass
+
+    # Fallback: 1.0 ist ein neutraler Startwert
+    return 1.0
+
 # Standard-Einheiten für HVAC-Berechnungen
 # Diese Einheiten werden für interne Berechnungen verwendet
 # Alle Größen in SI-Basiseinheiten, damit Einheiten-Arithmetik korrekt funktioniert:
@@ -89,6 +223,8 @@ STANDARD_UNITS = {
     '[length] ** 2 / [time] ** 2 / [temperature]': ('J/(kg*K)', 'J/(kg*K)'),  # Spez. Wärme (SI!)
     '[mass] * [length] ** 2 / [time] ** 3': ('W', 'W'),  # Leistung in W (SI!)
     '[mass] * [length] ** 2 / [time] ** 2': ('J', 'J'),  # Energie in J (SI!)
+    '[mass] * [length] / [time] ** 2': ('N', 'N'),  # Kraft in N (SI!)
+    '[length] / [time] ** 2': ('m/s^2', 'm/s^2'),  # Beschleunigung in m/s² (SI!)
     '[mass]': ('kg', 'kg'),                      # Masse in kg
     '[length]': ('m', 'm'),                      # Länge in m
     '[time]': ('s', 's'),                        # Zeit in s
@@ -382,6 +518,94 @@ class UnitValue:
             original_unit='',
             quantity=value * ureg.dimensionless
         )
+
+    @classmethod
+    def from_si_base(cls, si_value: float, target_unit: str) -> 'UnitValue':
+        """
+        Erstellt UnitValue aus SI-Basiswert und konvertiert zur Ziel-Einheit.
+
+        Dies ist für Ergebnisse aus dem Solver gedacht, die in SI-Basiseinheiten
+        vorliegen (Pa, J/kg, K) und in Benutzer-Einheiten (bar, kJ/kg, °C)
+        angezeigt werden sollen.
+
+        Args:
+            si_value: Wert in SI-Basiseinheit (z.B. 3000000 für Pa)
+            target_unit: Ziel-Einheit für Anzeige (z.B. "bar")
+
+        Returns:
+            UnitValue mit korrekter Konvertierung
+        """
+        normalized_unit = normalize_unit(target_unit)
+
+        # Bestimme SI-Basiseinheit aus der Ziel-Einheit
+        try:
+            # Erstelle temporäre Quantity um SI-Basis zu ermitteln
+            temp_qty = 1.0 * ureg(normalized_unit)
+            si_base_unit = str(temp_qty.to_base_units().units)
+
+            # Erstelle SI-Quantity
+            si_quantity = si_value * ureg(si_base_unit)
+
+            # Konvertiere zur Ziel-Einheit
+            target_quantity = si_quantity.to(normalized_unit)
+            target_value = float(target_quantity.magnitude)
+
+            # Berechne calc_value/calc_unit (Standard-Einheiten wie bar, °C, kJ/kg)
+            calc_value, calc_unit = _convert_to_standard(target_quantity)
+
+            return cls(
+                si_value=si_value,
+                si_unit=si_base_unit,
+                original_value=target_value,
+                original_unit=target_unit,
+                quantity=target_quantity,
+                _calc_value=calc_value,
+                _calc_unit=calc_unit
+            )
+        except Exception as e:
+            # Fallback: Versuche direkte Konvertierung mit bekannten Faktoren
+            factor = 1.0
+            si_base = ''
+
+            # Bekannte Konvertierungen
+            if normalized_unit == 'bar':
+                factor = 1e-5  # Pa -> bar
+                si_base = 'pascal'
+            elif normalized_unit in ['kPa', 'kilopascal']:
+                factor = 1e-3  # Pa -> kPa
+                si_base = 'pascal'
+            elif normalized_unit in ['MPa', 'megapascal']:
+                factor = 1e-6  # Pa -> MPa
+                si_base = 'pascal'
+            elif normalized_unit in ['degC', 'celsius']:
+                # K -> °C
+                target_value = si_value - 273.15
+                return cls(
+                    si_value=si_value,
+                    si_unit='kelvin',
+                    original_value=target_value,
+                    original_unit=target_unit,
+                    quantity=None,
+                    _calc_value=target_value,
+                    _calc_unit='degC'
+                )
+            elif 'kilojoule' in normalized_unit or normalized_unit.startswith('kJ'):
+                factor = 1e-3  # J -> kJ
+                si_base = 'joule / kilogram' if '/kg' in target_unit or '/kilogram' in normalized_unit else 'joule'
+            elif 'joule' in normalized_unit or normalized_unit.startswith('J'):
+                factor = 1.0
+                si_base = 'joule / kilogram' if '/kg' in target_unit else 'joule'
+
+            target_value = si_value * factor
+            return cls(
+                si_value=si_value,
+                si_unit=si_base,
+                original_value=target_value,
+                original_unit=target_unit,
+                quantity=None,
+                _calc_value=target_value,
+                _calc_unit=target_unit
+            )
 
     def to(self, target_unit: str) -> float:
         """

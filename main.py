@@ -23,14 +23,16 @@ import numpy as np
 
 # Versuche Units-Modul zu laden
 try:
-    from units import get_compatible_units, UnitValue, detect_unit_from_equation
+    from units import get_compatible_units, UnitValue, detect_unit_from_equation, get_initial_from_unit
     UNITS_AVAILABLE = True
 except ImportError:
     UNITS_AVAILABLE = False
+    def get_initial_from_unit(unit_str):
+        return 1.0
 
 # Versuche Constraint-Propagation zu laden
 try:
-    from unit_constraints import propagate_all_units, check_all_unit_consistency
+    from unit_constraints import propagate_all_units, check_all_unit_consistency, propagate_all_units_complete
     CONSTRAINT_PROPAGATION_AVAILABLE = True
 except ImportError:
     CONSTRAINT_PROPAGATION_AVAILABLE = False
@@ -954,6 +956,27 @@ class EquationSolverApp(ctk.CTk):
                 if var in variables:
                     solver_initial[var] = val
 
+            # NEU: Einheiten-Propagation VOR dem Lösen für bessere Startwerte
+            # Dies ist der generische Ansatz, der NICHT von Variablennamen abhängt
+            self.inferred_units = {}  # Speichere abgeleitete Einheiten für Dialog
+            if CONSTRAINT_PROPAGATION_AVAILABLE and UNITS_AVAILABLE:
+                # Sammle bekannte Einheiten aus unit_values
+                known_units = {}
+                for var, uv in unit_values.items():
+                    if uv.calc_unit:
+                        known_units[var] = uv.calc_unit
+
+                # Führe vollständige Einheiten-Propagation durch
+                all_units = propagate_all_units_complete(original_equations, known_units)
+                self.inferred_units = all_units
+
+                # Leite Startwerte aus Einheiten ab (nur für Variablen ohne manuellen Startwert)
+                for var in variables:
+                    if var not in solver_initial:
+                        unit = all_units.get(var)
+                        if unit is not None:
+                            solver_initial[var] = get_initial_from_unit(unit)
+
             # Löse System
             if sweep_vars:
                 def progress_callback(current, total):
@@ -989,10 +1012,11 @@ class EquationSolverApp(ctk.CTk):
                                 if detected_unit:
                                     val = solution[var]
                                     # Für Arrays: Verwende ersten Wert für UnitValue (nur für Anzeige)
+                                    # Verwende from_si_base() da der Wert in SI-Basiseinheit vorliegt
                                     if isinstance(val, np.ndarray):
-                                        self.current_unit_values[var] = UnitValue.from_si(float(val[0]), detected_unit)
+                                        self.current_unit_values[var] = UnitValue.from_si_base(float(val[0]), detected_unit)
                                     else:
-                                        self.current_unit_values[var] = UnitValue.from_si(val, detected_unit)
+                                        self.current_unit_values[var] = UnitValue.from_si_base(val, detected_unit)
                                 break
 
                 # Phase 2: Propagation für Berechnungen (max 5 Durchläufe)
@@ -1007,10 +1031,11 @@ class EquationSolverApp(ctk.CTk):
                                     if detected_unit:
                                         val = solution[var]
                                         # Für Arrays: Verwende ersten Wert für UnitValue
+                                        # Verwende from_si_base() da der Wert in SI-Basiseinheit vorliegt
                                         if isinstance(val, np.ndarray):
-                                            self.current_unit_values[var] = UnitValue.from_si(float(val[0]), detected_unit)
+                                            self.current_unit_values[var] = UnitValue.from_si_base(float(val[0]), detected_unit)
                                         else:
-                                            self.current_unit_values[var] = UnitValue.from_si(val, detected_unit)
+                                            self.current_unit_values[var] = UnitValue.from_si_base(val, detected_unit)
                                         found_new = True
                                     break
                     if not found_new:
@@ -1041,10 +1066,11 @@ class EquationSolverApp(ctk.CTk):
                                 if existing is None or not existing.original_unit:
                                     val = solution[var]
                                     # Für Arrays: Verwende ersten Wert für UnitValue
+                                    # Verwende from_si_base() da der Wert in SI-Basiseinheit vorliegt
                                     if isinstance(val, np.ndarray):
-                                        self.current_unit_values[var] = UnitValue.from_si(float(val[0]), unit)
+                                        self.current_unit_values[var] = UnitValue.from_si_base(float(val[0]), unit)
                                     else:
-                                        self.current_unit_values[var] = UnitValue.from_si(val, unit)
+                                        self.current_unit_values[var] = UnitValue.from_si_base(val, unit)
                                     found_new = True
 
                         if not found_new:
@@ -1215,20 +1241,48 @@ class EquationSolverApp(ctk.CTk):
                     elif is_pressure:
                         preferred_unit = self.pressure_display_unit.get()
                         display_val = unit_value.to(preferred_unit)
-                    # Für Energie: kJ oder J je nach Setting
+                    # Für Energie: kJ/kg oder J/kg je nach Setting
                     elif is_energy:
-                        if self.energy_display_unit.get() == "kJ":
-                            # Konvertiere J-basierte Einheiten zu kJ
-                            display_val = unit_value.calc_value / 1000
+                        preferred_unit = self.energy_display_unit.get()
+                        # Bestimme Ziel-Einheit basierend auf Original-Einheit
+                        base_unit = unit_value.original_unit or unit_value.calc_unit
+                        # Spezialfall: Spezifische Wärmekapazität (kJ/kgK, J/(kg*K), etc.)
+                        # Diese Einheiten enthalten /kg UND K (Kelvin)
+                        if 'kgK' in base_unit or 'kg*K' in base_unit or 'kg·K' in base_unit:
+                            # Behalte die vollständige Einheit, nur J<->kJ wechseln
+                            if preferred_unit == 'kJ':
+                                if base_unit.startswith('J'):
+                                    target_unit = 'k' + base_unit
+                                else:
+                                    target_unit = base_unit  # bereits kJ-basiert
+                            else:  # J
+                                if base_unit.startswith('kJ'):
+                                    target_unit = base_unit[1:]  # entferne 'k'
+                                else:
+                                    target_unit = base_unit  # bereits J-basiert
+                        elif '/(kg' in base_unit:
+                            # Format wie J/(kg*K) - ersetze J durch kJ oder umgekehrt
+                            if preferred_unit == 'kJ':
+                                target_unit = base_unit.replace('J/', 'kJ/')
+                            else:
+                                target_unit = base_unit.replace('kJ/', 'J/')
+                        elif '/kg' in base_unit or '/kilogram' in base_unit.lower():
+                            # Einfache spezifische Energie (J/kg, kJ/kg)
+                            target_unit = f'{preferred_unit}/kg'
                         else:
-                            display_val = unit_value.calc_value
+                            target_unit = preferred_unit
+                        display_val = unit_value.to(target_unit)
                     # Für Leistung: kW oder W je nach Setting
                     elif is_power:
-                        if self.power_display_unit.get() == "kW":
-                            # Konvertiere W-basierte Einheiten zu kW
-                            display_val = unit_value.calc_value / 1000
+                        preferred_unit = self.power_display_unit.get()
+                        base_unit = unit_value.original_unit or unit_value.calc_unit
+                        if '/m' in base_unit or '/meter' in base_unit.lower():
+                            # Einheiten wie W/m², kW/m²
+                            target_unit = base_unit.replace('W/', f'{preferred_unit}/')
+                            target_unit = target_unit.replace('kW/', f'{preferred_unit}/')
                         else:
-                            display_val = unit_value.calc_value
+                            target_unit = preferred_unit
+                        display_val = unit_value.to(target_unit)
                     else:
                         display_val = unit_value.original_value
                 else:
@@ -1462,42 +1516,101 @@ class EquationSolverApp(ctk.CTk):
         ctk.CTkButton(dialog, text="Close", command=dialog.destroy).pack(pady=20)
 
     def show_initial_values_dialog(self):
-        """Zeigt Dialog für manuelle Startwerte."""
+        """Zeigt Dialog für manuelle Startwerte mit Einheiten-Anzeige."""
         if not self.known_variables:
             messagebox.showinfo("Initial Values", "Please run Solve first to detect variables.")
             return
 
         dialog = ctk.CTkToplevel(self)
         dialog.title("Initial Values")
-        dialog.geometry("400x500")
+        dialog.geometry("600x550")
         dialog.transient(self)
         dialog.grab_set()
 
         # Info
         ctk.CTkLabel(
             dialog,
-            text="Set initial values for variables:\n(Leave empty for automatic)",
+            text="Set initial values for variables. Units are auto-detected from equations.\n(Leave empty for automatic based on unit, or enter manual value)",
             font=ctk.CTkFont(size=12),
             text_color=COLORS["text_dim"]
         ).pack(pady=10)
 
+        # Header Row
+        header_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        header_frame.pack(fill="x", padx=10, pady=(0, 5))
+        ctk.CTkLabel(header_frame, text="Variable", width=120, anchor="w",
+                    font=ctk.CTkFont(weight="bold")).pack(side="left")
+        ctk.CTkLabel(header_frame, text="Initial Value", width=110, anchor="w",
+                    font=ctk.CTkFont(weight="bold")).pack(side="left", padx=5)
+        ctk.CTkLabel(header_frame, text="Unit", width=100, anchor="w",
+                    font=ctk.CTkFont(weight="bold")).pack(side="left", padx=5)
+        ctk.CTkLabel(header_frame, text="Status", width=80, anchor="w",
+                    font=ctk.CTkFont(weight="bold")).pack(side="left", padx=5)
+
         # Scrollable Frame für Variablen
         scroll_frame = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
-        scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        scroll_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # Sammle alle Variablen (bekannte + ungelöste)
+        all_vars = set(self.known_variables)
+
+        # Hole abgeleitete Einheiten (falls vorhanden)
+        inferred_units = getattr(self, 'inferred_units', {})
+
+        # Hole gelöste Variablen
+        solved_vars = set(self.last_solution.keys()) if self.last_solution else set()
+
+        # Liste der verfügbaren Einheiten für Dropdown
+        unit_options = ["", "K", "Pa", "J/kg", "J/(kg*K)", "kg/s", "W", "kg/m^3", "m^3/kg", "m/s", "m/s^2", "N", "kg", "m", "m^2", "m^3", "???"]
 
         entries = {}
-        for var in sorted(self.known_variables):
+        unit_vars = {}  # Speichere StringVars für Einheiten
+
+        for var in sorted(all_vars):
             row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
             row.pack(fill="x", pady=2)
 
+            # Variable name
             ctk.CTkLabel(row, text=f"{var}:", width=120, anchor="w").pack(side="left")
+
+            # Initial value entry
             entry = ctk.CTkEntry(row, width=100)
             entry.pack(side="left", padx=5)
 
+            # Bestimme Standardwert
             if var in self.manual_initial_values:
                 entry.insert(0, str(self.manual_initial_values[var]))
+            elif var in inferred_units:
+                # Zeige automatischen Startwert basierend auf Einheit
+                auto_val = get_initial_from_unit(inferred_units[var])
+                entry.insert(0, f"{auto_val:.6g}")
+                entry.configure(text_color=COLORS["text_dim"])  # Grau für automatisch
 
             entries[var] = entry
+
+            # Unit display/dropdown
+            unit = inferred_units.get(var, "???")
+            # Auch aus current_unit_values holen falls verfügbar
+            if unit == "???" and hasattr(self, 'current_unit_values') and var in self.current_unit_values:
+                unit = self.current_unit_values[var].calc_unit or "???"
+
+            unit_var = ctk.StringVar(value=unit if unit else "-")
+            unit_vars[var] = unit_var
+
+            # Einheit als Dropdown (editierbar)
+            unit_combo = ctk.CTkComboBox(row, variable=unit_var, values=unit_options, width=90)
+            unit_combo.pack(side="left", padx=5)
+
+            # Status indicator
+            if var in solved_vars:
+                status_text = "solved"
+                status_color = COLORS["success"]
+            else:
+                status_text = "unsolved"
+                status_color = COLORS["warning"]
+
+            ctk.CTkLabel(row, text=status_text, width=80, anchor="w",
+                        text_color=status_color).pack(side="left", padx=5)
 
         # Buttons
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
@@ -1505,6 +1618,7 @@ class EquationSolverApp(ctk.CTk):
 
         def apply_values():
             self.manual_initial_values.clear()
+            # Aktualisiere auch die überschriebenen Einheiten
             for var, entry in entries.items():
                 val_str = entry.get().strip()
                 if val_str:
@@ -1513,11 +1627,38 @@ class EquationSolverApp(ctk.CTk):
                     except ValueError:
                         messagebox.showerror("Error", f"Invalid value for {var}: '{val_str}'")
                         return
+
+                # Speichere überschriebene Einheiten
+                if var in unit_vars:
+                    new_unit = unit_vars[var].get()
+                    if new_unit and new_unit not in ("-", "???"):
+                        # Aktualisiere inferred_units für nächsten Solve
+                        if not hasattr(self, 'manual_units'):
+                            self.manual_units = {}
+                        self.manual_units[var] = new_unit
+
             dialog.destroy()
             self.status_label.configure(text=f"{len(self.manual_initial_values)} initial values set")
 
-        ctk.CTkButton(btn_frame, text="Clear All",
-                       command=lambda: [e.delete(0, "end") for e in entries.values()]).pack(side="left")
+        def clear_all():
+            for e in entries.values():
+                e.delete(0, "end")
+                e.configure(text_color=COLORS["text"])
+
+        def auto_fill():
+            """Füllt alle leeren Felder mit automatischen Werten basierend auf Einheiten."""
+            for var, entry in entries.items():
+                if not entry.get().strip():
+                    unit = unit_vars[var].get() if var in unit_vars else ""
+                    if unit and unit not in ("-", "???"):
+                        auto_val = get_initial_from_unit(unit)
+                        entry.delete(0, "end")
+                        entry.insert(0, f"{auto_val:.6g}")
+                        entry.configure(text_color=COLORS["text_dim"])
+
+        ctk.CTkButton(btn_frame, text="Clear All", command=clear_all).pack(side="left")
+        ctk.CTkButton(btn_frame, text="Auto-Fill", command=auto_fill,
+                     fg_color=COLORS["accent"]).pack(side="left", padx=5)
         ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy).pack(side="right", padx=5)
         ctk.CTkButton(btn_frame, text="OK", command=apply_values).pack(side="right")
 

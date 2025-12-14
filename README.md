@@ -78,6 +78,15 @@ h = enthalpy(water, T=T, p=p)
 s = entropy(water, T=T, p=p)
 ```
 
+### Mechanics Example
+
+```
+{Force calculation: F = m * g}
+m = 100 kg
+g = 9.81 m/s^2
+F = m * g
+```
+
 ### Humid Air Example
 
 ```
@@ -248,6 +257,9 @@ q_dot = h*(T_s - T_inf)  {automatically gets W/m^2}
 | Pressure | bar, Pa, kPa, MPa, atm, psi |
 | Energy | kJ, J, kWh |
 | Power | kW, W |
+| Force | N, kN |
+| Acceleration | m/s^2 |
+| Mass | kg, g |
 | Mass flow | kg/s, kg/h |
 | Heat flux | W/m^2 |
 | Heat transfer coeff. | W/m^2K |

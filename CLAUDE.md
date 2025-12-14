@@ -243,6 +243,9 @@ Dimensionslose Zahlen werden automatisch erkannt:
 | Druck | bar, Pa, kPa, MPa, atm, psi |
 | Energie | kJ, J, kWh |
 | Leistung | kW, W |
+| Kraft | N, kN |
+| Beschleunigung | m/s², m/s^2 |
+| Masse | kg, g |
 | Massenstrom | kg/s, kg/h |
 | Wärmestromdichte | W/m² |
 | Wärmeübergangskoeff. | W/m²K |
@@ -348,6 +351,16 @@ w_2 = HumidAir(w, T=T_2, rh=rh_2, p_tot=p)
 m_dot_a = 1000/3600 kg/s
 Q_dot_cool = m_dot_a*(h_1-h_2)
 m_dot_condensate = m_dot_a*(w_1-w_2)
+```
+
+## Example: Mechanics - Force Calculation
+
+```
+{Force calculation: F = m * g}
+m = 100 kg
+g = 9.81 m/s^2
+F = m * g
+{Result: F = 981 N}
 ```
 
 ## Example: Thermal Radiation

@@ -12,6 +12,15 @@ from dataclasses import dataclass, field
 from numpy import exp, log, log10, sqrt, pi
 from numpy import sinh, cosh, tanh
 
+# Versuche Einheiten-Modul zu laden für unit-basierte Startwerte
+try:
+    from units import get_initial_from_unit
+    UNITS_AVAILABLE = True
+except ImportError:
+    UNITS_AVAILABLE = False
+    def get_initial_from_unit(unit_str):
+        return 1.0
+
 
 # ============================================================================
 # Analysis Data Structures
@@ -1128,9 +1137,13 @@ def _solve_block_simultaneously(
 
 
 def _get_initial_value(var: str, manual_initial: Dict[str, float] = None,
-                       known_values: Dict[str, float] = None) -> float:
+                       known_values: Dict[str, float] = None,
+                       inferred_units: Dict[str, str] = None) -> float:
     """
-    Ermittelt sinnvolle Startwerte basierend auf Variablennamen.
+    Ermittelt sinnvolle Startwerte basierend auf Einheiten (bevorzugt) oder Variablennamen.
+
+    BEVORZUGT: Unit-basierte Startwerte (generisch, unabhängig von Variablennamen)
+    FALLBACK: Variablennamen-Heuristik
 
     Für SI-Einheiten sind typische Größenordnungen:
     - Temperatur T: ~300-800 K
@@ -1142,12 +1155,19 @@ def _get_initial_value(var: str, manual_initial: Dict[str, float] = None,
     - Dampfqualität x: 0-1
     - Wirkungsgrad eta: 0-1
     """
+    # PRIORITÄT 0: Manuelle Startwerte haben höchste Priorität
     if manual_initial and var in manual_initial:
         return manual_initial[var]
 
+    # PRIORITÄT 1: Unit-basierte Startwerte (generisch, NICHT von Variablennamen abhängig)
+    if inferred_units and var in inferred_units and UNITS_AVAILABLE:
+        unit = inferred_units[var]
+        if unit is not None:
+            return get_initial_from_unit(unit)
+
     var_lower = var.lower()
 
-    # PRIORITÄT 1: Suche nach ähnlich benannten bekannten Variablen
+    # PRIORITÄT 2: Suche nach ähnlich benannten bekannten Variablen
     # z.B. für h_5 schaue nach h_4, h_5s, h_1 etc.
     if known_values:
         # Extrahiere Basisnamen (z.B. "h" aus "h_5" oder "h_5s")
