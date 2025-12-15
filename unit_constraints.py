@@ -65,6 +65,64 @@ def get_dimension_from_unit(unit_str: str) -> Any:
         return None
 
 
+def unit_from_dimensionality(dim) -> str:
+    """Mappt eine pint dimensionality zu einer benutzerfreundlichen Einheit."""
+    if dim is None or not PINT_AVAILABLE:
+        return ""
+
+    try:
+        # Bekannte Dimensionen zu HVAC-Einheiten mappen
+        if dim == ureg.watt.dimensionality:
+            return 'kW'
+        if dim == ureg.joule.dimensionality:
+            return 'kJ'
+        if dim == ureg.pascal.dimensionality:
+            return 'bar'
+        if dim == ureg('kg/s').dimensionality:
+            return 'kg/s'
+        if dim == ureg('m^3/s').dimensionality:
+            return 'm^3/s'
+        if dim == ureg('m/s').dimensionality:
+            return 'm/s'
+        if dim == ureg('m/s^2').dimensionality:
+            return 'm/s^2'
+        if dim == ureg('N').dimensionality:
+            return 'N'
+        if dim == ureg('kg/m^3').dimensionality:
+            return 'kg/m^3'
+        if dim == ureg('J/kg').dimensionality:
+            return 'kJ/kg'
+        if dim == ureg('J/(kg*K)').dimensionality:
+            return 'kJ/(kg*K)'
+        if dim == ureg.kelvin.dimensionality:
+            return 'K'
+        if dim == ureg.meter.dimensionality:
+            return 'm'
+        if dim == ureg.kilogram.dimensionality:
+            return 'kg'
+        if dim == ureg.second.dimensionality:
+            return 's'
+        if dim == ureg('W/m^2').dimensionality:
+            return 'W/m^2'
+        if dim == ureg('m^2').dimensionality:
+            return 'm^2'
+        if dim == ureg('m^3').dimensionality:
+            return 'm^3'
+        if dim == ureg('m^3/kg').dimensionality:
+            return 'm^3/kg'
+        if dim == ureg('W/m^2/K').dimensionality:
+            return 'W/m^2K'
+        if dim == ureg('W/m^2/K^4').dimensionality:
+            return 'W/m^2K^4'
+        if dim == ureg('m^2*K/W').dimensionality:
+            return 'm^2K/W'
+        if dim == ureg.dimensionless.dimensionality:
+            return ''
+        return ''
+    except:
+        return ""
+
+
 def unit_from_quantity(quantity) -> str:
     """Extrahiert benutzerfreundliche Einheit aus pint Quantity."""
     if quantity is None or not PINT_AVAILABLE:
@@ -74,6 +132,11 @@ def unit_from_quantity(quantity) -> str:
         # Vereinfache zu Basiseinheiten
         base = quantity.to_base_units()
         dim = base.dimensionality
+
+        # Verwende die zentrale Mapping-Funktion
+        result = unit_from_dimensionality(dim)
+        if result:
+            return result
 
         # Bekannte Dimensionen zu HVAC-Einheiten mappen
         if dim == ureg.watt.dimensionality:
@@ -578,7 +641,7 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
 
     inferred = {}
 
-    # Analysiere beide Seiten
+    # Analysiere beide Seiten mit AST-basierter Methode
     inferrer_left = DimensionInferrer(known_dims.copy())
     inferrer_right = DimensionInferrer(known_dims.copy())
 
@@ -588,6 +651,23 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
 
         inferred.update(left_inferred)
         inferred.update(right_inferred)
+
+        # FALLBACK: Wenn DimensionInferrer keine Dimension findet (z.B. bei ln()),
+        # verwende compute_expression_dimension als Alternative
+        if not right_dim.is_known:
+            dim_result, missing = compute_expression_dimension(right_str, known_units)
+            if dim_result is not None and not missing:
+                # Konvertiere pint dimensionality direkt zu Einheits-String
+                unit_str = unit_from_dimensionality(dim_result)
+                if unit_str is not None:  # Auch leerer String ist gültig (dimensionslos)
+                    right_dim = DimensionInfo(unit_str, get_dimension_from_unit(unit_str) if unit_str else ureg.Quantity(1.0, 'dimensionless'))
+
+        if not left_dim.is_known:
+            dim_result, missing = compute_expression_dimension(left_str, known_units)
+            if dim_result is not None and not missing:
+                unit_str = unit_from_dimensionality(dim_result)
+                if unit_str is not None:
+                    left_dim = DimensionInfo(unit_str, get_dimension_from_unit(unit_str) if unit_str else ureg.Quantity(1.0, 'dimensionless'))
 
         # Gleichheits-Constraint: left = right bedeutet dim(left) = dim(right)
         # Wenn eine Seite bekannt und die andere eine einzelne Variable, kann sie abgeleitet werden
@@ -714,7 +794,7 @@ def _infer_from_mult_div(node, target_dim: DimensionInfo, known_dims: Dict[str, 
                 new_target_dim = DimensionInfo(unit, result_quantity)
 
                 var_name = _get_var_name(node.left)
-                if var_name and unit:
+                if var_name and unit is not None:  # Auch leere Einheit (dimensionslos) akzeptieren
                     inferred[var_name] = unit
                 elif isinstance(node.left, ast.BinOp):
                     # Rekursiv: left ist auch eine Mult/Div Operation
@@ -731,7 +811,7 @@ def _infer_from_mult_div(node, target_dim: DimensionInfo, known_dims: Dict[str, 
                 new_target_dim = DimensionInfo(unit, result_quantity)
 
                 var_name = _get_var_name(node.right)
-                if var_name and unit:
+                if var_name and unit is not None:  # Auch leere Einheit (dimensionslos) akzeptieren
                     inferred[var_name] = unit
                 elif isinstance(node.right, ast.BinOp):
                     # Rekursiv: right ist auch eine Mult/Div Operation
@@ -753,7 +833,7 @@ def _infer_from_mult_div(node, target_dim: DimensionInfo, known_dims: Dict[str, 
                 new_target_dim = DimensionInfo(unit, result_quantity)
 
                 var_name = _get_var_name(node.left)
-                if var_name and unit:
+                if var_name and unit is not None:  # Auch leere Einheit (dimensionslos) akzeptieren
                     inferred[var_name] = unit
                 elif isinstance(node.left, ast.BinOp):
                     # Rekursiv
@@ -783,8 +863,8 @@ def _infer_from_addition(node, target_dim: DimensionInfo, known_dims: Dict[str, 
             var_name = node.id
             if var_name not in known_dims and target_dim.is_known:
                 unit = target_dim.unit if target_dim.unit else ""
-                if unit:
-                    inferred[var_name] = unit
+                # Auch leere Einheit (dimensionslos) ist gültig
+                inferred[var_name] = unit
         return inferred
 
     if isinstance(node.op, (ast.Add, ast.Sub)):
@@ -934,8 +1014,16 @@ FUNCTION_ARGUMENT_UNITS = {
     't': 'K',           # Temperatur (HumidAir verwendet lowercase)
     'p_tot': 'Pa',      # Gesamtdruck
     'rh': '',           # Relative Feuchte (dimensionslos)
+    'rf': '',           # Relative Feuchte (German: rF = relative Feuchte, dimensionslos)
     'w': '',            # Feuchtebeladung (kg/kg, oft als dimensionslos behandelt)
     'p_w': 'Pa',        # Partialdruck Wasserdampf
+
+    # Strahlungsfunktionen - Argumente
+    # Eb(T, wavelength), Blackbody(T, lambda1, lambda2), Wien(T), Stefan_Boltzmann(T)
+    'wavelength': 'µm',     # Wellenlänge
+    'lambda': 'µm',         # Wellenlänge (Alternative)
+    'lambda1': 'µm',        # Untere Wellenlänge
+    'lambda2': 'µm',        # Obere Wellenlänge
 }
 
 
@@ -973,8 +1061,11 @@ def infer_units_from_function_arguments(equation: str, known_units: Dict[str, st
                                'density', 'volume', 'quality', 'intenergy',
                                'cp', 'cv', 'viscosity', 'conductivity', 'soundspeed', 'prandtl'}
                 humid_funcs = {'humidair'}
+                radiation_funcs = {'eb', 'blackbody', 'blackbody_cumulative', 'wien',
+                                   'wien_displacement', 'stefan_boltzmann'}
 
-                if func_name not in thermo_funcs and func_name not in humid_funcs:
+                all_funcs = thermo_funcs | humid_funcs | radiation_funcs
+                if func_name not in all_funcs:
                     continue
 
                 # Analysiere keyword-Argumente
@@ -995,8 +1086,8 @@ def infer_units_from_function_arguments(equation: str, known_units: Dict[str, st
                         var_name = keyword.value.id
                         # Nur wenn Variable noch keine bekannte Einheit hat
                         if var_name not in known_units and var_name not in inferred:
-                            if expected_unit:  # Nicht-leere Einheit
-                                inferred[var_name] = expected_unit
+                            # Speichere auch leere Einheiten (dimensionslos) - wichtig für rh, rf, x etc.
+                            inferred[var_name] = expected_unit
 
     except Exception:
         pass
@@ -1624,6 +1715,10 @@ def check_all_unit_consistency(solution: Dict[str, float],
     Neuer Ansatz: Statt String-Vergleich wird mit pint geprüft, ob jede Gleichung
     dimensional konsistent ist (Dimension links == Dimension rechts).
 
+    WICHTIG: Vor der Prüfung werden Einheiten durch das Gleichungssystem propagiert,
+    damit Variablen deren Einheiten aus anderen Gleichungen abgeleitet werden können
+    (z.B. m_dot aus Q_dot = m_dot * c_p * dT) keine Warnung erzeugen.
+
     Args:
         solution: Dict von {variable: value} der Lösung
         equations: Dict von {parsed_equation: original_equation}
@@ -1637,10 +1732,15 @@ def check_all_unit_consistency(solution: Dict[str, float],
     if not PINT_AVAILABLE:
         return []
 
+    # WICHTIG: Propagiere Einheiten durch alle Gleichungen BEVOR wir prüfen
+    # Damit können Variablen wie m_dot oder Q_dot ihre Einheiten aus dem
+    # Gleichungssystem ableiten, auch wenn sie nicht explizit definiert wurden
+    all_units = propagate_all_units_complete(equations, known_units)
+
     warnings = []
 
     for parsed_eq, original_eq in equations.items():
-        error = check_equation_dimensions(original_eq, known_units)
+        error = check_equation_dimensions(original_eq, all_units)
 
         if error:
             if error['type'] == 'missing_units':
@@ -1711,10 +1811,11 @@ def compute_expression_dimension(expr: str, unit_map: Dict[str, str]) -> Tuple[A
 
     # Filtere bekannte Funktionen, Konstanten und Platzhalter
     known_tokens = {
-        # Mathematische Funktionen
+        # Mathematische Funktionen (inkl. ln als Alias für log)
         'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
-        'sinh', 'cosh', 'tanh',
-        'exp', 'log', 'log10', 'sqrt', 'abs',
+        'sinh', 'cosh', 'tanh', 'asinh', 'acosh', 'atanh',
+        'exp', 'log', 'log10', 'ln', 'sqrt', 'abs',
+        'max', 'min',
         'pi', 'e',
         # Platzhalter für Funktionsergebnisse
         'FUNC_RESULT',
@@ -1741,15 +1842,21 @@ def compute_expression_dimension(expr: str, unit_map: Dict[str, str]) -> Tuple[A
     # Ersetze ^ durch ** für Python
     expr_modified = expr_modified.replace('^', '**')
 
-    for var in sorted(variables, key=len, reverse=True):
+    # WICHTIG: Verwende verschiedene Werte für verschiedene Variablen,
+    # um Division-durch-Null bei Differenzen zu vermeiden.
+    # z.B. (T_in - T_inf)/(T_out - T_inf) mit T_in=3, T_inf=1, T_out=2 → (3-1)/(2-1) = 2
+    test_values = [2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0, 23.0, 29.0]  # Primzahlen vermeiden Vereinfachungen
+
+    for i, var in enumerate(sorted(variables, key=len, reverse=True)):
         unit = unit_map.get(var, '')
+        test_val = test_values[i % len(test_values)]  # Zyklisch durch Testwerte
         if unit and unit not in ('', 'dimensionless'):
             # Normalisiere die Einheit für pint
             normalized = normalize_unit(unit) if 'normalize_unit' in dir() else unit
-            replacement = f"(_Q_(1.0, '{normalized}'))"
+            replacement = f"(_Q_({test_val}, '{normalized}'))"
         else:
             # Dimensionslose Variable
-            replacement = "1.0"
+            replacement = str(test_val)
         expr_modified = re.sub(rf'\b{re.escape(var)}\b', replacement, expr_modified)
 
     # Ersetze Thermodynamik-Funktionsaufrufe durch ihre Ergebnis-Einheiten
@@ -1833,10 +1940,20 @@ def compute_expression_dimension(expr: str, unit_map: Dict[str, str]) -> Tuple[A
             'sin': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
             'cos': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
             'tan': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'asin': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'acos': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'atan': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'sinh': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'cosh': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'tanh': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
             'exp': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
             'log': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
+            'ln': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,  # Alias für log
+            'log10': lambda x: x.magnitude if hasattr(x, 'magnitude') else x,
             'sqrt': lambda x: x ** 0.5 if hasattr(x, 'magnitude') else x ** 0.5,
             'abs': lambda x: abs(x),
+            'max': lambda *args: max(a.magnitude if hasattr(a, 'magnitude') else a for a in args),
+            'min': lambda *args: min(a.magnitude if hasattr(a, 'magnitude') else a for a in args),
             'pi': 3.14159265359,
             'e': 2.71828182846,
         }

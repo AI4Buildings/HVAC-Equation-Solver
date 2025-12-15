@@ -616,15 +616,46 @@ class UnitValue:
 
         Returns:
             Numerischer Wert in Ziel-Einheit
+
+        Spezialfall Temperaturdifferenzen:
+            Bei berechneten Temperaturen (ohne original_unit aber mit calc_unit = 'K')
+            wird eine Delta-Konvertierung verwendet, da T1-T2 immer eine Differenz ist.
+            1K Differenz = 1°C Differenz (keine Offset-Subtraktion)
         """
         if not target_unit:
             return self.original_value if self.original_unit else self.si_value
 
         if self.quantity is None:
+            # Berechnete Variable ohne pint quantity
+            # Prüfe auf Temperaturdifferenz: si_unit = 'kelvin' und Ziel ist degC/degF
+            normalized = normalize_unit(target_unit)
+            if self.si_unit == 'kelvin' and normalized in ('degC', 'celsius', 'degree_Celsius'):
+                # Temperaturdifferenz: 1K = 1°C (keine Offset-Konvertierung!)
+                return self.si_value
+            elif self.si_unit == 'kelvin' and normalized in ('degF', 'fahrenheit', 'degree_Fahrenheit'):
+                # Temperaturdifferenz: 1K = 1.8°F
+                return self.si_value * 9.0 / 5.0
             return self.si_value
 
         try:
             normalized = normalize_unit(target_unit)
+
+            # Prüfe ob es eine berechnete Temperaturdifferenz ist
+            # (keine original_unit aber calc_unit ist eine Temperatur-Einheit)
+            temp_units = {'K', 'degC', 'degF', 'kelvin', 'celsius', 'fahrenheit', '°C', '°F'}
+            is_calculated_temp = (
+                not self.original_unit and
+                self._calc_unit in temp_units and
+                self.si_unit == 'kelvin'
+            )
+
+            if is_calculated_temp and normalized in ('degC', 'celsius', 'degree_Celsius'):
+                # Berechnete Temperatur = Temperaturdifferenz → 1K = 1°C
+                return self.si_value
+            elif is_calculated_temp and normalized in ('degF', 'fahrenheit', 'degree_Fahrenheit'):
+                # Temperaturdifferenz: 1K = 1.8°F
+                return self.si_value * 9.0 / 5.0
+
             converted = self.quantity.to(normalized)
             return float(converted.magnitude)
         except Exception:

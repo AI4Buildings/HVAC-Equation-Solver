@@ -21,6 +21,17 @@ except ImportError:
     def get_initial_from_unit(unit_str):
         return 1.0
 
+# Versuche Unit-Constraints zu laden für generische Einheiten-Inferenz aus Funktionsargumenten
+try:
+    from unit_constraints import infer_units_from_function_arguments, propagate_all_units_complete
+    UNIT_INFERENCE_AVAILABLE = True
+except ImportError:
+    UNIT_INFERENCE_AVAILABLE = False
+    def infer_units_from_function_arguments(equation, known_units):
+        return {}
+    def propagate_all_units_complete(equations, known_units, max_iterations=15):
+        return known_units.copy() if known_units else {}
+
 
 # ============================================================================
 # Analysis Data Structures
@@ -273,6 +284,15 @@ def solve_system(
     context = _get_eval_context()
     analysis = SolveAnalysis()
 
+    # Phase 0: Einheiten aus Funktionsargumenten inferieren (generischer Ansatz)
+    # Bei HumidAir(h, T=T_AUL, rF=rF_AUL, p_tot=p) wird erkannt:
+    #   - T_AUL hat Einheit K (weil T-Argument)
+    #   - rF_AUL ist dimensionslos (weil rF-Argument)
+    #   - p hat Einheit Pa (weil p_tot-Argument)
+    inferred_units = {}
+    if UNIT_INFERENCE_AVAILABLE and original_equations:
+        inferred_units = propagate_all_units_complete(original_equations, {})
+
     # Phase 1: Starte mit Konstanten
     known_values = constants.copy()
     remaining_equations = list(equations)
@@ -331,10 +351,24 @@ def solve_system(
         if not made_progress:
             for eq in remaining_equations[:]:
                 unknowns = _get_equation_unknowns(eq, set(known_values.keys()), remaining_vars)
+
+                # Constraint-Gleichung: alle Variablen sind bekannt (0 Unbekannte)
+                # Dies passiert z.B. bei "RWZ = (T-T0)/(T1-T0)" wenn RWZ als Konstante definiert ist
+                # und T_ZUL_WT bereits aus einer anderen Gleichung gelöst wurde
+                if len(unknowns) == 0:
+                    # Überprüfe ob die Gleichung erfüllt ist (Residuum nahe 0)
+                    residual = _calculate_residual(eq, known_values, context)
+                    remaining_equations.remove(eq)
+                    # Füge als Constraint zur Analysis hinzu (optional: Warnung wenn residual > tolerance)
+                    orig = original_equations.get(eq, eq)
+                    analysis.add_direct(orig, eq, "(constraint)", 0.0, residual)
+                    made_progress = True
+                    break
+
                 if len(unknowns) == 1:
                     unknown = list(unknowns)[0]
                     success, value = _solve_single_unknown(
-                        eq, unknown, known_values, context, initial_values
+                        eq, unknown, known_values, context, initial_values, inferred_units
                     )
                     if success:
                         known_values[unknown] = value
@@ -362,7 +396,7 @@ def solve_system(
                 # Prüfe ob Block quadratisch ist
                 if len(block_eqs) == len(block_vars):
                     success, block_solution, block_msg, block_analysis = _solve_equation_block(
-                        block_eqs, block_vars, known_values, context, initial_values, original_equations
+                        block_eqs, block_vars, known_values, context, initial_values, original_equations, inferred_units
                     )
 
                     if success:
@@ -793,7 +827,8 @@ def _solve_equation_block(
     known_values: Dict[str, float],
     context: dict,
     manual_initial: Dict[str, float] = None,
-    original_equations: Dict[str, str] = None
+    original_equations: Dict[str, str] = None,
+    inferred_units: Dict[str, str] = None
 ) -> Tuple[bool, Dict[str, float], str, Optional[BlockAnalysis]]:
     """
     Löst einen Block von Gleichungen mit gemeinsamen Unbekannten.
@@ -804,6 +839,7 @@ def _solve_equation_block(
     Args:
         manual_initial: Manuelle Startwerte (haben Priorität)
         original_equations: Mapping parsed -> original für Anzeige
+        inferred_units: Aus Funktionsargumenten abgeleitete Einheiten {var: unit}
 
     Returns:
         (success, solution_dict, message, block_analysis)
@@ -820,14 +856,14 @@ def _solve_equation_block(
     # Bei größeren Blöcken: Versuche iterative Zerlegung
     if n_vars > 3:
         success, solution, msg, block_analysis = _solve_block_iteratively(
-            equations, variables, known_values, context, manual_initial, original_equations
+            equations, variables, known_values, context, manual_initial, original_equations, inferred_units
         )
         if success:
             return success, solution, msg, block_analysis
 
     # Fallback: Löse den gesamten Block simultan (keine interne Zerlegung)
     success, solution, msg = _solve_block_simultaneously(
-        equations, variables, known_values, context, manual_initial
+        equations, variables, known_values, context, manual_initial, inferred_units
     )
     return success, solution, msg, None  # Keine BlockAnalysis für simultane Lösung
 
@@ -838,18 +874,30 @@ def _solve_block_iteratively(
     known_values: Dict[str, float],
     context: dict,
     manual_initial: Dict[str, float] = None,
-    original_equations: Dict[str, str] = None
+    original_equations: Dict[str, str] = None,
+    inferred_units: Dict[str, str] = None
 ) -> Tuple[bool, Dict[str, float], str, Optional[BlockAnalysis]]:
     """
     Versucht einen Block iterativ zu lösen, indem nach jeder gelösten
     Gleichung geprüft wird, ob weitere Gleichungen direkt oder mit
     nur einer Unbekannten lösbar sind.
 
+    Args:
+        equations: Liste von Gleichungen
+        variables: Set der Unbekannten
+        known_values: Dict bekannter Variablenwerte
+        context: Evaluierungskontext
+        manual_initial: Manuell vorgegebene Startwerte
+        original_equations: Mapping parsed -> original für Anzeige
+        inferred_units: Aus Funktionsargumenten abgeleitete Einheiten {var: unit}
+
     Returns:
         (success, solution_dict, message, block_analysis)
     """
     if original_equations is None:
         original_equations = {}
+    if inferred_units is None:
+        inferred_units = {}
 
     remaining_eqs = list(equations)
     remaining_vars = set(variables)
@@ -909,7 +957,7 @@ def _solve_block_iteratively(
             if len(unknowns) == 1:
                 unknown = list(unknowns)[0]
                 success, value = _solve_single_unknown(
-                    eq, unknown, local_known, context, manual_initial
+                    eq, unknown, local_known, context, manual_initial, inferred_units
                 )
                 if success:
                     solved_values[unknown] = value
@@ -940,7 +988,7 @@ def _solve_block_iteratively(
 
             if core_vars and len(core_eqs) == len(core_vars):
                 success, sub_solution, _ = _solve_block_simultaneously(
-                    core_eqs, core_vars, local_known, context, manual_initial
+                    core_eqs, core_vars, local_known, context, manual_initial, inferred_units
                 )
 
                 if success:
@@ -992,16 +1040,25 @@ def _solve_block_simultaneously(
     variables: Set[str],
     known_values: Dict[str, float],
     context: dict,
-    manual_initial: Dict[str, float] = None
+    manual_initial: Dict[str, float] = None,
+    inferred_units: Dict[str, str] = None
 ) -> Tuple[bool, Dict[str, float], str]:
     """
     Löst einen Block von Gleichungen simultan mit normalisiertem least_squares.
 
     Strategie:
-    1. Intelligente Startwerte basierend auf Variablennamen
+    1. Intelligente Startwerte basierend auf Einheiten (generisch) oder Variablennamen
     2. Normalisierung: Alle Variablen auf ~1.0 skalieren
     3. least_squares mit Levenberg-Marquardt (robuster als fsolve)
     4. Relative Toleranzen für Konvergenzprüfung
+
+    Args:
+        equations: Liste von Gleichungen
+        variables: Set der Unbekannten
+        known_values: Dict bekannter Variablenwerte
+        context: Evaluierungskontext
+        manual_initial: Manuell vorgegebene Startwerte
+        inferred_units: Aus Funktionsargumenten abgeleitete Einheiten {var: unit}
     """
     from scipy.optimize import least_squares
 
@@ -1015,8 +1072,8 @@ def _solve_block_simultaneously(
     if n_eqs != n_vars:
         return False, {}, f"Block nicht quadratisch: {n_eqs} Gleichungen, {n_vars} Unbekannte"
 
-    # Erstelle Startvektor mit intelligenten Startwerten
-    x0 = np.array([_get_initial_value(var, manual_initial, known_values)
+    # Erstelle Startvektor mit intelligenten Startwerten (basierend auf Einheiten)
+    x0 = np.array([_get_initial_value(var, manual_initial, known_values, inferred_units)
                    for var in var_list], dtype=float)
 
     # Skalierungsfaktoren = initiale Werte (damit normalisierte Variablen ~1.0 sind)
@@ -1140,20 +1197,18 @@ def _get_initial_value(var: str, manual_initial: Dict[str, float] = None,
                        known_values: Dict[str, float] = None,
                        inferred_units: Dict[str, str] = None) -> float:
     """
-    Ermittelt sinnvolle Startwerte basierend auf Einheiten (bevorzugt) oder Variablennamen.
+    Ermittelt sinnvolle Startwerte basierend auf Einheiten - OHNE Variablennamen-Heuristik.
 
-    BEVORZUGT: Unit-basierte Startwerte (generisch, unabhängig von Variablennamen)
-    FALLBACK: Variablennamen-Heuristik
+    Einheitenquellen (in Prioritätsreihenfolge):
+    1. Manuelle Startwerte (höchste Priorität)
+    2. Einheiten aus Funktionskontext (z.B. HumidAir(h, T=T_1, rF=rF_1) → T_1: K, rF_1: dimensionslos)
+    3. Einheiten aus User-Definition (z.B. T = 20°C → T: K)
+    4. Ähnliche bereits bekannte Variablen (z.B. h_5 bekommt Startwert ähnlich h_4)
+    5. Geometrisches Mittel bekannter Werte
+    6. Ultimativer Fallback: 1.0
 
-    Für SI-Einheiten sind typische Größenordnungen:
-    - Temperatur T: ~300-800 K
-    - Druck p: ~100000-3000000 Pa (1-30 bar)
-    - Enthalpie h: ~100000-3500000 J/kg
-    - Entropie s: ~1000-8000 J/(kg·K)
-    - Massenstrom m_dot: ~0.1-10 kg/s
-    - Leistung W_dot, Q_dot: ~1000-1000000 W
-    - Dampfqualität x: 0-1
-    - Wirkungsgrad eta: 0-1
+    WICHTIG: Keine Variablennamen-Heuristik! Die Einheit wird NUR aus dem Kontext abgeleitet,
+    nicht weil eine Variable mit 'T' oder 'p' beginnt.
     """
     # PRIORITÄT 0: Manuelle Startwerte haben höchste Priorität
     if manual_initial and var in manual_initial:
@@ -1195,61 +1250,14 @@ def _get_initial_value(var: str, manual_initial: Dict[str, float] = None,
             avg = sum(similar_vals) / len(similar_vals)
             return avg
 
-    # Temperatur (T, T_1, t_ein, etc.) - NICHT tau, theta
-    if var_lower.startswith('t') and not var_lower.startswith('tau') and not var_lower.startswith('theta'):
-        # Taupunkt und Feuchtkugeltemperatur etwas niedriger
-        if '_dp' in var_lower or '_wb' in var_lower:
-            return 290.0  # ~17°C
-        return 400.0  # ~127°C - typisch für Dampfprozesse
-
-    # Druck (p, p_1, p_ein, etc.) - NICHT prandtl, phi
-    if var_lower.startswith('p') and not var_lower.startswith('pr') and not var_lower.startswith('phi'):
-        return 500000.0  # 5 bar
-
-    # Enthalpie (h, h_1, h_ein, etc.) - NICHT humidity
-    if var_lower.startswith('h') and not var_lower.startswith('hum'):
-        return 1000000.0  # 1000 kJ/kg
-
-    # Entropie (s, s_1, etc.)
-    if var_lower.startswith('s') and len(var_lower) <= 4:
-        return 3000.0  # 3 kJ/(kg·K)
-
-    # Leistung (W_dot, Q_dot, P_dot, etc.)
-    if '_dot' in var_lower or 'dot_' in var_lower:
-        if var_lower.startswith('m'):
-            return 1.0  # 1 kg/s Massenstrom
-        if var_lower.startswith('v'):
-            return 0.1  # 0.1 m³/s Volumenstrom
-        # W_dot, Q_dot, P_dot - Leistung
-        return 100000.0  # 100 kW
-
-    # Dampfqualität (x, x_1, x_aus, etc.)
-    if var_lower.startswith('x') and len(var_lower) <= 5:
-        return 0.5
-
-    # Wirkungsgrad (eta, eta_th, eta_s_i_T, etc.)
-    if var_lower.startswith('eta'):
-        return 0.85
-
-    # Relative Feuchte (rh, phi)
-    if var_lower.startswith('rh') or var_lower == 'phi':
-        return 0.5
-
-    # Feuchtegehalt (w als Luftfeuchte - kurze Namen)
-    if var_lower == 'w' or (var_lower.startswith('w_') and len(var_lower) <= 4):
-        return 0.01  # 10 g/kg
-
-    # Dichte (rho, rho_1, etc.)
-    if var_lower.startswith('rho'):
-        return 1.0  # 1 kg/m³
-
-    # Spezifisches Volumen (v, v_1, etc.) - NICHT v_dot
-    if var_lower.startswith('v') and '_dot' not in var_lower and len(var_lower) <= 4:
-        return 0.1  # 0.1 m³/kg
-
-    # Innere Energie (u, u_1, etc.)
-    if var_lower.startswith('u') and len(var_lower) <= 4:
-        return 500000.0  # 500 kJ/kg
+    # KEINE Variablennamen-Heuristik mehr!
+    # Die Einheit wird NUR aus dem Funktionskontext oder User-Definition abgeleitet,
+    # nicht weil eine Variable mit 'T', 'p', 'h' etc. beginnt.
+    #
+    # Beispiel: "hoehe = 10" bekommt NICHT automatisch J/kg nur weil es mit 'h' beginnt.
+    # Stattdessen muss die Einheit aus dem Kontext kommen:
+    # - Funktionsargument: enthalpy(water, T=T_1, h=hoehe) → hoehe: J/kg
+    # - User-Definition: hoehe = 10 m → hoehe: m
 
     # Fallback: Geometrisches Mittel aller bekannten Werte
     if known_values:
@@ -1267,13 +1275,22 @@ def _get_initial_value(var: str, manual_initial: Dict[str, float] = None,
 
 
 def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, float],
-                           context: dict, manual_initial: Dict[str, float] = None) -> Tuple[bool, float]:
+                           context: dict, manual_initial: Dict[str, float] = None,
+                           inferred_units: Dict[str, str] = None) -> Tuple[bool, float]:
     """
     Löst eine Gleichung mit einer einzelnen Unbekannten.
 
     Strategie:
     1. Schneller Newton-Raphson Versuch (für einfache Gleichungen)
     2. Falls nötig: Robuste Bracket-Suche mit Brent's Methode
+
+    Args:
+        equation: Gleichung in Python-Syntax (f(x) = 0 Form)
+        unknown: Name der zu lösenden Variable
+        known_values: Dict bekannter Variablenwerte
+        context: Evaluierungskontext mit Funktionen
+        manual_initial: Manuell vorgegebene Startwerte
+        inferred_units: Aus Funktionsargumenten abgeleitete Einheiten {var: unit}
 
     Returns:
         (success, value)
@@ -1291,8 +1308,8 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
 
     # === Phase 1: Schneller Newton-Raphson Versuch ===
     # Für einfache (oft lineare) Gleichungen konvergiert dies in wenigen Iterationen
-    # Verwende intelligente Startwerte basierend auf Variablennamen
-    initial_guess = _get_initial_value(unknown, manual_initial, known_values)
+    # Verwende intelligente Startwerte basierend auf Einheiten (generisch) oder Variablennamen (Fallback)
+    initial_guess = _get_initial_value(unknown, manual_initial, known_values, inferred_units)
 
     try:
         x = initial_guess
@@ -1472,9 +1489,9 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
         return True, float(best_root)
 
     # Fallback: fsolve mit verschiedenen Startwerten
-    # Beginne mit intelligentem Startwert basierend auf Variablennamen
+    # Beginne mit intelligentem Startwert basierend auf Einheiten (generisch)
     import warnings
-    smart_start = _get_initial_value(unknown, manual_initial, known_values)
+    smart_start = _get_initial_value(unknown, manual_initial, known_values, inferred_units)
     fallback_starts = [smart_start, 1.0, 0.1, 10.0, 100.0, 1000.0, 10000.0]
     if scale > 1:
         fallback_starts.extend([scale, scale * 0.1, scale * 0.5, scale * 2, scale * 10])
@@ -1558,7 +1575,7 @@ def _try_sequential_evaluation(
                 unknowns = _get_equation_unknowns(eq, set(known_values.keys()), remaining_vars)
                 if len(unknowns) == 1:
                     unknown = list(unknowns)[0]
-                    success, value = _solve_single_unknown(eq, unknown, known_values, context)
+                    success, value = _solve_single_unknown(eq, unknown, known_values, context, None, None)
                     if success:
                         computed_values[unknown] = value
                         known_values[unknown] = value

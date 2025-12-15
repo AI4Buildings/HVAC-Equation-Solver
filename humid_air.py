@@ -47,6 +47,7 @@ INPUT_MAP = {
     'p_tot': ('P', lambda x: x),                    # Pa -> Pa (bereits SI)
     'w': ('W', lambda x: x),                        # kg_water/kg_dry_air
     'rh': ('R', lambda x: x),                       # dimensionless (0-1)
+    'rf': ('R', lambda x: x),                       # rF = relative Feuchte (German alias for rh)
     'p_w': ('psi_w', None),                         # Special handling
     'h': ('Hda', lambda x: x),                      # J/kg -> J/kg (bereits SI)
 }

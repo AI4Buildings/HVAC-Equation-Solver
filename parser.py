@@ -164,12 +164,49 @@ def remove_comments(text: str) -> str:
     return text
 
 
+def _convert_arg_units(arg: str) -> str:
+    """
+    Converts units in a function argument to SI base units.
+
+    Examples:
+        'T=25°C' -> 'T=298.15'
+        'p_tot=1bar' -> 'p_tot=100000'
+        'T=T_1' -> 'T=T_1' (variable, unchanged)
+        'rh=0.5' -> 'rh=0.5' (no unit)
+    """
+    if '=' not in arg:
+        return arg
+
+    key, value = arg.split('=', 1)
+    key = key.strip()
+    value = value.strip()
+
+    # Check if value is a variable (starts with letter/underscore, no digits after unit patterns)
+    if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', value):
+        return arg  # Variable, keep unchanged
+
+    # Try to parse as value with unit
+    if UNITS_AVAILABLE:
+        try:
+            magnitude, unit_str = parse_value_with_unit(value)
+            if unit_str:
+                from units import UnitValue
+                unit_value = UnitValue.from_input(magnitude, unit_str)
+                # Use SI base value for calculations
+                return f"{key}={unit_value.si_value}"
+        except (ValueError, Exception):
+            pass
+
+    return arg
+
+
 def convert_thermo_call(match) -> str:
     """
     Konvertiert einen Thermodynamik-Funktionsaufruf von EES zu Python-Syntax.
+    Konvertiert auch Einheiten in key=value Argumenten zu SI-Basiseinheiten.
 
-    EES:    enthalpy(water, T=100, p=1)
-    Python: enthalpy('water', T=100, p=1)
+    EES:    enthalpy(water, T=100°C, p=1bar)
+    Python: enthalpy('water', T=373.15, p=100000)
 
     EES:    h = enthalpy(R134a, T=T1, x=1)
     Python: h = enthalpy('R134a', T=T1, x=1)
@@ -210,8 +247,10 @@ def convert_thermo_call(match) -> str:
     if not (fluid.startswith("'") or fluid.startswith('"')):
         fluid = f"'{fluid}'"
 
-    # Restliche Argumente (key=value Paare)
-    rest_args = args[1:]
+    # Restliche Argumente (key=value Paare) - konvertiere Einheiten zu SI
+    rest_args = []
+    for arg in args[1:]:
+        rest_args.append(_convert_arg_units(arg))
 
     # Rekonstruiere den Aufruf
     new_args = [fluid] + rest_args
@@ -221,9 +260,10 @@ def convert_thermo_call(match) -> str:
 def convert_humid_air_call(match) -> str:
     """
     Converts a HumidAir function call from EES to Python syntax.
+    Also converts units in key=value arguments to SI base units.
 
-    EES:    HumidAir(h, T=25, rh=0.5, p_tot=1)
-    Python: HumidAir('h', T=25, rh=0.5, p_tot=1)
+    EES:    HumidAir(h, T=25°C, rh=0.5, p_tot=1bar)
+    Python: HumidAir('h', T=298.15, rh=0.5, p_tot=100000)
 
     EES:    w = HumidAir(w, T=30, rh=0.6, p_tot=1)
     Python: w = HumidAir('w', T=30, rh=0.6, p_tot=1)
@@ -264,8 +304,10 @@ def convert_humid_air_call(match) -> str:
     if not (output_prop.startswith("'") or output_prop.startswith('"')):
         output_prop = f"'{output_prop}'"
 
-    # Restliche Argumente (key=value Paare)
-    rest_args = args[1:]
+    # Restliche Argumente (key=value Paare) - konvertiere Einheiten zu SI
+    rest_args = []
+    for arg in args[1:]:
+        rest_args.append(_convert_arg_units(arg))
 
     # Rekonstruiere den Aufruf
     new_args = [output_prop] + rest_args
@@ -401,6 +443,64 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
     original_equations = {}  # Mapping: parsed -> original
     unit_values = {}  # Einheiten-Informationen für Variablen
 
+    # ZWEI-PASS-ANSATZ: Erst alle Konstanten identifizieren, dann Gleichungen verarbeiten
+    # Dies ist notwendig, da Konstanten nach Gleichungen definiert sein können
+    # z.B. "RWZ = (T-T0)/(T1-T0)" gefolgt von "RWZ = 0.75"
+
+    # Pass 1: Identifiziere alle Konstanten (direkte Zuweisungen)
+    pre_constants = set()
+    for line in lines:
+        line = line.strip()
+        if not line or '=' not in line:
+            continue
+        # Prüfe auf Vektor-Zuweisung (kein Konstant)
+        is_vec, var_name, _, _ = is_vector_assignment(line, parse_units=parse_units)
+        if is_vec:
+            continue
+        parts = line.split('=', 1)
+        if len(parts) != 2:
+            continue
+        left = parts[0].strip()
+        right = parts[1].strip()
+        # Prüfe ob links eine einzelne Variable steht
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', left):
+            continue
+        var_name = left
+        # Prüfe ob rechts eine Zahl, Zahl mit Einheit oder rein numerischer Ausdruck ist
+        # Zahl mit Einheit
+        if UNITS_AVAILABLE:
+            try:
+                from units import UnitValue
+                magnitude, unit_str = parse_value_with_unit(right)
+                if unit_str:
+                    pre_constants.add(var_name)
+                    continue
+            except ValueError:
+                pass
+        # Reine Zahl
+        try:
+            float(right)
+            pre_constants.add(var_name)
+            continue
+        except ValueError:
+            pass
+        # Numerischer Ausdruck (ohne Variablen)
+        right_tokenized = tokenize_equation(right)
+        vars_in_right = extract_variables(right_tokenized)
+        if not vars_in_right:
+            # Versuche auszuwerten
+            try:
+                eval(right_tokenized, {"__builtins__": {}}, {
+                    'pi': np.pi, 'e': np.e,
+                    'sin': np.sin, 'cos': np.cos, 'tan': np.tan,
+                    'sqrt': np.sqrt, 'log': np.log, 'log10': np.log10,
+                    'exp': np.exp, 'abs': abs
+                })
+                pre_constants.add(var_name)
+            except Exception:
+                pass
+
+    # Pass 2: Normale Verarbeitung
     for i, line in enumerate(lines):
         line = line.strip()
 
@@ -542,7 +642,9 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
                     pass
 
         # Füge Variablen hinzu (nur wenn keine direkte Zuweisung)
+        # WICHTIG: Entferne vor-identifizierte Konstanten (aus Pass 1)
         all_vars = vars_left | vars_right
+        all_vars -= pre_constants  # Konstanten nie als Variablen zählen
         all_variables |= all_vars
 
         # Erstelle Gleichung in der Form: left - right = 0
@@ -561,11 +663,17 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
     return equations, all_variables, initial_values, sweep_vars, original_equations, unit_values
 
 
-def validate_system(equations: List[str], variables: Set[str]) -> Tuple[bool, str]:
+def validate_system(equations: List[str], variables: Set[str], constants: Dict[str, float] = None) -> Tuple[bool, str]:
     """
     Validiert das Gleichungssystem.
 
     Prüft ob die Anzahl der Gleichungen mit der Anzahl der Unbekannten übereinstimmt.
+    Zählt Constraint-Gleichungen (wo die LHS-Variable eine Konstante ist) korrekt.
+
+    Args:
+        equations: Liste der geparsten Gleichungen
+        variables: Menge der Unbekannten
+        constants: Dict der Konstanten (optional, für Constraint-Zählung)
     """
     n_eq = len(equations)
     n_var = len(variables)
@@ -579,8 +687,25 @@ def validate_system(equations: List[str], variables: Set[str]) -> Tuple[bool, st
     if n_eq < n_var:
         return False, f"Unterbestimmtes System: {n_eq} Gleichungen, aber {n_var} Unbekannte.\nVariablen: {', '.join(sorted(variables))}"
 
-    if n_eq > n_var:
-        return False, f"Überbestimmtes System: {n_eq} Gleichungen, aber nur {n_var} Unbekannte.\nVariablen: {', '.join(sorted(variables))}"
+    # Zähle Constraint-Gleichungen (LHS ist Konstante)
+    n_constraints = 0
+    if constants:
+        for eq in equations:
+            # Gleichungen haben die Form "(var) - (expr)"
+            match = re.match(r'^\(([a-zA-Z_][a-zA-Z0-9_]*)\)\s*-\s*\(', eq)
+            if match:
+                lhs_var = match.group(1)
+                if lhs_var in constants:
+                    n_constraints += 1
+
+    # Effektive Gleichungsanzahl = Gleichungen - Constraints
+    n_effective_eq = n_eq - n_constraints
+
+    if n_effective_eq > n_var:
+        return False, f"Überbestimmtes System: {n_eq} Gleichungen ({n_constraints} Constraints), aber nur {n_var} Unbekannte.\nVariablen: {', '.join(sorted(variables))}"
+
+    if n_constraints > 0:
+        return True, f"System: {n_eq} Gleichungen ({n_constraints} Constraints), {n_var} Unbekannte."
 
     return True, f"System OK: {n_eq} Gleichungen, {n_var} Unbekannte."
 

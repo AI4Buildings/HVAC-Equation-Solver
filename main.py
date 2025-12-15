@@ -920,8 +920,8 @@ class EquationSolverApp(ctk.CTk):
             self.last_sweep_vars = sweep_vars
             self.last_analysis = None  # Residuals-Daten
 
-            # Validiere System
-            valid, msg = validate_system(equations, variables)
+            # Validiere System (mit Konstanten für Constraint-Zählung)
+            valid, msg = validate_system(equations, variables, initial_values)
 
             n_equations = len(equations)
             n_variables = len(variables)
