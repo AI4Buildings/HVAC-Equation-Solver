@@ -566,23 +566,23 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
                     # Wert mit Einheit gefunden (z.B. "15°C", "10g", "2.5kJ/kg")
                     var_name = left
 
-                    # Spezialfall: Temperaturdifferenz (dT, DT, delta_T, etc.)
+                    # Spezialfall: Temperaturdifferenz (dT..., delta...)
                     # K sollte als Differenz behandelt werden, nicht als absolute Temperatur
+                    # Erkennungsmuster: Variablenname beginnt mit "dT" oder "delta"
+                    var_lower = var_name.lower()
                     is_temp_diff = (
                         unit_str.upper() == 'K' and
-                        (var_name.lower().startswith('d') or
-                         var_name.lower().startswith('delta') or
-                         '_d' in var_name.lower() or
-                         'diff' in var_name.lower())
+                        (var_lower.startswith('dt') or
+                         var_lower.startswith('delta'))
                     )
 
                     if is_temp_diff:
-                        # Temperaturdifferenz: 1K = 1°C Differenz
+                        # Temperaturdifferenz: 1K = 1 delta_K
                         # Keine Konvertierung nötig, Wert bleibt gleich
                         initial_values[var_name] = magnitude
                         if parse_units:
-                            # Erstelle UnitValue mit K als Differenz-Einheit
-                            unit_values[var_name] = UnitValue.from_input(magnitude, 'delta_degC')
+                            # Erstelle UnitValue mit delta_K als Differenz-Einheit
+                            unit_values[var_name] = UnitValue.from_input(magnitude, 'delta_K')
                     else:
                         unit_value = UnitValue.from_input(magnitude, unit_str)
                         # Verwende calc_value für Berechnungen (konvertiert zu Standard-Einheit)

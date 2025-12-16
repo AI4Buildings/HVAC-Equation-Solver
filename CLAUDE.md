@@ -240,6 +240,7 @@ Dimensionslose Zahlen werden automatisch erkannt:
 | Kategorie | Einheiten |
 |-----------|-----------|
 | Temperatur | °C, K, °F |
+| Temperaturdifferenz | delta_K (für Variablen wie dT..., delta...) |
 | Druck | bar, Pa, kPa, MPa, atm, psi |
 | Energie | kJ, J, kWh |
 | Leistung | kW, W |
@@ -254,6 +255,19 @@ Dimensionslose Zahlen werden automatisch erkannt:
 | Stefan-Boltzmann | W/m²K⁴ |
 | Kinematische Viskosität | m²/s |
 | Wärmeleitfähigkeit | W/mK |
+
+### Temperaturdifferenzen
+
+Variablen deren Name mit `dT` oder `delta` beginnt werden automatisch als
+Temperaturdifferenzen erkannt und erhalten die Einheit `delta_K`.
+
+```
+dT_N = 49.83K            {→ Erkannt als delta_K}
+delta_T = 10K            {→ Erkannt als delta_K}
+dT_log = (T1-T2)/ln(...) {→ Abgeleitet als delta_K}
+```
+
+Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahieren).
 
 ## Bekannte Einschränkungen / Design-Entscheidungen
 

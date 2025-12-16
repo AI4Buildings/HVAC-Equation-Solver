@@ -1053,14 +1053,14 @@ class EquationSolverApp(ctk.CTk):
                             if var not in known_units:
                                 known_units[var] = ''  # dimensionslos
 
-                        inferred = propagate_all_units(original_equations, known_units)
+                        inferred = propagate_all_units_complete(original_equations, known_units)
 
                         if not inferred:
                             break  # Keine neuen Einheiten gefunden
 
                         found_new = False
                         for var, unit in inferred.items():
-                            if var in solution and unit:  # Nur wenn unit nicht leer ist
+                            if var in solution and unit is not None:  # Auch leere Einheit (dimensionslos) akzeptieren
                                 # Aktualisiere auch wenn schon vorhanden aber ohne Einheit
                                 existing = self.current_unit_values.get(var)
                                 if existing is None or not existing.original_unit:
@@ -1855,6 +1855,19 @@ TIPS:
   - Use subscripts: T_1, p_2, h_in, h_out
   - For wavelength: use 'L', 'wl', or 'lambda_1'
   - Euler's number: use exp(1) instead of e
+
+TEMPERATURE DIFFERENCES:
+------------------------
+Variables starting with "dT" or "delta" are recognized as
+temperature differences and use the unit "delta_K".
+
+Examples:
+  dT_N = 49.83K         {Recognized as delta_K}
+  delta_T = 10K         {Recognized as delta_K}
+  dT_log = (T1-T2)/ln((T1-T0)/(T2-T0))  {Inferred as delta_K}
+
+This avoids incorrect offset conversions (K → °C).
+Regular temperatures (T_1, T_VL, etc.) remain in K.
 
 PARAMETRIC STUDIES (Sweeps):
 ----------------------------

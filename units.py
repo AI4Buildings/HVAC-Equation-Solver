@@ -22,6 +22,10 @@ ureg = pint.UnitRegistry()
 ureg.define('degC = kelvin; offset: 273.15 = °C = celsius')
 ureg.define('degF = 5/9 * kelvin; offset: 255.372222 = °F = fahrenheit')
 
+# Temperaturdifferenz-Einheit (delta_K = 1 Kelvin Differenz, identisch mit delta_degC)
+# Verwendet für Variablen wie dT, delta_T, etc.
+ureg.define('delta_K = delta_degC')
+
 # Aliase für häufige Einheiten
 ureg.define('@alias bar = Bar')
 ureg.define('@alias pascal = Pa')

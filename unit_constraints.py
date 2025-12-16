@@ -41,6 +41,44 @@ class DimensionInfo:
         return self.unit == "" or self.unit == "dimensionless"
 
 
+def is_temperature_difference_variable(var_name: str) -> bool:
+    """
+    Prüft ob ein Variablenname auf eine Temperaturdifferenz hindeutet.
+
+    Erkennungsmuster:
+    - Beginnt mit "dT" (z.B. dT_N, dT_log, dT_B)
+    - Beginnt mit "delta" (z.B. delta_T, deltaT)
+
+    Args:
+        var_name: Name der Variable
+
+    Returns:
+        True wenn der Name auf eine Temperaturdifferenz hindeutet
+    """
+    var_lower = var_name.lower()
+    return var_lower.startswith('dt') or var_lower.startswith('delta')
+
+
+def adjust_unit_for_variable(unit: str, var_name: str) -> str:
+    """
+    Passt die Einheit basierend auf dem Variablennamen an.
+
+    Speziell für Temperaturdifferenzen: Wenn die Einheit 'K' ist und der
+    Variablenname auf eine Differenz hindeutet (dT..., delta...), wird
+    'delta_K' zurückgegeben.
+
+    Args:
+        unit: Die abgeleitete Einheit (z.B. 'K')
+        var_name: Name der Variable
+
+    Returns:
+        Angepasste Einheit (z.B. 'delta_K' statt 'K' für Temperaturdifferenzen)
+    """
+    if unit == 'K' and is_temperature_difference_variable(var_name):
+        return 'delta_K'
+    return unit
+
+
 def get_dimension_from_unit(unit_str: str) -> Any:
     """Erzeugt eine pint Quantity mit Dimension 1 für eine Einheit.
 
@@ -990,7 +1028,12 @@ def propagate_all_units(equations: Dict[str, str], known_units: Dict[str, str],
             break
 
     # Gib nur neue Einheiten zurück (nicht die ursprünglich bekannten)
-    return {var: unit for var, unit in all_units.items() if var not in known_units}
+    # Post-Processing: Passe Einheiten basierend auf Variablennamen an
+    result = {}
+    for var, unit in all_units.items():
+        if var not in known_units:
+            result[var] = adjust_unit_for_variable(unit, var) if unit else unit
+    return result
 
 
 # ============================================================================
@@ -1138,7 +1181,13 @@ def propagate_all_units_complete(equations: Dict[str, str], known_units: Dict[st
         if not found_new:
             break
 
-    return all_units
+    # Post-Processing: Passe Einheiten basierend auf Variablennamen an
+    # Speziell für Temperaturdifferenzen (dT..., delta...) → delta_K statt K
+    adjusted_units = {}
+    for var, unit in all_units.items():
+        adjusted_units[var] = adjust_unit_for_variable(unit, var) if unit else unit
+
+    return adjusted_units
 
 
 # ============================================================================
