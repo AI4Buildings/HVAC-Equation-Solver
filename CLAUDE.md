@@ -197,6 +197,16 @@ Hyperbolische Funktionen (`sinh`, `cosh`, `tanh`) verwenden Radiant.
 - **Dimensionsanalyse**: Verwendet AST-Parsing für algebraische Ausdrücke
 - **Rückwärts-Propagation**: Bei `q = h*dT` wird `h = q/dT` abgeleitet
 - **Konsistenzprüfung**: Warnt bei inkonsistenten Einheiten
+- **Additive Ketten**: Bei `A + B - C = 0` erhalten alle Terme die gleiche Dimension
+
+**Wichtige Funktionen:**
+- `propagate_all_units()` / `propagate_all_units_complete()`: Hauptfunktionen für Einheiten-Propagation
+- `analyze_equation()`: Analysiert eine Gleichung und leitet Einheiten ab
+- `_infer_from_additive_chain()`: Propagiert Dimensionen in Addition/Subtraktion-Ketten
+- `_collect_additive_terms()`: Sammelt alle Terme aus +/- Ketten (ignoriert numerische Konstanten)
+- `_infer_from_mult_div()`: Rückwärts-Inferenz für Multiplikation/Division
+- `is_temperature_difference_variable()`: Erkennt Temperaturdifferenz-Variablen (dT..., delta...)
+- `adjust_unit_for_variable()`: Passt Einheit basierend auf Variablenname an (K → delta_K)
 
 ### Einheiten-Syntax
 
@@ -226,6 +236,28 @@ Bei Gleichungen wie:
 q_dot = h*(T_s - T_inf)
 ```
 wird automatisch erkannt, dass `q_dot` die Einheit `W/m²` hat.
+
+### Einheiten-Propagation bei Addition/Subtraktion
+
+Bei Gleichungen mit Addition/Subtraktion müssen alle Terme die gleiche Dimension haben.
+Die Einheiten-Propagation erkennt dies automatisch:
+
+```
+{Massenbilanz - m_dot_3 wird automatisch als kg/s erkannt}
+m_dot_1 = 1 kg/s
+m_dot_2 = 2 kg/s
+m_dot_1 + m_dot_2 - m_dot_3 = 0
+
+{Energiebilanz - h_3 wird automatisch als kJ/kg erkannt}
+h_1 = 100 kJ/kg
+h_2 = 200 kJ/kg
+m_dot_1*h_1 + m_dot_2*h_2 - m_dot_3*h_3 = 0
+```
+
+**Funktioniert für:**
+- Beliebige Anzahl von Termen: `A + B + C + D + E - F = 0`
+- Komplexe Ausdrücke: `dT/ln(T2/T1) + dT2*sin(x) + dT5*22 = 0`
+- Numerische Konstanten (0, 1, etc.) werden ignoriert - sie sind dimensional neutral
 
 ### Dimensionslose Größen
 
