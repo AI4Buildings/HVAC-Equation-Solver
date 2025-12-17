@@ -798,8 +798,145 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
             except:
                 pass
 
+        # NEU: Generische Addition/Subtraktion-Ketten-Analyse
+        # Bei Gleichungen wie "A + B - C = 0" oder "m_dot_1 + m_dot_2 - m_dot_3 = 0"
+        # haben alle Terme die gleiche Dimension (0 ist dimensional neutral).
+        # Analysiere beide Seiten der Gleichung auf additive Ketten.
+        try:
+            left_ast = ast.parse(left_str, mode='eval')
+            # Prüfe ob linke Seite eine Addition/Subtraktion enthält
+            if isinstance(left_ast.body, ast.BinOp) and isinstance(left_ast.body.op, (ast.Add, ast.Sub)):
+                chain_inferred = _infer_from_additive_chain(left_ast.body, known_dims)
+                inferred.update(chain_inferred)
+        except:
+            pass
+
+        try:
+            right_ast = ast.parse(right_str, mode='eval')
+            # Prüfe ob rechte Seite eine Addition/Subtraktion enthält
+            if isinstance(right_ast.body, ast.BinOp) and isinstance(right_ast.body.op, (ast.Add, ast.Sub)):
+                chain_inferred = _infer_from_additive_chain(right_ast.body, known_dims)
+                inferred.update(chain_inferred)
+        except:
+            pass
+
     except Exception as e:
         pass
+
+    return inferred
+
+
+def _collect_additive_terms(node) -> list:
+    """
+    Sammelt alle Terme einer Addition/Subtraktion-Kette.
+
+    Beispiel: A + B - C + D wird zu [A, B, C, D]
+
+    Traversiert den AST rekursiv und sammelt alle Operanden von + und -.
+    Numerische Konstanten (0, 1, etc.) werden ignoriert, da sie dimensional neutral sind.
+    """
+    terms = []
+
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
+        # Rekursiv linke und rechte Seite sammeln
+        terms.extend(_collect_additive_terms(node.left))
+        terms.extend(_collect_additive_terms(node.right))
+    elif isinstance(node, (ast.Constant, ast.Num)):
+        # Numerische Konstanten ignorieren - sie sind dimensional neutral
+        # 0 kann jede Dimension haben (0 kg/s = 0 = 0 J/kg)
+        pass
+    elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        # Unäres Minus: -X → sammle X
+        terms.extend(_collect_additive_terms(node.operand))
+    else:
+        # Anderer Ausdruck (Variable, Multiplikation, Division, Funktionsaufruf, etc.)
+        terms.append(node)
+
+    return terms
+
+
+def _infer_from_additive_chain(node, known_dims: Dict[str, DimensionInfo]) -> Dict[str, str]:
+    """
+    Inferiert Einheiten aus einer Addition/Subtraktion-Kette.
+
+    Bei Addition/Subtraktion haben ALLE Terme die gleiche Dimension.
+    Beispiel: A + B - C = 0
+      → Wenn A = kg/s bekannt, dann B = kg/s und C = kg/s
+
+    Diese Funktion:
+    1. Sammelt alle Terme der Kette (ignoriert numerische Konstanten)
+    2. Berechnet die Dimension bekannter Terme
+    3. Propagiert diese Dimension zu unbekannten Termen
+    """
+    if not PINT_AVAILABLE:
+        return {}
+
+    inferred = {}
+
+    # Sammle alle Terme der Addition/Subtraktion-Kette
+    terms = _collect_additive_terms(node)
+
+    if not terms:
+        return inferred
+
+    # Finde die Dimension aus bekannten Termen
+    known_dimension = None
+    known_quantity = None
+
+    for term in terms:
+        term_dim = _get_dimension(term, known_dims)
+        if term_dim.is_known and term_dim.quantity is not None:
+            known_dimension = term_dim.unit
+            known_quantity = term_dim.quantity
+            break
+        elif term_dim.is_known and term_dim.unit is not None:
+            # Bekannt aber ohne quantity (z.B. dimensionslos "")
+            known_dimension = term_dim.unit
+            break
+
+    # Wenn keine Dimension bekannt, versuche sie zu berechnen
+    if known_dimension is None:
+        for term in terms:
+            try:
+                # Versuche die Dimension des Terms zu berechnen
+                term_str = ast.unparse(term) if hasattr(ast, 'unparse') else str(term)
+                # Konvertiere known_dims zu known_units für compute_expression_dimension
+                known_units = {var: dim.unit for var, dim in known_dims.items() if dim.is_known}
+                dim_result, missing = compute_expression_dimension(term_str, known_units)
+                if dim_result is not None and not missing:
+                    known_dimension = unit_from_dimensionality(dim_result)
+                    if known_dimension is not None:
+                        known_quantity = get_dimension_from_unit(known_dimension)
+                        break
+            except:
+                pass
+
+    # Wenn immer noch keine Dimension bekannt, können wir nichts ableiten
+    if known_dimension is None:
+        return inferred
+
+    # Propagiere die Dimension zu allen unbekannten Termen
+    target_dim = DimensionInfo(known_dimension, known_quantity)
+
+    for term in terms:
+        term_dim = _get_dimension(term, known_dims)
+
+        if term_dim.is_known:
+            # Term hat bereits bekannte Dimension, überspringen
+            continue
+
+        # Versuche Variablen aus dem Term abzuleiten
+        if isinstance(term, ast.Name):
+            # Einfache Variable
+            var_name = term.id
+            if var_name not in known_dims:
+                inferred[var_name] = known_dimension
+        else:
+            # Komplexer Term (z.B. m_dot*h, dT/ln(...))
+            # Verwende _infer_from_mult_div für Multiplikation/Division
+            if isinstance(term, ast.BinOp):
+                sub_inferred = _infer_from_mult_div(term, target_dim, known_dims)
+                inferred.update(sub_inferred)
 
     return inferred
 
