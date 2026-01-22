@@ -13,7 +13,7 @@ Unterstützte Syntax:
 
 import re
 import numpy as np
-from typing import List, Set, Tuple, Dict, Union, Any
+from typing import List, Set, Tuple, Dict, Union, Optional
 
 # Einheiten-Modul (optional, falls nicht vorhanden wird ohne Einheiten gearbeitet)
 try:
@@ -519,6 +519,9 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
         is_vec, var_name, vec_str, vec_unit = is_vector_assignment(line, parse_units=parse_units)
         if is_vec:
             vec_array = parse_vector(vec_str)
+            # Prüfe ob Vektor erfolgreich geparst wurde
+            if vec_array is None:
+                continue
             # Wenn Einheit angegeben: Konvertiere zu Standard-Berechnungseinheit
             if vec_unit and UNITS_AVAILABLE:
                 try:
@@ -536,7 +539,7 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
                     sweep_vars[var_name] = calc_values
                     # Speichere UnitValue für Anzeige (erster Wert)
                     unit_values[var_name] = first_uv
-                except Exception as e:
+                except Exception:
                     # Bei Fehler: verwende Original-Werte ohne Konvertierung
                     sweep_vars[var_name] = vec_array
             else:
@@ -663,7 +666,7 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
     return equations, all_variables, initial_values, sweep_vars, original_equations, unit_values
 
 
-def validate_system(equations: List[str], variables: Set[str], constants: Dict[str, float] = None) -> Tuple[bool, str]:
+def validate_system(equations: List[str], variables: Set[str], constants: Optional[Dict[str, float]] = None) -> Tuple[bool, str]:
     """
     Validiert das Gleichungssystem.
 

@@ -372,10 +372,8 @@ class DimensionInferrer(ast.NodeVisitor):
         """Extrahiert numerischen Wert aus Exponent-Knoten."""
         if node is None:
             return None
-        if isinstance(node, ast.Constant):  # Python 3.8+
+        if isinstance(node, ast.Constant):
             return node.value if isinstance(node.value, (int, float)) else None
-        if isinstance(node, ast.Num):  # Python < 3.8
-            return node.n
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
             # Negativer Exponent: -2 etc.
             inner = self._extract_exponent_value(node.operand)
@@ -726,10 +724,8 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
                         exp_value = None
                         if isinstance(left_ast.body.right, ast.Constant):
                             exp_value = left_ast.body.right.value
-                        elif isinstance(left_ast.body.right, ast.Num):
-                            exp_value = left_ast.body.right.n
 
-                        if exp_value is not None and exp_value != 0:
+                        if exp_value is not None and isinstance(exp_value, (int, float)) and exp_value != 0:
                             # var^n = expr → var = expr^(1/n)
                             try:
                                 var_quantity = right_dim.quantity ** (1.0 / exp_value)
@@ -757,10 +753,8 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
                         exp_value = None
                         if isinstance(right_ast.body.right, ast.Constant):
                             exp_value = right_ast.body.right.value
-                        elif isinstance(right_ast.body.right, ast.Num):
-                            exp_value = right_ast.body.right.n
 
-                        if exp_value is not None and exp_value != 0:
+                        if exp_value is not None and isinstance(exp_value, (int, float)) and exp_value != 0:
                             # expr = var^n → var = expr^(1/n)
                             try:
                                 var_quantity = left_dim.quantity ** (1.0 / exp_value)
@@ -820,7 +814,7 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
         except:
             pass
 
-    except Exception as e:
+    except Exception:
         pass
 
     return inferred
@@ -841,7 +835,7 @@ def _collect_additive_terms(node) -> list:
         # Rekursiv linke und rechte Seite sammeln
         terms.extend(_collect_additive_terms(node.left))
         terms.extend(_collect_additive_terms(node.right))
-    elif isinstance(node, (ast.Constant, ast.Num)):
+    elif isinstance(node, ast.Constant):
         # Numerische Konstanten ignorieren - sie sind dimensional neutral
         # 0 kann jede Dimension haben (0 kg/s = 0 = 0 J/kg)
         pass
@@ -1079,10 +1073,8 @@ def _infer_from_addition(node, target_dim: DimensionInfo, known_dims: Dict[str, 
                         exp_value = None
                         if isinstance(node.right.right, ast.Constant):
                             exp_value = node.right.right.value
-                        elif isinstance(node.right.right, ast.Num):
-                            exp_value = node.right.right.n
 
-                        if exp_value is not None and exp_value != 0 and target_dim.quantity is not None:
+                        if exp_value is not None and isinstance(exp_value, (int, float)) and exp_value != 0 and target_dim.quantity is not None:
                             try:
                                 # target = left * var^exp → var^exp = target / left
                                 pow_quantity = target_dim.quantity / left_dim.quantity
@@ -1102,10 +1094,8 @@ def _infer_from_addition(node, target_dim: DimensionInfo, known_dims: Dict[str, 
                         exp_value = None
                         if isinstance(node.left.right, ast.Constant):
                             exp_value = node.left.right.value
-                        elif isinstance(node.left.right, ast.Num):
-                            exp_value = node.left.right.n
 
-                        if exp_value is not None and exp_value != 0 and target_dim.quantity is not None:
+                        if exp_value is not None and isinstance(exp_value, (int, float)) and exp_value != 0 and target_dim.quantity is not None:
                             try:
                                 pow_quantity = target_dim.quantity / right_dim.quantity
                                 var_quantity = pow_quantity ** (1.0 / exp_value)
@@ -1149,10 +1139,10 @@ def propagate_all_units(equations: Dict[str, str], known_units: Dict[str, str],
 
     all_units = known_units.copy()
 
-    for iteration in range(max_iterations):
+    for _ in range(max_iterations):
         found_new = False
 
-        for parsed_eq, original_eq in equations.items():
+        for _parsed_eq, original_eq in equations.items():
             # Analysiere Original-Gleichung (lesbarer)
             newly_inferred = analyze_equation(original_eq, all_units)
 
@@ -1297,10 +1287,10 @@ def propagate_all_units_complete(equations: Dict[str, str], known_units: Dict[st
 
     all_units = known_units.copy()
 
-    for iteration in range(max_iterations):
+    for _ in range(max_iterations):
         found_new = False
 
-        for parsed_eq, original_eq in equations.items():
+        for _parsed_eq, original_eq in equations.items():
             # 1. Funktionsargument-Analyse (bidirektional)
             arg_inferred = infer_units_from_function_arguments(original_eq, all_units)
             for var, unit in arg_inferred.items():
@@ -1548,7 +1538,7 @@ def _build_raw_unit_from_node(node, known_units: Dict[str, str]) -> Optional[str
             return known_units[var] if known_units[var] else ""
         return None
 
-    elif isinstance(node, (ast.Constant, ast.Num)):
+    elif isinstance(node, ast.Constant):
         return ""  # Zahlen sind dimensionslos
 
     elif isinstance(node, ast.UnaryOp):
@@ -1590,8 +1580,8 @@ def _build_raw_unit_from_node(node, known_units: Dict[str, str]) -> Optional[str
 
         elif isinstance(node.op, ast.Pow):
             # Potenz: nur wenn Exponent konstant
-            if left and isinstance(node.right, (ast.Constant, ast.Num)):
-                exp = node.right.value if isinstance(node.right, ast.Constant) else node.right.n
+            if left and isinstance(node.right, ast.Constant) and isinstance(node.right.value, (int, float)):
+                exp = node.right.value
                 if exp == 2:
                     return f"{left}^2"
                 elif exp == 0.5:

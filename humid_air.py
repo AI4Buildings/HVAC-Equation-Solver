@@ -78,7 +78,7 @@ def _resolve_dual_humidity(inputs: dict, humidity_keys: set) -> dict:
         try:
             computed = CP.HAPropsSI(key2, 'T', T_K, 'P', P, key1, val1)
             return computed - val2
-        except:
+        except (ValueError, RuntimeError):
             return float('inf')
 
     # Find T in range -40°C to 80°C (233.15 K to 353.15 K)
@@ -90,7 +90,7 @@ def _resolve_dual_humidity(inputs: dict, humidity_keys: set) -> dict:
             try:
                 computed = CP.HAPropsSI(key1, 'T', T_K, 'P', P, key2, val2)
                 return computed - val1
-            except:
+            except (ValueError, RuntimeError):
                 return float('inf')
         try:
             T_K = brentq(residual_swap, 233.15, 353.15, xtol=1e-10)

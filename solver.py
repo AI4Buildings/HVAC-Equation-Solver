@@ -184,7 +184,7 @@ except ImportError:
 
 
 def create_equation_function(equations: List[str], variables: List[str],
-                             constants: Dict[str, float] = None):
+                             constants: Optional[Dict[str, float]] = None):
     """
     Erstellt eine Funktion f(x) die das Gleichungssystem darstellt.
 
@@ -244,10 +244,10 @@ def create_equation_function(equations: List[str], variables: List[str],
 def solve_system(
     equations: List[str],
     variables: Set[str],
-    initial_values: Dict[str, float] = None,
+    initial_values: Optional[Dict[str, float]] = None,
     initial_guess: float = 1.0,
-    constants: Dict[str, float] = None,
-    original_equations: Dict[str, str] = None,
+    constants: Optional[Dict[str, float]] = None,
+    original_equations: Optional[Dict[str, str]] = None,
     return_analysis: bool = False
 ) -> Union[Tuple[bool, Dict[str, float], str], Tuple[bool, Dict[str, float], str, SolveAnalysis]]:
     """
@@ -521,7 +521,7 @@ def create_equation_function_with_sweep(
     equations: List[str],
     variables: List[str],
     sweep_values: Dict[str, float],
-    constants: Dict[str, float] = None
+    constants: Optional[Dict[str, float]] = None
 ):
     """
     Erstellt eine Gleichungsfunktion mit fest eingesetzten Sweep-Werten.
@@ -826,9 +826,9 @@ def _solve_equation_block(
     variables: Set[str],
     known_values: Dict[str, float],
     context: dict,
-    manual_initial: Dict[str, float] = None,
-    original_equations: Dict[str, str] = None,
-    inferred_units: Dict[str, str] = None
+    manual_initial: Optional[Dict[str, float]] = None,
+    original_equations: Optional[Dict[str, str]] = None,
+    inferred_units: Optional[Dict[str, str]] = None
 ) -> Tuple[bool, Dict[str, float], str, Optional[BlockAnalysis]]:
     """
     Löst einen Block von Gleichungen mit gemeinsamen Unbekannten.
@@ -873,9 +873,9 @@ def _solve_block_iteratively(
     variables: Set[str],
     known_values: Dict[str, float],
     context: dict,
-    manual_initial: Dict[str, float] = None,
-    original_equations: Dict[str, str] = None,
-    inferred_units: Dict[str, str] = None
+    manual_initial: Optional[Dict[str, float]] = None,
+    original_equations: Optional[Dict[str, str]] = None,
+    inferred_units: Optional[Dict[str, str]] = None
 ) -> Tuple[bool, Dict[str, float], str, Optional[BlockAnalysis]]:
     """
     Versucht einen Block iterativ zu lösen, indem nach jeder gelösten
@@ -1040,8 +1040,8 @@ def _solve_block_simultaneously(
     variables: Set[str],
     known_values: Dict[str, float],
     context: dict,
-    manual_initial: Dict[str, float] = None,
-    inferred_units: Dict[str, str] = None
+    manual_initial: Optional[Dict[str, float]] = None,
+    inferred_units: Optional[Dict[str, str]] = None
 ) -> Tuple[bool, Dict[str, float], str]:
     """
     Löst einen Block von Gleichungen simultan mit normalisiertem least_squares.
@@ -1193,9 +1193,9 @@ def _solve_block_simultaneously(
     return False, {}, f"Block-Konvergenz fehlgeschlagen (Residuum: {best_residual:.2e})"
 
 
-def _get_initial_value(var: str, manual_initial: Dict[str, float] = None,
-                       known_values: Dict[str, float] = None,
-                       inferred_units: Dict[str, str] = None) -> float:
+def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = None,
+                       known_values: Optional[Dict[str, float]] = None,
+                       inferred_units: Optional[Dict[str, str]] = None) -> float:
     """
     Ermittelt sinnvolle Startwerte basierend auf Einheiten - OHNE Variablennamen-Heuristik.
 
@@ -1275,8 +1275,8 @@ def _get_initial_value(var: str, manual_initial: Dict[str, float] = None,
 
 
 def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, float],
-                           context: dict, manual_initial: Dict[str, float] = None,
-                           inferred_units: Dict[str, str] = None) -> Tuple[bool, float]:
+                           context: dict, manual_initial: Optional[Dict[str, float]] = None,
+                           inferred_units: Optional[Dict[str, str]] = None) -> Tuple[bool, float]:
     """
     Löst eine Gleichung mit einer einzelnen Unbekannten.
 
@@ -1671,9 +1671,9 @@ def solve_parametric(
     equations: List[str],
     variables: Set[str],
     sweep_vars: Dict[str, np.ndarray],
-    initial_values: Dict[str, float] = None,
+    initial_values: Optional[Dict[str, float]] = None,
     progress_callback=None,
-    constants: Dict[str, float] = None
+    constants: Optional[Dict[str, float]] = None
 ) -> Tuple[bool, Dict[str, Union[float, np.ndarray]], str]:
     """
     Löst das Gleichungssystem für jeden Wert der Sweep-Variablen.
