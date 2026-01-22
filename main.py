@@ -14,6 +14,7 @@ if sys.platform == 'darwin':
 
 import tkinter as tk
 from tkinter import messagebox, filedialog
+from typing import Optional
 
 import customtkinter as ctk
 
@@ -318,6 +319,9 @@ class EquationSolverApp(ctk.CTk):
         )
         self.equations_text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
 
+        # Enable undo/redo on the internal text widget
+        self.equations_text._textbox.configure(undo=True, maxundo=-1)
+
     def _create_solution_panel(self, parent):
         """Erstellt das Solution Panel mit TabView."""
         # Parent konfigurieren für Ausdehnung
@@ -467,7 +471,7 @@ class EquationSolverApp(ctk.CTk):
         self.residuals_sections = []
 
     def _create_collapsible_section(self, parent, title: str, count: int, row: int,
-                                      header_color: str = None) -> ctk.CTkFrame:
+                                      header_color: Optional[str] = None) -> ctk.CTkFrame:
         """Erstellt eine aufklappbare Sektion für die Residuals."""
         # Main container
         section_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_frame"], corner_radius=6)
@@ -820,6 +824,12 @@ class EquationSolverApp(ctk.CTk):
         self.bind("<Control-minus>", lambda e: self.decrease_font_size())
         self.bind("<Control-equal>", lambda e: self.increase_font_size())
 
+        # Undo/Redo bindings (works on both Windows/Linux and macOS)
+        self.equations_text.bind("<Control-z>", self._undo)
+        self.equations_text.bind("<Command-z>", self._undo)
+        self.equations_text.bind("<Control-y>", self._redo)  # Windows/Linux
+        self.equations_text.bind("<Command-y>", self._redo)  # macOS
+
     # === Schriftgröße ===
 
     def set_font_size(self, size: int):
@@ -833,6 +843,24 @@ class EquationSolverApp(ctk.CTk):
 
     def decrease_font_size(self):
         self.set_font_size(self.font_size - 2)
+
+    # === Undo/Redo ===
+
+    def _undo(self, event=None):
+        """Undo the last edit."""
+        try:
+            self.equations_text._textbox.edit_undo()
+        except Exception:
+            pass  # Nothing to undo
+        return "break"
+
+    def _redo(self, event=None):
+        """Redo the last undone edit."""
+        try:
+            self.equations_text._textbox.edit_redo()
+        except Exception:
+            pass  # Nothing to redo
+        return "break"
 
     # === Datei-Operationen ===
 
