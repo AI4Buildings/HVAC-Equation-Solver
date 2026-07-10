@@ -4,7 +4,7 @@ Equation solver for teaching and rapid calculation of thermodynamic state change
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Version](https://img.shields.io/badge/Version-3.1.0-orange.svg)
+![Version](https://img.shields.io/badge/Version-3.2.0-orange.svg)
 
 ## Features
 
@@ -62,6 +62,7 @@ HVAC-Equation-Solver/
 ├── radiation.py         # Blackbody radiation functions
 ├── units.py             # Unit handling and conversion (v3.0)
 ├── unit_constraints.py  # Unit propagation and consistency checking (v3.0)
+├── test_regressions.py  # Regression test suite (python3 test_regressions.py)
 ├── CLAUDE.md            # Technical documentation
 └── README.md            # This file
 ```
@@ -182,29 +183,47 @@ The solver uses robust block decomposition:
 
 ### Robust Root Finding
 
-- ~1200 test points across magnitudes from 0.01 to 10,000,000
-- Adaptive refinement at singularities
-- Default initial value 1.0 for all variables
+- ~4000 test points (including negative values) across magnitudes up to ±5e9
+- Adaptive refinement at singularities; poles and underflow plateaus are rejected
+- Residuals are evaluated relative to the magnitude of the equation terms
+  (divergence to an asymptote is never accepted as a solution)
+- With multiple roots, the one closest to the initial value is chosen
+  (`sin(alpha) = 0.5` yields 30, not 150)
+- Contradictory systems (e.g. `x+1=3` and `x+1=4`) are reported as errors
+- Parameter studies use warm starts (previous point's solution as initial value)
+- Default initial value 1.0 for all variables (or unit-based if units are known)
+- Time budget of ~10 s per single equation (unsolvable equations do not freeze the GUI)
+
+**Note:** A line is only treated as a constant assignment if the left-hand side
+is a bare variable name. `x + 5 = 2`, `sin(alpha) = 0.5` or `x^2 = 9` are
+equations and are solved iteratively. Expression constants with units like
+`m_dot = 10000/3600 kg/s` are supported.
 
 ## Units
 
-**Important:** Temperatures are processed internally in **Kelvin (K)**. Inputs with `°C` are automatically converted.
+**Important:** All calculations are performed internally in **SI base units**
+(K, Pa, J, W). Inputs with other units (`°C`, `bar`, `kJ`) are automatically converted.
 
-| Property | Internal Unit | Input Examples |
-|----------|---------------|----------------|
+| Property | Internal Unit (SI) | Input Examples |
+|----------|--------------------|----------------|
 | Temperature T | K | `25 °C`, `298.15 K` |
-| Pressure p | bar | `1 bar`, `101325 Pa` |
-| Enthalpy h | kJ/kg | `100 kJ/kg` |
+| Temperature difference | delta_K | `dT = 7 K`, `dT = 7 °C` (no offset) |
+| Pressure p | Pa | `1 bar`, `101325 Pa` |
+| Enthalpy h | J/kg | `100 kJ/kg` |
 | Angles (sin, cos, tan) | Degrees (°) | |
-| Entropy s | kJ/(kg·K) | |
+| Entropy s | J/(kg·K) | |
 | Density rho | kg/m³ | |
 | Vapor quality x | - (0-1) | |
 
+Variables starting with `dT` or `delta` are treated as temperature differences
+(`delta_K`, no K↔°C offset). Computed differences like `theta = T_1 - T_2` are
+recognized as `delta_K` automatically.
+
 ### Humid Air Units
 
-| Property | Unit |
-|----------|------|
-| Enthalpy h | kJ/kg_dry_air |
+| Property | Internal Unit (SI) |
+|----------|--------------------|
+| Enthalpy h | J/kg_dry_air |
 | Humidity ratio w | kg_water/kg_dry_air |
 | Relative humidity rh | - (0-1) |
 | Dew point T_dp | K (display: °C selectable) |
@@ -280,6 +299,17 @@ The solver automatically:
 In the Settings dialog you can configure:
 - **Font Size**: Adjust the editor font size
 - **Temperature Display**: Choose between Kelvin (K) or Celsius (°C) for result display
+
+## Tests
+
+```bash
+python3 test_regressions.py
+```
+
+Runs 46 regression tests covering the parser (assignment detection, vectors,
+unit sweeps), solver (root selection, contradiction detection, parameter
+studies) and the unit system (propagation, delta_K, offset conversions).
+Each module also has a self-test: `python3 <module>.py`.
 
 ## License
 
