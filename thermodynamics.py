@@ -27,45 +27,8 @@ from typing import Dict, List, Tuple, Optional
 import re
 
 
-# Mapping von EES-Funktionsnamen zu CoolProp-Properties
-PROPERTY_MAP = {
-    # Grundlegende Eigenschaften
-    'enthalpy': 'H',           # Spez. Enthalpie [kJ/kg]
-    'entropy': 'S',            # Spez. Entropie [kJ/(kg·K)]
-    'density': 'D',            # Dichte [kg/m³]
-    'volume': 'V',             # Spez. Volumen [m³/kg] (wird berechnet als 1/D)
-    'intenergy': 'U',          # Spez. innere Energie [kJ/kg]
-    'quality': 'Q',            # Dampfgehalt [-]
-    'temperature': 'T',        # Temperatur [°C]
-    'pressure': 'P',           # Druck [bar]
-
-    # Transporteigenschaften
-    'viscosity': 'V',          # Dynamische Viskosität [Pa·s]
-    'conductivity': 'L',       # Wärmeleitfähigkeit [W/(m·K)]
-    'prandtl': 'Prandtl',      # Prandtl-Zahl [-]
-
-    # Weitere Eigenschaften
-    'cp': 'C',                 # Spez. Wärmekapazität bei konst. Druck [kJ/(kg·K)]
-    'cv': 'O',                 # Spez. Wärmekapazität bei konst. Volumen [kJ/(kg·K)]
-    'soundspeed': 'A',         # Schallgeschwindigkeit [m/s]
-}
-
-# CoolProp Property-Keys
-COOLPROP_KEYS = {
-    'H': 'H',           # Enthalpie
-    'S': 'S',           # Entropie
-    'D': 'D',           # Dichte
-    'U': 'U',           # Innere Energie
-    'Q': 'Q',           # Qualität
-    'T': 'T',           # Temperatur
-    'P': 'P',           # Druck
-    'V': 'V',           # Viskosität (viscosity)
-    'L': 'L',           # Wärmeleitfähigkeit (conductivity)
-    'Prandtl': 'Prandtl',
-    'C': 'C',           # cp
-    'O': 'O',           # cv (CVMASS)
-    'A': 'A',           # Schallgeschwindigkeit
-}
+# Hinweis: Das Mapping Funktionsname -> CoolProp-Output-Property erfolgt
+# direkt in calculate_property() (if/elif-Kette).
 
 # Mapping von EES Input-Parametern zu CoolProp
 INPUT_MAP = {
@@ -400,42 +363,42 @@ THERMO_FUNCTIONS = {
 
 
 if __name__ == "__main__":
-    # Tests
-    print("=== Thermodynamik-Modul Tests ===\n")
+    # Tests (alle Eingaben in SI-Basiseinheiten: T in K, p in Pa)
+    print("=== Thermodynamik-Modul Tests (SI-Einheiten) ===\n")
 
-    # Test 1: Wasser bei 100°C, 1 bar
-    print("Test 1: Wasser bei T=100°C, p=1 bar")
-    h = enthalpy('water', T=100, p=1)
-    s = entropy('water', T=100, p=1)
-    rho = density('water', T=100, p=1)
-    print(f"  h = {h:.2f} kJ/kg")
-    print(f"  s = {s:.4f} kJ/(kg·K)")
+    # Test 1: Wasser bei 373.15 K (100°C), 100000 Pa (1 bar)
+    print("Test 1: Wasser bei T=373.15 K (100°C), p=100000 Pa (1 bar)")
+    h = enthalpy('water', T=373.15, p=100000)
+    s = entropy('water', T=373.15, p=100000)
+    rho = density('water', T=373.15, p=100000)
+    print(f"  h = {h:.1f} J/kg ({h/1000:.2f} kJ/kg)")
+    print(f"  s = {s:.2f} J/(kg·K) ({s/1000:.4f} kJ/(kg·K))")
     print(f"  rho = {rho:.2f} kg/m³")
     print()
 
-    # Test 2: Sattdampf (x=1) bei 100°C
-    print("Test 2: Sattdampf bei T=100°C, x=1")
-    h = enthalpy('water', T=100, x=1)
-    p = pressure('water', T=100, x=1)
-    print(f"  h = {h:.2f} kJ/kg")
-    print(f"  p = {p:.4f} bar")
+    # Test 2: Sattdampf (x=1) bei 373.15 K (100°C)
+    print("Test 2: Sattdampf bei T=373.15 K (100°C), x=1")
+    h = enthalpy('water', T=373.15, x=1)
+    p = pressure('water', T=373.15, x=1)
+    print(f"  h = {h:.1f} J/kg ({h/1000:.2f} kJ/kg)")
+    print(f"  p = {p:.1f} Pa ({p/1e5:.4f} bar)")
     print()
 
     # Test 3: R134a
-    print("Test 3: R134a bei T=25°C, x=1 (Sattdampf)")
-    h = enthalpy('R134a', T=25, x=1)
-    p = pressure('R134a', T=25, x=1)
-    rho = density('R134a', T=25, x=1)
-    print(f"  h = {h:.2f} kJ/kg")
-    print(f"  p = {p:.2f} bar")
+    print("Test 3: R134a bei T=298.15 K (25°C), x=1 (Sattdampf)")
+    h = enthalpy('R134a', T=298.15, x=1)
+    p = pressure('R134a', T=298.15, x=1)
+    rho = density('R134a', T=298.15, x=1)
+    print(f"  h = {h:.1f} J/kg ({h/1000:.2f} kJ/kg)")
+    print(f"  p = {p:.1f} Pa ({p/1e5:.2f} bar)")
     print(f"  rho = {rho:.2f} kg/m³")
     print()
 
     # Test 4: Transporteigenschaften
-    print("Test 4: Wasser bei T=50°C, p=1 bar (Transporteigenschaften)")
-    mu = viscosity('water', T=50, p=1)
-    k = conductivity('water', T=50, p=1)
-    pr = prandtl('water', T=50, p=1)
+    print("Test 4: Wasser bei T=323.15 K (50°C), p=100000 Pa (Transporteigenschaften)")
+    mu = viscosity('water', T=323.15, p=100000)
+    k = conductivity('water', T=323.15, p=100000)
+    pr = prandtl('water', T=323.15, p=100000)
     print(f"  Viskosität = {mu:.6f} Pa·s")
     print(f"  Wärmeleitfähigkeit = {k:.4f} W/(m·K)")
     print(f"  Prandtl = {pr:.2f}")

@@ -38,7 +38,19 @@ equation_solver/
 ├── radiation.py         # Schwarzkörper-Strahlungsfunktionen (Planck, vektorisiert)
 ├── units.py             # Einheitenhandling und Konvertierung (v3.0)
 ├── unit_constraints.py  # Einheiten-Propagation und Konsistenzprüfung (v3.0)
+├── test_regressions.py  # Regressionstests (python3 test_regressions.py)
 ```
+
+### Tests
+
+```bash
+python3 test_regressions.py
+```
+
+Deckt Parser (Direktzuweisungs-Erkennung, Vektoren, Einheiten-Sweeps),
+Solver (Wurzelwahl, Widerspruchserkennung, Parameterstudien) und
+Einheiten-System (Propagation, delta_K, Offset-Konvertierungen) ab.
+Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 
 ## Kernfunktionen
 
@@ -48,7 +60,15 @@ equation_solver/
 - Thermodynamic function calls: `enthalpy(water, T=100, p=1)` → `enthalpy('water', T=100, p=1)`
 - Extracts variables from equations (filters function names and parameter keys)
 - Vector syntax: `T = 0:10:100` (start:step:end) or `T = 0:100` (start:end, step=1)
-- **Direct assignments** like `T_1 = 450` or `m = 10000/3600` are treated as constants
+  - MATLAB-Semantik: Die Schrittweite wird nie verfälscht; der Endwert ist nur
+    enthalten, wenn er exakt auf dem Raster liegt (`0:0.3:1` → 0, 0.3, 0.6, 0.9)
+  - Sweeps mit Offset-Einheiten (`T = 20:10:50 °C`) werden elementweise korrekt
+    konvertiert (Offset, kein Faktor)
+- **Direct assignments** like `T_1 = 450`, `m = 10000/3600` or `m_dot = 10000/3600 kg/s`
+  (numerischer Ausdruck + Einheit) are treated as constants
+- **Wichtig:** Eine Zeile ist nur dann eine Direktzuweisung, wenn links ein REINER
+  Variablenname steht. `x + 5 = 2`, `sin(alpha) = 0.5` oder `x^2 = 9` sind
+  Gleichungen und werden iterativ gelöst
 
 ### Solver (solver.py)
 
@@ -60,10 +80,20 @@ equation_solver/
 5. **Iteration**: Schritte 2-4 werden wiederholt bis alle Gleichungen gelöst sind
 
 #### Robuste Wurzelfindung für einzelne Gleichungen
-- **Bracket-Suche**: ~1200 Testpunkte über Größenordnungen von 0.01 bis 10,000,000
-- **Adaptive Verfeinerung**: Bei großen Funktionsänderungen wird das Intervall verfeinert
-- **Brent's Methode**: Robuste Wurzelfindung bei Vorzeichenwechsel (funktioniert auch bei Singularitäten)
-- **Standard-Startwert**: 1.0 für alle Variablen
+- **Bracket-Suche**: ~4000 Testpunkte (auch negative) über Größenordnungen bis ±5e9
+- **Adaptive Verfeinerung**: Bei großen relativen Funktionsänderungen wird das Intervall verfeinert
+- **Brent's Methode**: Robuste Wurzelfindung bei Vorzeichenwechsel (Polstellen werden
+  über einen Plausibilitätscheck verworfen, ebenso Underflow-Plateaus abklingender Funktionen)
+- **Wurzelauswahl**: Bei mehreren Wurzeln wird die dem Startwert nächstgelegene gewählt
+  (Tie-Break: positive Wurzel); `sin(alpha) = 0.5` liefert 30, nicht 150 oder −210
+- **Standard-Startwert**: 1.0 für alle Variablen (bzw. einheitenbasiert, siehe unten)
+- **Residuen-Bewertung**: relativ zur Größenordnung der Gleichungsterme - Divergenz
+  zur Asymptote (z.B. `1/(x-2) = 0`) wird NICHT als Lösung akzeptiert
+- **Zeitbudget**: max. ~10 s pro Einzelgleichung (unlösbare Gleichungen frieren die GUI nicht ein)
+- **Konsistenzprüfung**: Constraint-Gleichungen (0 Unbekannte) mit großem Residuum
+  führen zu "Widersprüchliches System" statt stillschweigendem Erfolg
+- **Parameterstudien**: Warm-Start - die Lösung des Vorpunkts ist Startwert des nächsten
+  Punkts (verhindert Sprünge zwischen Lösungsästen)
 
 #### Parameterstudien
 - Sweep-Variablen werden als Konstanten für jeden Punkt behandelt
@@ -291,13 +321,19 @@ Dimensionslose Zahlen werden automatisch erkannt:
 ### Temperaturdifferenzen
 
 Variablen deren Name mit `dT` oder `delta` beginnt werden automatisch als
-Temperaturdifferenzen erkannt und erhalten die Einheit `delta_K`.
+Temperaturdifferenzen erkannt und erhalten die Einheit `delta_K`. Das gilt
+auch für Eingaben in `°C` oder `°F` (`dT = 10 °C` → 10 delta_K, kein Offset).
 
 ```
 dT_N = 49.83K            {→ Erkannt als delta_K}
 delta_T = 10K            {→ Erkannt als delta_K}
+dT_1 = 10 °C             {→ 10 delta_K, KEIN +273.15}
 dT_log = (T1-T2)/ln(...) {→ Abgeleitet als delta_K}
 ```
+
+Zusätzlich erkennt die Einheiten-Propagation Differenzen zweier Temperaturen
+auch OHNE Namenskonvention: `theta = T_1 - T_2` wird als `delta_K` inferiert
+(Mittelwerte wie `(T_1 + T_2)/2` bleiben absolute Temperaturen in K).
 
 Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahieren).
 

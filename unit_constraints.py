@@ -472,8 +472,29 @@ class DimensionInferrer(ast.NodeVisitor):
                 return DimensionInfo(None)
 
             # Trigonometrische und transzendente Funktionen
+            # WICHTIG: 'ln' muss enthalten sein - analyze_equation arbeitet auf den
+            # ORIGINAL-Gleichungen (die ln enthalten; ln->log passiert nur im Parser)
             if func_name in ('sin', 'cos', 'tan', 'asin', 'acos', 'atan',
-                            'sinh', 'cosh', 'tanh', 'exp', 'log', 'log10'):
+                            'sinh', 'cosh', 'tanh', 'exp', 'log', 'log10', 'ln',
+                            'sqrt', 'abs', 'max', 'min'):
+                # Das Argument transzendenter Funktionen ist dimensionslos:
+                # bei sin(alpha) kann alpha als dimensionslos inferiert werden
+                if func_name not in ('sqrt', 'abs', 'max', 'min'):
+                    for arg in node.args:
+                        if isinstance(arg, ast.Name) and arg.id not in self.known:
+                            self.inferred[arg.id] = ''
+                if func_name in ('sqrt', 'abs', 'max', 'min'):
+                    # Diese erhalten die Dimension des Arguments (sqrt: halbe
+                    # Dimension - vereinfacht: dimensionslos wenn Argument
+                    # dimensionslos, sonst unbekannt; abs/max/min erben die
+                    # Dimension des Arguments)
+                    if node.args:
+                        arg_dim = self.visit(node.args[0])
+                        if arg_dim is not None and arg_dim.is_dimensionless:
+                            return DimensionInfo("", ureg.Quantity(1.0, 'dimensionless') if PINT_AVAILABLE else None)
+                        if func_name in ('abs', 'max', 'min') and arg_dim is not None:
+                            return arg_dim
+                    return DimensionInfo(None)
                 # Argument sollte dimensionslos sein, Ergebnis ist dimensionslos
                 return DimensionInfo("", ureg.Quantity(1.0, 'dimensionless') if PINT_AVAILABLE else None)
 
@@ -622,6 +643,43 @@ def _remove_comments(equation: str) -> str:
     return result.strip()
 
 
+def _is_temperature_difference_expr(node, known_dims: Dict[str, DimensionInfo]) -> bool:
+    """
+    Erkennt Ausdrücke, deren Temperatur-Dimension aus einer DIFFERENZ zweier
+    Temperaturen stammt: T1 - T2, auch skaliert wie (T1-T2)/x oder x*(T1-T2)
+    mit dimensionslosem x. Solche Ergebnisse sind delta_K (keine absolute
+    Temperatur) und dürfen bei der Anzeige keinen K->°C-Offset bekommen.
+    """
+    if not PINT_AVAILABLE or not isinstance(node, ast.BinOp):
+        return False
+
+    if isinstance(node.op, ast.Sub):
+        try:
+            left_dim = _get_dimension(node.left, known_dims)
+            right_dim = _get_dimension(node.right, known_dims)
+            if (left_dim is None or right_dim is None or
+                    left_dim.quantity is None or right_dim.quantity is None):
+                return False
+            temp_dim = ureg.kelvin.dimensionality
+            return (left_dim.quantity.dimensionality == temp_dim and
+                    right_dim.quantity.dimensionality == temp_dim)
+        except Exception:
+            return False
+
+    if isinstance(node.op, (ast.Mult, ast.Div)):
+        # Skalierung mit dimensionslosem Faktor erhält den Differenz-Charakter
+        for candidate, other in ((node.left, node.right), (node.right, node.left)):
+            try:
+                other_dim = _get_dimension(other, known_dims)
+            except Exception:
+                continue
+            if (other_dim is not None and other_dim.is_dimensionless and
+                    _is_temperature_difference_expr(candidate, known_dims)):
+                return True
+
+    return False
+
+
 def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, str]:
     """
     Analysiert eine einzelne Gleichung und leitet neue Einheiten ab.
@@ -651,11 +709,22 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
     right_str = None
 
     if equation.startswith('(') and ') - (' in equation:
-        # Solver-Format: (var) - (expr)
-        match = re.match(r'\(([^)]+)\)\s*-\s*\((.+)\)$', equation)
-        if match:
-            left_str = match.group(1)
-            right_str = match.group(2)
+        # Solver-Format: (left) - (right) - per Klammer-Zählung splitten,
+        # damit innere Klammern links (z.B. "(x*(1+y)) - (z)") funktionieren
+        depth = 0
+        for i, ch in enumerate(equation):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    rest = equation[i + 1:].strip()
+                    if rest.startswith('-'):
+                        rest = rest[1:].strip()
+                        if rest.startswith('(') and rest.endswith(')'):
+                            left_str = equation[1:i]
+                            right_str = rest[1:-1]
+                    break
     elif '=' in equation:
         # Normales Format: left = right (mit oder ohne Leerzeichen)
         # Finde das erste = das nicht Teil von == oder != ist
@@ -714,7 +783,18 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
             if isinstance(left_ast.body, ast.Name):
                 left_var = left_ast.body.id
                 if left_var not in known_units and right_dim.is_known:
-                    inferred[left_var] = right_dim.unit
+                    unit_to_assign = right_dim.unit
+                    # Temperatur-DIFFERENZ erkennen: theta = T_1 - T_2 hat die
+                    # Einheit delta_K, nicht K - sonst würde die Anzeige in °C
+                    # fälschlich 273.15 abziehen (10 K Differenz -> -263.15 °C)
+                    if unit_to_assign in ('K', 'kelvin'):
+                        try:
+                            right_ast_dt = ast.parse(right_str, mode='eval')
+                            if _is_temperature_difference_expr(right_ast_dt.body, known_dims):
+                                unit_to_assign = 'delta_K'
+                        except Exception:
+                            pass
+                    inferred[left_var] = unit_to_assign
             # NEU: Prüfe ob linke Seite eine Potenz einer Variable ist (z.B. T_3^4)
             elif isinstance(left_ast.body, ast.BinOp) and isinstance(left_ast.body.op, ast.Pow):
                 if isinstance(left_ast.body.left, ast.Name):
@@ -730,7 +810,9 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
                             try:
                                 var_quantity = right_dim.quantity ** (1.0 / exp_value)
                                 var_unit = unit_from_quantity(var_quantity)
-                                if var_unit:
+                                # WICHTIG: '' bedeutet DIMENSIONSLOS und ist eine
+                                # gültige Inferenz - nicht als falsy verwerfen!
+                                if var_unit is not None:
                                     inferred[left_var] = var_unit
                             except:
                                 pass
@@ -743,7 +825,16 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
             if isinstance(right_ast.body, ast.Name):
                 right_var = right_ast.body.id
                 if right_var not in known_units and left_dim.is_known:
-                    inferred[right_var] = left_dim.unit
+                    unit_to_assign = left_dim.unit
+                    # Temperatur-Differenz-Erkennung (siehe oben, symmetrisch)
+                    if unit_to_assign in ('K', 'kelvin'):
+                        try:
+                            left_ast_dt = ast.parse(left_str, mode='eval')
+                            if _is_temperature_difference_expr(left_ast_dt.body, known_dims):
+                                unit_to_assign = 'delta_K'
+                        except Exception:
+                            pass
+                    inferred[right_var] = unit_to_assign
             # NEU: Prüfe ob rechte Seite eine Potenz einer Variable ist
             elif isinstance(right_ast.body, ast.BinOp) and isinstance(right_ast.body.op, ast.Pow):
                 if isinstance(right_ast.body.left, ast.Name):
@@ -759,7 +850,9 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
                             try:
                                 var_quantity = left_dim.quantity ** (1.0 / exp_value)
                                 var_unit = unit_from_quantity(var_quantity)
-                                if var_unit:
+                                # WICHTIG: '' bedeutet DIMENSIONSLOS und ist eine
+                                # gültige Inferenz - nicht als falsy verwerfen!
+                                if var_unit is not None:
                                     inferred[right_var] = var_unit
                             except:
                                 pass
@@ -813,6 +906,25 @@ def analyze_equation(equation: str, known_units: Dict[str, str]) -> Dict[str, st
                 inferred.update(chain_inferred)
         except:
             pass
+
+        # NACHKORREKTUR: Temperatur-DIFFERENZEN als delta_K markieren.
+        # Bei "theta = T_1 - T_2" ist theta eine Differenz (delta_K), keine
+        # absolute Temperatur - sonst zieht die °C-Anzeige fälschlich 273.15 ab.
+        # Muss NACH allen Inferenz-Schritten laufen, da die Rückwärts-Inferenz
+        # sonst wieder 'K' eintragen würde.
+        for var_side_str, expr_side_str in ((left_str, right_str), (right_str, left_str)):
+            try:
+                var_ast = ast.parse(var_side_str, mode='eval')
+                if not isinstance(var_ast.body, ast.Name):
+                    continue
+                var_name = var_ast.body.id
+                if inferred.get(var_name) not in ('K', 'kelvin'):
+                    continue
+                expr_ast = ast.parse(expr_side_str, mode='eval')
+                if _is_temperature_difference_expr(expr_ast.body, known_dims):
+                    inferred[var_name] = 'delta_K'
+            except Exception:
+                pass
 
     except Exception:
         pass
@@ -1080,7 +1192,8 @@ def _infer_from_addition(node, target_dim: DimensionInfo, known_dims: Dict[str, 
                                 pow_quantity = target_dim.quantity / left_dim.quantity
                                 var_quantity = pow_quantity ** (1.0 / exp_value)
                                 unit = unit_from_quantity(var_quantity)
-                                if unit:
+                                # '' = dimensionslos ist eine gültige Inferenz
+                                if unit is not None:
                                     inferred[var_name] = unit
                             except:
                                 pass
@@ -1100,7 +1213,8 @@ def _infer_from_addition(node, target_dim: DimensionInfo, known_dims: Dict[str, 
                                 pow_quantity = target_dim.quantity / right_dim.quantity
                                 var_quantity = pow_quantity ** (1.0 / exp_value)
                                 unit = unit_from_quantity(var_quantity)
-                                if unit:
+                                # '' = dimensionslos ist eine gültige Inferenz
+                                if unit is not None:
                                     inferred[var_name] = unit
                             except:
                                 pass
@@ -1913,6 +2027,16 @@ def check_all_unit_consistency(solution: Dict[str, float],
     # Gleichungssystem ableiten, auch wenn sie nicht explizit definiert wurden
     all_units = propagate_all_units_complete(equations, known_units)
 
+    # Komplett einheitenloses System: Wenn NIRGENDS eine echte (nicht-leere,
+    # nicht-dimensionslose) Einheit bekannt ist, gibt es dimensional nichts
+    # zu prüfen - Warnungen wie "Einheit unbekannt: x" wären reine Fehlalarme
+    def _is_real_unit(u):
+        return bool(u) and u not in ('dimensionless', '-', '???')
+
+    if (not any(_is_real_unit(u) for u in all_units.values()) and
+            not any(_is_real_unit(u) for u in known_units.values())):
+        return []
+
     warnings = []
 
     for parsed_eq, original_eq in equations.items():
@@ -2002,7 +2126,11 @@ def compute_expression_dimension(expr: str, unit_map: Dict[str, str]) -> Tuple[A
         'C', 'K', 'F',  # Temperatur-Einheiten
         'kg', 'g', 'm', 's', 'Pa', 'bar', 'J', 'W', 'kJ', 'kW',
     }
-    variables = tokens - known_tokens
+    # WICHTIG: Tokens, die als Variablen BEKANNT sind (in unit_map), dürfen
+    # nicht weggefiltert werden - sonst wird z.B. "F = m*g" (Variablen m, g!)
+    # nie dimensional geprüft bzw. eine Variable 'e' fälschlich durch die
+    # Euler-Konstante ersetzt (Falsch-Positive)
+    variables = {t for t in tokens if t in unit_map or t not in known_tokens}
 
     # Prüfe auf fehlende Einheiten
     # HINWEIS: Fehlende Variablen werden hier gesammelt, aber die Entscheidung
@@ -2023,17 +2151,27 @@ def compute_expression_dimension(expr: str, unit_map: Dict[str, str]) -> Tuple[A
     # z.B. (T_in - T_inf)/(T_out - T_inf) mit T_in=3, T_inf=1, T_out=2 → (3-1)/(2-1) = 2
     test_values = [2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0, 23.0, 29.0]  # Primzahlen vermeiden Vereinfachungen
 
-    for i, var in enumerate(sorted(variables, key=len, reverse=True)):
+    # WICHTIG: Alle Variablen in EINEM Durchlauf ersetzen. Sequentielle
+    # re.sub-Aufrufe würden auch in bereits eingesetzte Einheiten-Strings
+    # hineinersetzen (z.B. matcht \bm\b das 'm' in '(_Q_(3.0, 'm/s**2'))')
+    # und den Ausdruck abhängig von der Set-Reihenfolge korrumpieren.
+    value_for_var = {var: test_values[i % len(test_values)]
+                     for i, var in enumerate(sorted(variables))}
+
+    def _substitute_var(match):
+        var = match.group(0)
         unit = unit_map.get(var, '')
-        test_val = test_values[i % len(test_values)]  # Zyklisch durch Testwerte
+        test_val = value_for_var[var]
         if unit and unit not in ('', 'dimensionless'):
-            # Normalisiere die Einheit für pint
             normalized = normalize_unit(unit) if 'normalize_unit' in dir() else unit
-            replacement = f"(_Q_({test_val}, '{normalized}'))"
-        else:
-            # Dimensionslose Variable
-            replacement = str(test_val)
-        expr_modified = re.sub(rf'\b{re.escape(var)}\b', replacement, expr_modified)
+            return f"(_Q_({test_val}, '{normalized}'))"
+        # Dimensionslose Variable
+        return str(test_val)
+
+    if variables:
+        pattern = r'\b(?:' + '|'.join(
+            re.escape(v) for v in sorted(variables, key=len, reverse=True)) + r')\b'
+        expr_modified = re.sub(pattern, _substitute_var, expr_modified)
 
     # Ersetze Thermodynamik-Funktionsaufrufe durch ihre Ergebnis-Einheiten
     # enthalpy(...) → J/kg, pressure(...) → Pa, etc.

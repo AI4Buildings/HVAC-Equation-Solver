@@ -593,6 +593,18 @@ class UnitValue:
                     _calc_value=target_value,
                     _calc_unit='degC'
                 )
+            elif normalized_unit in ['degF', 'fahrenheit']:
+                # K -> °F (Offset-Konvertierung)
+                target_value = si_value * 9.0 / 5.0 - 459.67
+                return cls(
+                    si_value=si_value,
+                    si_unit='kelvin',
+                    original_value=target_value,
+                    original_unit=target_unit,
+                    quantity=None,
+                    _calc_value=target_value,
+                    _calc_unit='degF'
+                )
             elif 'kilojoule' in normalized_unit or normalized_unit.startswith('kJ'):
                 factor = 1e-3  # J -> kJ
                 si_base = 'joule / kilogram' if '/kg' in target_unit or '/kilogram' in normalized_unit else 'joule'
@@ -631,18 +643,33 @@ class UnitValue:
 
         if self.quantity is None:
             # Berechnete Variable ohne pint quantity
-            # Prüfe auf Temperaturdifferenz: si_unit = 'kelvin' und Ziel ist degC/degF
             normalized = normalize_unit(target_unit)
-            if self.si_unit == 'kelvin' and normalized in ('degC', 'celsius', 'degree_Celsius'):
-                # Temperaturdifferenz: 1K = 1°C (keine Offset-Konvertierung!)
-                return self.si_value
-            elif self.si_unit == 'kelvin' and normalized in ('degF', 'fahrenheit', 'degree_Fahrenheit'):
-                # Temperaturdifferenz: 1K = 1.8°F
-                return self.si_value * 9.0 / 5.0
+            if self.si_unit == 'kelvin':
+                if self._calc_unit == 'delta_K':
+                    # ECHTE Temperaturdifferenz: 1K-Diff = 1°C-Diff (kein Offset!)
+                    if normalized in ('degF', 'fahrenheit', 'degree_Fahrenheit'):
+                        return self.si_value * 9.0 / 5.0
+                    return self.si_value
+                # Absolute Temperatur (z.B. aus from_si_base-Offset-Fallback):
+                # Offset-Konvertierung anwenden - sonst würde 350 K als
+                # "350 °C" angezeigt statt 76.85 °C
+                if normalized in ('degC', 'celsius', 'degree_Celsius'):
+                    return self.si_value - 273.15
+                if normalized in ('degF', 'fahrenheit', 'degree_Fahrenheit'):
+                    return self.si_value * 9.0 / 5.0 - 459.67
             return self.si_value
 
         try:
             normalized = normalize_unit(target_unit)
+
+            # Temperatur-DIFFERENZ (delta_K): 1 K-Diff = 1 °C-Diff, kein Offset!
+            # (pint würde delta_K -> degC sonst als absolute Temperatur behandeln)
+            if (self._calc_unit == 'delta_K' or
+                    'delta' in (self.original_unit or '').lower()):
+                if normalized in ('degF', 'fahrenheit', 'degree_Fahrenheit'):
+                    return self.si_value * 9.0 / 5.0
+                if normalized in ('degC', 'celsius', 'degree_Celsius', 'K', 'kelvin', 'delta_K'):
+                    return self.si_value
 
             # Prüfe ob es eine berechnete Temperaturdifferenz ist
             # (keine original_unit aber calc_unit ist eine Temperatur-Einheit)

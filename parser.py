@@ -82,9 +82,7 @@ def parse_vector(value_str: str) -> Union[np.ndarray, None]:
         end = float(match3.group(3))
         if step == 0:
             return None
-        # Erzeuge Array (inklusive Endwert)
-        n_points = int(abs((end - start) / step)) + 1
-        return np.linspace(start, end, n_points)
+        return _build_vector(start, step, end)
 
     # Prüfe auf start:end Format (step=1)
     match2 = VECTOR_PATTERN_2.match(value_str)
@@ -92,10 +90,27 @@ def parse_vector(value_str: str) -> Union[np.ndarray, None]:
         start = float(match2.group(1))
         end = float(match2.group(2))
         step = 1.0 if end >= start else -1.0
-        n_points = int(abs(end - start)) + 1
-        return np.linspace(start, end, n_points)
+        return _build_vector(start, step, end)
 
     return None
+
+
+def _build_vector(start: float, step: float, end: float) -> Union[np.ndarray, None]:
+    """
+    Erzeugt einen Vektor mit MATLAB-Semantik: start, start+step, ...
+    Der Endwert ist nur enthalten, wenn er exakt auf dem Raster liegt
+    (0:0.3:1 -> 0, 0.3, 0.6, 0.9 - die Schrittweite wird nie verfälscht).
+    """
+    n_steps_exact = (end - start) / step
+    if n_steps_exact < -1e-9:
+        return None  # Schrittweite zeigt vom Endwert weg
+    # Toleranz gegen Float-Rundung: liegt end (fast) exakt auf dem Raster?
+    n_rounded = round(n_steps_exact)
+    if abs(n_steps_exact - n_rounded) < 1e-9 * max(1.0, abs(n_steps_exact)):
+        n_steps = int(n_rounded)
+    else:
+        n_steps = int(np.floor(n_steps_exact))
+    return start + step * np.arange(n_steps + 1)
 
 
 def is_vector_assignment(line: str, parse_units: bool = False) -> Tuple[bool, str, str, str]:
@@ -159,9 +174,26 @@ def remove_comments(text: str) -> str:
     """
     # Entferne "..." Kommentare
     text = re.sub(r'"[^"]*"', '', text)
-    # Entferne {...} Kommentare
-    text = re.sub(r'\{[^}]*\}', '', text)
-    return text
+    # Entferne {...} Kommentare (auch verschachtelt, per Klammer-Zählung)
+    result = []
+    depth = 0
+    unmatched_start = None  # Position des ersten unbalancierten '{'
+    for i, char in enumerate(text):
+        if char == '{':
+            if depth == 0:
+                unmatched_start = i
+            depth += 1
+        elif char == '}':
+            if depth > 0:
+                depth -= 1
+                if depth == 0:
+                    unmatched_start = None
+        elif depth == 0:
+            result.append(char)
+    if depth > 0 and unmatched_start is not None:
+        # Unbalancierter Kommentar: Text ab dem offenen '{' unverändert lassen
+        result.append(text[unmatched_start:])
+    return ''.join(result)
 
 
 def _convert_arg_units(arg: str) -> str:
@@ -200,118 +232,120 @@ def _convert_arg_units(arg: str) -> str:
     return arg
 
 
-def convert_thermo_call(match) -> str:
+def _split_call_args(args_str: str) -> List[str]:
+    """Teilt einen Argument-String an Kommas auf Klammertiefe 0."""
+    args = []
+    current_arg = ""
+    paren_depth = 0
+
+    for char in args_str:
+        if char == '(':
+            paren_depth += 1
+            current_arg += char
+        elif char == ')':
+            paren_depth -= 1
+            current_arg += char
+        elif char == ',' and paren_depth == 0:
+            args.append(current_arg.strip())
+            current_arg = ""
+        else:
+            current_arg += char
+
+    if current_arg.strip():
+        args.append(current_arg.strip())
+
+    return args
+
+
+def _convert_call_parts(func_name: str, args_str: str, keep_case: bool = False) -> str:
     """
-    Konvertiert einen Thermodynamik-Funktionsaufruf von EES zu Python-Syntax.
-    Konvertiert auch Einheiten in key=value Argumenten zu SI-Basiseinheiten.
+    Konvertiert einen Thermodynamik-/HumidAir-Aufruf von EES zu Python-Syntax:
+    erstes Argument (Stoffname bzw. Output-Eigenschaft) wird gequotet,
+    Einheiten in key=value Argumenten werden zu SI konvertiert.
 
     EES:    enthalpy(water, T=100°C, p=1bar)
     Python: enthalpy('water', T=373.15, p=100000)
 
-    EES:    h = enthalpy(R134a, T=T1, x=1)
-    Python: h = enthalpy('R134a', T=T1, x=1)
+    EES:    HumidAir(h, T=25°C, rh=0.5, p_tot=1bar)
+    Python: HumidAir('h', T=298.15, rh=0.5, p_tot=100000)
     """
-    func_name = match.group(1).lower()
-    args_str = match.group(2)
-
-    # Parse die Argumente
-    # Erstes Argument ist der Stoffname (ohne Anführungszeichen in EES)
-    # Weitere Argumente sind key=value Paare
-
-    args = []
-    current_arg = ""
-    paren_depth = 0
-
-    for char in args_str:
-        if char == '(':
-            paren_depth += 1
-            current_arg += char
-        elif char == ')':
-            paren_depth -= 1
-            current_arg += char
-        elif char == ',' and paren_depth == 0:
-            args.append(current_arg.strip())
-            current_arg = ""
-        else:
-            current_arg += char
-
-    if current_arg.strip():
-        args.append(current_arg.strip())
-
+    args = _split_call_args(args_str)
     if len(args) < 1:
-        return match.group(0)  # Unverändert zurückgeben
+        return f"{func_name}({args_str})"
 
-    # Erstes Argument ist der Stoffname - in Anführungszeichen setzen
-    fluid = args[0]
-    # Prüfe ob bereits in Anführungszeichen
-    if not (fluid.startswith("'") or fluid.startswith('"')):
-        fluid = f"'{fluid}'"
+    # Erstes Argument (Stoffname/Output-Eigenschaft) in Anführungszeichen setzen
+    first = args[0]
+    if not (first.startswith("'") or first.startswith('"')):
+        first = f"'{first}'"
 
     # Restliche Argumente (key=value Paare) - konvertiere Einheiten zu SI
-    rest_args = []
-    for arg in args[1:]:
-        rest_args.append(_convert_arg_units(arg))
+    rest_args = [_convert_arg_units(arg) for arg in args[1:]]
 
-    # Rekonstruiere den Aufruf
-    new_args = [fluid] + rest_args
-    return f"{func_name}({', '.join(new_args)})"
+    name = func_name if keep_case else func_name.lower()
+    new_args = [first] + rest_args
+    return f"{name}({', '.join(new_args)})"
+
+
+def _iter_call_spans(text: str, func_names_lower: Set[str]):
+    """
+    Findet Aufrufe func(...) mit BALANCIERTEN Klammern (auch verschachtelt).
+
+    Yields:
+        (start, open_idx, close_idx, func_name) - Indizes im Text
+    """
+    for m in re.finditer(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', text):
+        if m.group(1).lower() not in func_names_lower:
+            continue
+        open_idx = m.end() - 1
+        depth = 0
+        close_idx = -1
+        for i in range(open_idx, len(text)):
+            if text[i] == '(':
+                depth += 1
+            elif text[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    close_idx = i
+                    break
+        if close_idx < 0:
+            continue  # Unbalanciert - überspringen
+        yield m.start(), open_idx, close_idx, m.group(1)
+
+
+def _replace_calls_balanced(text: str, func_names: Set[str], keep_case: bool = False) -> str:
+    """
+    Ersetzt alle func(...)-Aufrufe (auch verschachtelte) via _convert_call_parts.
+    Verschachtelte Aufrufe in den Argumenten werden zuerst konvertiert.
+    """
+    names_lower = {n.lower() for n in func_names}
+
+    # Wiederhole bis stabil: pro Durchlauf wird der erste Aufruf konvertiert,
+    # dessen Konvertierung den Text tatsächlich ändert (idempotent -> terminiert).
+    for _ in range(100):  # Sicherheitslimit
+        changed = False
+        for start, open_idx, close_idx, name in _iter_call_spans(text, names_lower):
+            args_str = text[open_idx + 1:close_idx]
+            # Innere Aufrufe in den Argumenten zuerst konvertieren
+            args_converted = _replace_calls_balanced(args_str, func_names, keep_case) \
+                if any(f in args_str.lower() for f in names_lower) else args_str
+            converted = _convert_call_parts(name, args_converted, keep_case=keep_case)
+            if converted != text[start:close_idx + 1]:
+                text = text[:start] + converted + text[close_idx + 1:]
+                changed = True
+                break
+        if not changed:
+            break
+    return text
+
+
+def convert_thermo_call(match) -> str:
+    """Regex-Wrapper (Kompatibilität): konvertiert einen Thermodynamik-Aufruf."""
+    return _convert_call_parts(match.group(1), match.group(2), keep_case=False)
 
 
 def convert_humid_air_call(match) -> str:
-    """
-    Converts a HumidAir function call from EES to Python syntax.
-    Also converts units in key=value arguments to SI base units.
-
-    EES:    HumidAir(h, T=25°C, rh=0.5, p_tot=1bar)
-    Python: HumidAir('h', T=298.15, rh=0.5, p_tot=100000)
-
-    EES:    w = HumidAir(w, T=30, rh=0.6, p_tot=1)
-    Python: w = HumidAir('w', T=30, rh=0.6, p_tot=1)
-    """
-    func_name = match.group(1)  # Behalte Groß-/Kleinschreibung
-    args_str = match.group(2)
-
-    # Parse die Argumente
-    # Erstes Argument ist die Output-Eigenschaft (h, phi, x, etc.)
-    # Weitere Argumente sind key=value Paare
-
-    args = []
-    current_arg = ""
-    paren_depth = 0
-
-    for char in args_str:
-        if char == '(':
-            paren_depth += 1
-            current_arg += char
-        elif char == ')':
-            paren_depth -= 1
-            current_arg += char
-        elif char == ',' and paren_depth == 0:
-            args.append(current_arg.strip())
-            current_arg = ""
-        else:
-            current_arg += char
-
-    if current_arg.strip():
-        args.append(current_arg.strip())
-
-    if len(args) < 1:
-        return match.group(0)  # Unverändert zurückgeben
-
-    # Erstes Argument ist die Output-Eigenschaft - in Anführungszeichen setzen
-    output_prop = args[0]
-    # Prüfe ob bereits in Anführungszeichen
-    if not (output_prop.startswith("'") or output_prop.startswith('"')):
-        output_prop = f"'{output_prop}'"
-
-    # Restliche Argumente (key=value Paare) - konvertiere Einheiten zu SI
-    rest_args = []
-    for arg in args[1:]:
-        rest_args.append(_convert_arg_units(arg))
-
-    # Rekonstruiere den Aufruf
-    new_args = [output_prop] + rest_args
-    return f"{func_name}({', '.join(new_args)})"
+    """Regex-Wrapper (Kompatibilität): konvertiert einen HumidAir-Aufruf."""
+    return _convert_call_parts(match.group(1), match.group(2), keep_case=True)
 
 
 def tokenize_equation(equation: str) -> str:
@@ -325,52 +359,50 @@ def tokenize_equation(equation: str) -> str:
     # Ersetze log10
     equation = re.sub(r'\blog10\b', 'log10', equation)
 
-    # Konvertiere Thermodynamik-Funktionsaufrufe
-    # Pattern: funktionsname(argumente)
-    for func in THERMO_FUNCTIONS:
-        pattern = rf'\b({func})\s*\(([^)]*)\)'
-        equation = re.sub(pattern, convert_thermo_call, equation, flags=re.IGNORECASE)
+    # Konvertiere Thermodynamik-Funktionsaufrufe (balanciert, auch verschachtelt)
+    equation = _replace_calls_balanced(equation, THERMO_FUNCTIONS, keep_case=False)
 
     # Konvertiere FeuchteLuft-Funktionsaufrufe
-    for func in HUMID_AIR_FUNCTIONS:
-        pattern = rf'\b({func})\s*\(([^)]*)\)'
-        equation = re.sub(pattern, convert_humid_air_call, equation, flags=re.IGNORECASE)
+    equation = _replace_calls_balanced(equation, HUMID_AIR_FUNCTIONS, keep_case=True)
+
+    return equation
+
+
+def _reduce_special_calls_to_tokens(equation: str) -> str:
+    """
+    Ersetzt Thermodynamik-/HumidAir-Aufrufe durch die Variablen-Tokens ihrer
+    Argument-WERTE (kwarg-Keys, Stoffnamen und Zahlen fallen weg).
+    Verschachtelte Aufrufe werden von innen nach außen aufgelöst.
+
+    Beispiel: "enthalpy(water, T=temperature(water, p=p1, s=s1), p=p2)" -> " p1 s1 p2 "
+    """
+    special_funcs = {f.lower() for f in (THERMO_FUNCTIONS | HUMID_AIR_FUNCTIONS)}
+
+    for _ in range(100):  # Sicherheitslimit gegen Endlosschleifen
+        # Suche einen INNERSTEN Aufruf (Argumente ohne weitere Spezial-Aufrufe)
+        replaced = False
+        for start, open_idx, close_idx, _name in _iter_call_spans(equation, special_funcs):
+            args_str = equation[open_idx + 1:close_idx]
+            if any(re.search(rf'\b{f}\s*\(', args_str, flags=re.IGNORECASE) for f in special_funcs):
+                continue  # Enthält inneren Aufruf - der wird zuerst verarbeitet
+            tokens = []
+            for arg in _split_call_args(args_str)[1:]:  # erstes Argument (Stoff/Property) fällt weg
+                value = arg.split('=', 1)[1] if '=' in arg else arg
+                tokens.extend(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', value))
+            equation = equation[:start] + ' ' + ' '.join(tokens) + ' ' + equation[close_idx + 1:]
+            replaced = True
+            break
+        if not replaced:
+            break
 
     return equation
 
 
 def extract_variables(equation: str) -> Set[str]:
     """Extrahiert alle Variablennamen aus einer Gleichung."""
-    temp_eq = equation
-
-    # Entferne komplette Thermodynamik-Funktionsaufrufe
-    # Diese enthalten den Stoffnamen und key=value Parameter
-    # Pattern: funktionsname('stoffname', key1=val1, key2=val2)
-    for func in THERMO_FUNCTIONS:
-        # Finde alle Funktionsaufrufe und extrahiere die Werte (nicht die Keys)
-        pattern = rf"\b{func}\s*\([^)]*\)"
-        matches = re.findall(pattern, temp_eq, flags=re.IGNORECASE)
-
-        for match in matches:
-            # Extrahiere die Werte aus key=value Paaren
-            # z.B. aus "enthalpy('water', T=T1, p=p1)" -> T1, p1
-            values = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*([a-zA-Z_][a-zA-Z0-9_]*|\d+\.?\d*)', match)
-            # Ersetze den kompletten Funktionsaufruf durch die Werte
-            replacement = ' '.join(str(v) for v in values if not v.replace('.', '').isdigit())
-            temp_eq = temp_eq.replace(match, replacement)
-
-    # Entferne komplette FeuchteLuft-Funktionsaufrufe
-    # Pattern: FeuchteLuft('eigenschaft', key1=val1, key2=val2, key3=val3)
-    for func in HUMID_AIR_FUNCTIONS:
-        pattern = rf"\b{func}\s*\([^)]*\)"
-        matches = re.findall(pattern, temp_eq, flags=re.IGNORECASE)
-
-        for match in matches:
-            # Extrahiere die Werte aus key=value Paaren
-            values = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*([a-zA-Z_][a-zA-Z0-9_]*|\d+\.?\d*)', match)
-            # Ersetze den kompletten Funktionsaufruf durch die Werte
-            replacement = ' '.join(str(v) for v in values if not v.replace('.', '').isdigit())
-            temp_eq = temp_eq.replace(match, replacement)
+    # Ersetze komplette Thermodynamik-/HumidAir-Funktionsaufrufe durch die
+    # Variablen-Tokens ihrer Argumente (balanciert, auch verschachtelt)
+    temp_eq = _reduce_special_calls_to_tokens(equation)
 
     # Entferne Funktionsnamen aus der Suche - NUR wenn sie als Funktionen verwendet werden
     # (d.h. mit Klammern dahinter), nicht wenn sie als Variablen verwendet werden
@@ -406,6 +438,94 @@ def extract_variables(equation: str) -> Set[str]:
     variables -= math_constants
 
     return variables
+
+
+def _get_const_eval_context() -> dict:
+    """
+    Eval-Kontext für rein numerische Konstanten-Ausdrücke.
+    Trigonometrie in GRAD (wie EES) - identisch für Pass 1 und Pass 2.
+    """
+    def _sin(x): return np.sin(np.radians(x))
+    def _cos(x): return np.cos(np.radians(x))
+    def _tan(x): return np.tan(np.radians(x))
+    def _asin(x): return np.degrees(np.arcsin(x))
+    def _acos(x): return np.degrees(np.arccos(x))
+    def _atan(x): return np.degrees(np.arctan(x))
+
+    return {
+        'pi': np.pi, 'e': np.e,
+        'sin': _sin, 'cos': _cos, 'tan': _tan,
+        'asin': _asin, 'acos': _acos, 'atan': _atan,
+        'sqrt': np.sqrt, 'log': np.log, 'log10': np.log10,
+        'exp': np.exp, 'abs': abs,
+        'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,
+        'max': max, 'min': min,
+    }
+
+
+def _eval_constant_expression(expr: str) -> Optional[float]:
+    """
+    Wertet einen rein numerischen Ausdruck aus (ohne Variablen).
+
+    Args:
+        expr: Ausdruck in Python-Syntax (bereits tokenisiert: ** statt ^, log statt ln)
+
+    Returns:
+        float-Wert oder None, wenn der Ausdruck nicht auswertbar ist
+    """
+    try:
+        value = eval(expr, {"__builtins__": {}}, _get_const_eval_context())
+        if isinstance(value, (int, float, np.floating)) and np.isfinite(value):
+            return float(value)
+    except Exception:
+        pass
+    return None
+
+
+def _split_expression_with_unit(right: str) -> Optional[Tuple[float, str]]:
+    """
+    Trennt 'numerischer Ausdruck + Einheit', z.B. '10000/3600 kg/s'.
+
+    Die Einheit muss als letztes, durch Leerzeichen getrenntes Token stehen
+    und mit einem Buchstaben (oder °/µ) beginnen; der Rest muss ein rein
+    numerischer Ausdruck sein. So wird 'x + 2' oder '2 * m' nie als
+    Wert+Einheit fehlinterpretiert.
+
+    Returns:
+        (wert, einheit) oder None
+    """
+    if not UNITS_AVAILABLE:
+        return None
+
+    tokens = right.split()
+    if len(tokens) < 2:
+        return None
+
+    unit_part = tokens[-1]
+    expr_part = ' '.join(tokens[:-1]).strip()
+
+    # Einheit muss mit Buchstabe/°/µ beginnen und darf kein Operator-Rest sein
+    if not re.match(r'^[a-zA-Z°µ]', unit_part):
+        return None
+    # Ausdruck muss mindestens eine Ziffer enthalten
+    if not re.search(r'\d', expr_part):
+        return None
+
+    # Einheit validieren (mit Dummy-Wert 1)
+    try:
+        _, unit_str = parse_value_with_unit(f"1 {unit_part}")
+    except (ValueError, Exception):
+        return None
+    if not unit_str:
+        return None
+
+    # Ausdruck muss rein numerisch auswertbar sein
+    expr_python = re.sub(r'\bln\b', 'log', expr_part.replace('^', '**'))
+    value = _eval_constant_expression(expr_python)
+    if value is None:
+        return None
+
+    return value, unit_str
 
 
 def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set[str], dict, dict, dict, dict]:
@@ -470,13 +590,16 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
         # Zahl mit Einheit
         if UNITS_AVAILABLE:
             try:
-                from units import UnitValue
                 magnitude, unit_str = parse_value_with_unit(right)
                 if unit_str:
                     pre_constants.add(var_name)
                     continue
             except ValueError:
                 pass
+            # Numerischer Ausdruck mit Einheit (z.B. "10000/3600 kg/s")
+            if _split_expression_with_unit(right) is not None:
+                pre_constants.add(var_name)
+                continue
         # Reine Zahl
         try:
             float(right)
@@ -485,20 +608,11 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
         except ValueError:
             pass
         # Numerischer Ausdruck (ohne Variablen)
+        # Gleicher Eval-Kontext wie Pass 2, damit beide Pässe konsistent erkennen
         right_tokenized = tokenize_equation(right)
         vars_in_right = extract_variables(right_tokenized)
-        if not vars_in_right:
-            # Versuche auszuwerten
-            try:
-                eval(right_tokenized, {"__builtins__": {}}, {
-                    'pi': np.pi, 'e': np.e,
-                    'sin': np.sin, 'cos': np.cos, 'tan': np.tan,
-                    'sqrt': np.sqrt, 'log': np.log, 'log10': np.log10,
-                    'exp': np.exp, 'abs': abs
-                })
-                pre_constants.add(var_name)
-            except Exception:
-                pass
+        if not vars_in_right and _eval_constant_expression(right_tokenized) is not None:
+            pre_constants.add(var_name)
 
     # Pass 2: Normale Verarbeitung
     for i, line in enumerate(lines):
@@ -526,19 +640,16 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
             if vec_unit and UNITS_AVAILABLE:
                 try:
                     from units import UnitValue
-                    # Erstelle UnitValue für ersten Wert um Konvertierungsfaktor zu bekommen
-                    first_uv = UnitValue.from_input(vec_array[0], vec_unit)
-                    # Berechne Konvertierungsfaktor: calc_value / original_value
-                    if first_uv.original_value != 0:
-                        conversion_factor = first_uv.calc_value / first_uv.original_value
-                        # Wende Faktor auf alle Werte an (für lineare Konvertierungen)
-                        calc_values = vec_array * conversion_factor
-                    else:
-                        # Offset-Konvertierung (z.B. °C zu K): Konvertiere einzeln
-                        calc_values = np.array([UnitValue.from_input(v, vec_unit).calc_value for v in vec_array])
+                    # Konvertiere IMMER elementweise: nur so werden Offset-Einheiten
+                    # (°C -> K: +273.15) korrekt behandelt. Ein multiplikativer
+                    # Faktor wäre bei 20:10:50 °C für alle Werte außer dem ersten falsch.
+                    calc_values = np.array([
+                        UnitValue.from_input(float(v), vec_unit).calc_value
+                        for v in vec_array
+                    ])
                     sweep_vars[var_name] = calc_values
                     # Speichere UnitValue für Anzeige (erster Wert)
-                    unit_values[var_name] = first_uv
+                    unit_values[var_name] = UnitValue.from_input(float(vec_array[0]), vec_unit)
                 except Exception:
                     # Bei Fehler: verwende Original-Werte ohne Konvertierung
                     sweep_vars[var_name] = vec_array
@@ -564,28 +675,39 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
         if UNITS_AVAILABLE and re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', left):
             try:
                 from units import UnitValue
-                magnitude, unit_str = parse_value_with_unit(right)
-                if unit_str:
-                    # Wert mit Einheit gefunden (z.B. "15°C", "10g", "2.5kJ/kg")
+                magnitude, unit_str = None, ''
+                try:
+                    magnitude, unit_str = parse_value_with_unit(right)
+                except ValueError:
+                    pass
+                if not unit_str:
+                    # Numerischer Ausdruck mit Einheit (z.B. "10000/3600 kg/s")
+                    expr_unit = _split_expression_with_unit(right)
+                    if expr_unit is not None:
+                        magnitude, unit_str = expr_unit
+                if unit_str and magnitude is not None:
+                    # Wert mit Einheit gefunden (z.B. "15°C", "10g", "10000/3600 kg/s")
                     var_name = left
 
                     # Spezialfall: Temperaturdifferenz (dT..., delta...)
-                    # K sollte als Differenz behandelt werden, nicht als absolute Temperatur
-                    # Erkennungsmuster: Variablenname beginnt mit "dT" oder "delta"
+                    # Temperatur-Einheiten werden als Differenz behandelt, nicht absolut
+                    # (verhindert falsche Offset-Konvertierung, z.B. +273.15 bei °C)
                     var_lower = var_name.lower()
-                    is_temp_diff = (
-                        unit_str.upper() == 'K' and
-                        (var_lower.startswith('dt') or
-                         var_lower.startswith('delta'))
-                    )
+                    is_temp_diff_name = (var_lower.startswith('dt') or
+                                         var_lower.startswith('delta'))
+                    # Faktor Einheit -> delta_K: 1 K-Diff = 1 °C-Diff, 1 °F-Diff = 5/9 K
+                    diff_factor = {
+                        'K': 1.0, 'kelvin': 1.0,
+                        '°C': 1.0, 'C': 1.0, 'degC': 1.0, 'celsius': 1.0,
+                        '°F': 5.0 / 9.0, 'degF': 5.0 / 9.0, 'fahrenheit': 5.0 / 9.0,
+                    }.get(unit_str.strip())
 
-                    if is_temp_diff:
-                        # Temperaturdifferenz: 1K = 1 delta_K
-                        # Keine Konvertierung nötig, Wert bleibt gleich
-                        initial_values[var_name] = magnitude
+                    if is_temp_diff_name and diff_factor is not None:
+                        # Temperaturdifferenz: keine Offset-Konvertierung
+                        initial_values[var_name] = magnitude * diff_factor
                         if parse_units:
                             # Erstelle UnitValue mit delta_K als Differenz-Einheit
-                            unit_values[var_name] = UnitValue.from_input(magnitude, 'delta_K')
+                            unit_values[var_name] = UnitValue.from_input(magnitude * diff_factor, 'delta_K')
                     else:
                         unit_value = UnitValue.from_input(magnitude, unit_str)
                         # Verwende calc_value für Berechnungen (konvertiert zu Standard-Einheit)
@@ -608,10 +730,11 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
         vars_right = extract_variables(right)
 
         # Prüfe ob es eine direkte Zuweisung ist (z.B. T1 = 300 oder m = 10000/3600)
-        # Das ist der Fall wenn links nur eine Variable steht
-        # und rechts eine Zahl oder ein arithmetischer Ausdruck ohne Variablen
-        if len(vars_left) == 1 and len(vars_right) == 0:
-            var_name = list(vars_left)[0]
+        # WICHTIG: Links muss ein REINER Variablenname stehen (wie in Pass 1).
+        # "x + 5 = 2", "sin(alpha) = 0.5" oder "x^2 = 9" sind GLEICHUNGEN,
+        # keine Zuweisungen - sonst würde z.B. alpha = 0.5 statt 30 gesetzt!
+        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', left) and len(vars_right) == 0:
+            var_name = left
 
             # Versuche als einfache Zahl
             try:
@@ -620,29 +743,11 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
                 continue
             except ValueError:
                 # Versuche als arithmetischen Ausdruck auszuwerten
-                try:
-                    # Trigonometrische Funktionen in GRAD (wie EES)
-                    def _sin(x): return np.sin(np.radians(x))
-                    def _cos(x): return np.cos(np.radians(x))
-                    def _tan(x): return np.tan(np.radians(x))
-                    def _asin(x): return np.degrees(np.arcsin(x))
-                    def _acos(x): return np.degrees(np.arccos(x))
-                    def _atan(x): return np.degrees(np.arctan(x))
-
-                    # Nur sichere mathematische Operationen erlauben
-                    value = eval(right, {"__builtins__": {}}, {
-                        'pi': np.pi, 'e': np.e,
-                        'sin': _sin, 'cos': _cos, 'tan': _tan,
-                        'asin': _asin, 'acos': _acos, 'atan': _atan,
-                        'sqrt': np.sqrt, 'log': np.log, 'log10': np.log10,
-                        'exp': np.exp, 'abs': abs,
-                        'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh
-                    })
-                    if isinstance(value, (int, float)) and np.isfinite(value):
-                        initial_values[var_name] = float(value)
-                        continue
-                except Exception:
-                    pass
+                # (Trigonometrie in GRAD, gleicher Kontext wie Pass 1)
+                value = _eval_constant_expression(right)
+                if value is not None:
+                    initial_values[var_name] = value
+                    continue
 
         # Füge Variablen hinzu (nur wenn keine direkte Zuweisung)
         # WICHTIG: Entferne vor-identifizierte Konstanten (aus Pass 1)
@@ -723,7 +828,7 @@ if __name__ == "__main__":
     {Noch ein Kommentar}
     """
 
-    equations, variables, initial, sweep, originals = parse_equations(test_input)
+    equations, variables, initial, sweep, originals, units_info = parse_equations(test_input)
     print("Gleichungen:", equations)
     print("Variablen:", variables)
     print("Initialwerte:", initial)
@@ -740,7 +845,7 @@ if __name__ == "__main__":
     h = enthalpy(water, T=T, p=p)
     """
 
-    equations, variables, initial, sweep, originals = parse_equations(test_vector)
+    equations, variables, initial, sweep, originals, units_info = parse_equations(test_vector)
     print("Gleichungen:", equations)
     print("Variablen:", variables)
     print("Initialwerte:", initial)

@@ -8,14 +8,14 @@ Funktionen:
 - Blackbody(T, lambda1, lambda2): Anteil der Strahlungsenergie im Wellenlängenbereich [-]
 
 Einheiten:
-- Temperatur T: °C (wird intern zu K konvertiert)
+- Temperatur T: K (Kelvin, wird bereits in K erwartet)
 - Wellenlänge lambda: µm (Mikrometer)
 - Eb: W/(m²·µm)
 - Blackbody: dimensionslos (0-1)
 
-Konstanten:
-- C1 = 2·π·h·c² = 3.7418e8 W·µm⁴/m²
-- C2 = h·c/k = 14388 µm·K
+Konstanten (CODATA, konsistent zu σ = 5.670374419e-8):
+- C1 = 2·π·h·c² = 3.741771852e8 W·µm⁴/m²
+- C2 = h·c/k = 1.4387768775e4 µm·K
 - σ (Stefan-Boltzmann) = 5.670374419e-8 W/(m²·K⁴)
 
 Alle Funktionen unterstützen sowohl skalare Werte als auch numpy-Arrays (vektorisiert).
@@ -25,9 +25,9 @@ import math
 import numpy as np
 from scipy import integrate
 
-# Physikalische Konstanten
-C1 = 3.7418e8      # Erste Strahlungskonstante [W·µm⁴/m²]
-C2 = 14388.0       # Zweite Strahlungskonstante [µm·K]
+# Physikalische Konstanten (CODATA, konsistent zur Normierung mit SIGMA)
+C1 = 3.741771852e8       # Erste Strahlungskonstante [W·µm⁴/m²]
+C2 = 1.4387768775e4      # Zweite Strahlungskonstante [µm·K]
 SIGMA = 5.670374419e-8  # Stefan-Boltzmann Konstante [W/(m²·K⁴)]
 
 
@@ -83,17 +83,17 @@ def Eb(T, wavelength):
 
     Beispiel:
         >>> Eb(1273.15, 3.0)  # Bei 1273.15 K (= 1000°C) und 3 µm
-        52889.7...
+        36446.4...
         >>> Eb(1273.15, 3e-6)  # Bei 1273.15 K und 3e-6 m = 3 µm (gleich!)
-        52889.7...
+        36446.4...
     """
     wavelength = _normalize_wavelength(wavelength)  # Auto-Konvertierung m -> µm
     T_kelvin = _ensure_kelvin(T)
 
-    # Validierung für Skalare
-    if T_kelvin.ndim == 0 and T_kelvin <= 0:
+    # Validierung (Skalare und Arrays)
+    if np.any(T_kelvin <= 0):
         raise ValueError(f"Temperatur muss > 0 K sein (gegeben: {T} K)")
-    if wavelength.ndim == 0 and wavelength <= 0:
+    if np.any(wavelength <= 0):
         raise ValueError(f"Wellenlänge muss > 0 sein (gegeben: {wavelength} µm)")
 
     # Plancksches Strahlungsgesetz
@@ -130,6 +130,22 @@ def _blackbody_integrand(wavelength: float, T_kelvin: float) -> float:
         return 0.0
 
 
+def _peak_points(T_kelvin, lambda_lo, lambda_hi):
+    """
+    Stützpunkte um den Wien-Peak für integrate.quad.
+
+    Bei sehr breiten Integrationsintervallen (z.B. 1e-6 bis 10000 µm) kann
+    quad den schmalen Planck-Peak sonst übersehen. Gibt None zurück, wenn
+    kein Stützpunkt im Intervall liegt.
+    """
+    lambda_peak = 2897.8 / T_kelvin  # Wien'sches Verschiebungsgesetz [µm]
+    candidates = (0.2 * lambda_peak, 0.5 * lambda_peak, lambda_peak,
+                  2 * lambda_peak, 5 * lambda_peak, 10 * lambda_peak,
+                  50 * lambda_peak)
+    points = [p for p in candidates if lambda_lo < p < lambda_hi]
+    return points or None
+
+
 def _blackbody_single(T_kelvin, lambda1, lambda2):
     """Berechnet Blackbody-Fraktion für einen einzelnen Temperaturwert."""
     # Bei lambda1 = 0: verwende sehr kleine untere Grenze (Singularität bei 0)
@@ -146,13 +162,16 @@ def _blackbody_single(T_kelvin, lambda1, lambda2):
     # Gesamte emittierte Leistung nach Stefan-Boltzmann
     total_power = SIGMA * T_kelvin**4
 
-    # Integriere Eb über den Wellenlängenbereich
+    # Integriere Eb über den Wellenlängenbereich.
+    # Stützpunkte um den Wien-Peak, damit quad den schmalen Peak
+    # auch bei sehr breiten Intervallen nicht übersieht.
     result, error = integrate.quad(
         _blackbody_integrand,
         lambda1_eff,
         lambda2_eff,
         args=(T_kelvin,),
-        limit=200
+        limit=200,
+        points=_peak_points(T_kelvin, lambda1_eff, lambda2_eff)
     )
 
     # Normiere auf Gesamtleistung
@@ -184,25 +203,25 @@ def Blackbody(T, lambda1, lambda2):
         0.367...
     """
     T_kelvin = _ensure_kelvin(T)
-    lambda1 = float(_normalize_wavelength(lambda1))  # Auto-Konvertierung m -> µm
-    lambda2 = float(_normalize_wavelength(lambda2))  # Auto-Konvertierung m -> µm
+    lambda1 = _normalize_wavelength(lambda1)  # Auto-Konvertierung m -> µm
+    lambda2 = _normalize_wavelength(lambda2)  # Auto-Konvertierung m -> µm
 
-    # Validierung
-    if T_kelvin.ndim == 0 and T_kelvin <= 0:
+    # Validierung (Skalare und Arrays)
+    if np.any(T_kelvin <= 0):
         raise ValueError(f"Temperatur muss > 0 K sein (gegeben: {T} K)")
-    if lambda1 < 0 or lambda2 <= 0:
+    if np.any(lambda1 < 0) or np.any(lambda2 <= 0):
         raise ValueError(f"Wellenlängen müssen >= 0 sein")
-    if lambda1 >= lambda2:
+    if np.any(lambda1 >= lambda2):
         raise ValueError(f"lambda1 ({lambda1}) muss kleiner als lambda2 ({lambda2}) sein")
 
-    # Vektorisierte Berechnung
-    if T_kelvin.ndim == 0:
-        # Skalar
-        return _blackbody_single(float(T_kelvin), lambda1, lambda2)
-    else:
-        # Array - berechne für jeden Temperaturwert
-        result = np.array([_blackbody_single(tk, lambda1, lambda2) for tk in T_kelvin])
-        return result
+    # Skalarer Fall (Verhalten unverändert)
+    if T_kelvin.ndim == 0 and lambda1.ndim == 0 and lambda2.ndim == 0:
+        return _blackbody_single(float(T_kelvin), float(lambda1), float(lambda2))
+
+    # Vektorisierter Fall: mindestens eine Eingabe ist ein Array.
+    # np.vectorize broadcastet T, lambda1 und lambda2 gegeneinander.
+    vectorized = np.vectorize(_blackbody_single, otypes=[float])
+    return vectorized(T_kelvin, lambda1, lambda2)
 
 
 def _blackbody_cumulative_single(T_kelvin, wavelength):
@@ -210,14 +229,20 @@ def _blackbody_cumulative_single(T_kelvin, wavelength):
     # Verwende sehr kleine untere Grenze statt 0 (Singularität)
     lambda_min = 1e-6
 
+    # Praktische Obergrenze für Integration (wie in _blackbody_single):
+    # Bei 100 * λ_max (Wien) ist >99.9999% der Strahlung erfasst
+    lambda_max_practical = max(10000.0, 100 * 2898.0 / T_kelvin)
+    wavelength_eff = min(wavelength, lambda_max_practical)
+
     total_power = SIGMA * T_kelvin**4
 
     result, error = integrate.quad(
         _blackbody_integrand,
         lambda_min,
-        wavelength,
+        wavelength_eff,
         args=(T_kelvin,),
-        limit=100
+        limit=200,
+        points=_peak_points(T_kelvin, lambda_min, wavelength_eff)
     )
 
     fraction = result / total_power
@@ -240,10 +265,10 @@ def Blackbody_cumulative(T, wavelength):
     wavelength = _normalize_wavelength(wavelength)  # Auto-Konvertierung m -> µm
     T_kelvin = _ensure_kelvin(T)
 
-    # Validierung für Skalare
-    if T_kelvin.ndim == 0 and T_kelvin <= 0:
+    # Validierung (Skalare und Arrays)
+    if np.any(T_kelvin <= 0):
         raise ValueError(f"Temperatur muss > 0 K sein")
-    if wavelength.ndim == 0 and wavelength <= 0:
+    if np.any(wavelength <= 0):
         raise ValueError(f"Wellenlänge muss > 0 sein")
 
     # Vektorisierte Berechnung
@@ -277,8 +302,8 @@ def Wien_displacement(T):
     """
     T_kelvin = _ensure_kelvin(T)
 
-    # Validierung für Skalare
-    if T_kelvin.ndim == 0 and T_kelvin <= 0:
+    # Validierung (Skalare und Arrays)
+    if np.any(T_kelvin <= 0):
         raise ValueError(f"Temperatur muss > 0 K sein")
 
     # Wiensche Verschiebungskonstante
@@ -306,8 +331,8 @@ def Stefan_Boltzmann(T):
     """
     T_kelvin = _ensure_kelvin(T)
 
-    # Validierung für Skalare
-    if T_kelvin.ndim == 0 and T_kelvin <= 0:
+    # Validierung (Skalare und Arrays)
+    if np.any(T_kelvin <= 0):
         raise ValueError(f"Temperatur muss > 0 K sein")
 
     result = SIGMA * T_kelvin**4

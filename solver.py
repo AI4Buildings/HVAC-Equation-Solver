@@ -212,7 +212,8 @@ def create_equation_function(equations: List[str], variables: List[str],
             'asin': asin, 'acos': acos, 'atan': atan,
             'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
             'exp': exp, 'log': log, 'log10': log10,
-            'sqrt': sqrt, 'abs': np.abs, 'pi': pi
+            'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
+            'max': max, 'min': min
         })
 
         # Füge Thermodynamik-Funktionen hinzu
@@ -312,6 +313,7 @@ def solve_system(
 
     max_iterations = len(equations) * 3 + 1
     iteration = 0
+    violated_constraints = []  # Widersprüchliche Constraint-Gleichungen
 
     while remaining_equations and iteration < max_iterations:
         iteration += 1
@@ -358,10 +360,14 @@ def solve_system(
                 if len(unknowns) == 0:
                     # Überprüfe ob die Gleichung erfüllt ist (Residuum nahe 0)
                     residual = _calculate_residual(eq, known_values, context)
+                    rel_residual = _relative_residual(eq, known_values, context)
                     remaining_equations.remove(eq)
-                    # Füge als Constraint zur Analysis hinzu (optional: Warnung wenn residual > tolerance)
                     orig = original_equations.get(eq, eq)
                     analysis.add_direct(orig, eq, "(constraint)", 0.0, residual)
+                    # Verletzte Constraints (z.B. "x+1=3" UND "x+1=4") dürfen NICHT
+                    # stillschweigend entfernt werden - das System ist widersprüchlich
+                    if not np.isfinite(rel_residual) or rel_residual > 1e-4:
+                        violated_constraints.append((orig, residual))
                     made_progress = True
                     break
 
@@ -389,10 +395,9 @@ def solve_system(
             # Finde zusammenhängende Blöcke
             blocks = _find_equation_blocks(remaining_equations, remaining_vars, set(known_values.keys()))
 
-            if blocks:
-                # Löse den kleinsten Block zuerst
-                block_eqs, block_vars = blocks[0]
-
+            # Versuche ALLE Blöcke (kleinster zuerst) - ein nicht-quadratischer
+            # oder nicht konvergierender Block darf lösbare Blöcke nicht blockieren
+            for block_eqs, block_vars in blocks:
                 # Prüfe ob Block quadratisch ist
                 if len(block_eqs) == len(block_vars):
                     success, block_solution, block_msg, block_analysis = _solve_equation_block(
@@ -442,6 +447,7 @@ def solve_system(
 
                         stats['blocks'].append(len(block_vars))
                         made_progress = True
+                        break  # Nach gelöstem Block: zurück zu den sequentiellen Phasen
 
         if not made_progress:
             # Keine weitere Fortschritte möglich
@@ -452,6 +458,16 @@ def solve_system(
 
     # Erstelle Statusmeldung
     if not remaining_equations:
+        # Widersprüchliche Constraints -> KEIN Erfolg melden
+        if violated_constraints:
+            details = '; '.join(
+                f"'{orig}' (Residuum: {res:.4g})" for orig, res in violated_constraints[:3]
+            )
+            msg = f"Widersprüchliches System: {len(violated_constraints)} Gleichung(en) verletzt: {details}"
+            if return_analysis:
+                return False, result, msg, analysis
+            return False, result, msg
+
         parts = []
         if stats['direct'] > 0:
             parts.append(f"{stats['direct']} direkt")
@@ -485,6 +501,72 @@ def _calculate_residual(equation: str, known_values: Dict[str, float], context: 
         return float(result) if np.isfinite(result) else float('inf')
     except Exception:
         return float('inf')
+
+
+def _additive_term_scale(expression: str, local_ctx: dict) -> Optional[float]:
+    """
+    Größenordnung einer Gleichung: das betragsgrößte additive Term-Ergebnis.
+
+    Für "(m1*h1 + m2*h2 - m3*h3) - (0)" ist die Skala max(|m1*h1|, |m2*h2|, |m3*h3|).
+    Damit lässt sich ein Residuum RELATIV zur Gleichungsgröße bewerten -
+    unabhängig davon, ob mit J/kg (~1e6) oder Wirkungsgraden (~1) gerechnet wird.
+    """
+    import ast
+    try:
+        tree = ast.parse(expression.replace('^', '**'), mode='eval')
+    except SyntaxError:
+        return None
+
+    terms = []
+
+    def collect(node):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
+            collect(node.left)
+            collect(node.right)
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            collect(node.operand)
+        else:
+            terms.append(node)
+
+    collect(tree.body)
+
+    best = 0.0
+    for term in terms:
+        try:
+            expr = ast.fix_missing_locations(ast.Expression(body=term))
+            value = eval(compile(expr, '<term_scale>', 'eval'), {"__builtins__": {}}, local_ctx)
+            if isinstance(value, (int, float, np.floating)) and np.isfinite(value):
+                best = max(best, abs(float(value)))
+        except Exception:
+            pass
+
+    return best if best > 0 else None
+
+
+def _relative_residual(equation: str, values: Dict[str, float], context: dict) -> float:
+    """
+    Residuum einer Gleichung relativ zur Größenordnung ihrer Terme.
+
+    WICHTIG: NICHT relativ zur Größe der LÖSUNG normieren - sonst würde
+    Divergenz zur Asymptote (z.B. 1/(x-2) = 0 mit x -> unendlich) als
+    "Lösung" akzeptiert, weil das Residuum durch |x| geteilt winzig wird.
+    """
+    local_ctx = context.copy()
+    local_ctx.update(values)
+    try:
+        res = eval(equation, {"__builtins__": {}}, local_ctx)
+    except Exception:
+        return float('inf')
+    if not np.isfinite(res):
+        return float('inf')
+
+    scale = _additive_term_scale(equation, local_ctx)
+    if scale is None or not np.isfinite(scale):
+        scale = 1.0
+    # Kein großzügiger Floor: Wenn ALLE Terme winzig sind (z.B. 1/(x-2) bei
+    # x=1e83), muss das Residuum RELATIV zu diesen winzigen Termen klein sein -
+    # sonst wird Divergenz zur Asymptote als Lösung akzeptiert
+    return abs(float(res)) / max(scale, 1e-300)
 
 
 def format_solution(solution: Dict[str, Any], precision: int = 6) -> str:
@@ -551,7 +633,8 @@ def create_equation_function_with_sweep(
             'asin': asin, 'acos': acos, 'atan': atan,
             'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
             'exp': exp, 'log': log, 'log10': log10,
-            'sqrt': sqrt, 'abs': np.abs, 'pi': pi
+            'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
+            'max': max, 'min': min
         })
 
         # Füge Thermodynamik-Funktionen hinzu
@@ -602,7 +685,12 @@ def _get_eval_context():
 def _get_equation_unknowns(equation: str, known_vars: Set[str], all_vars: Set[str]) -> Set[str]:
     """Findet die Unbekannten in einer Gleichung."""
     import re
-    found_vars = set(re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', equation))
+    # String-Literale entfernen ('water' darf nicht als Variable zählen)
+    cleaned = re.sub(r"'[^']*'|\"[^\"]*\"", ' ', equation)
+    # Keyword-Argument-NAMEN entfernen (in "HumidAir('h', T=T_1)" ist T der
+    # Parametername, nicht die Nutzervariable T)
+    cleaned = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\s*=(?!=)', ' ', cleaned)
+    found_vars = set(re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', cleaned))
     # Filtere auf die tatsächlichen Variablen
     return (found_vars & all_vars) - known_vars
 
@@ -1126,6 +1214,21 @@ def _solve_block_simultaneously(
         variation[i] *= 0.1
         start_variations.append(variation)
 
+    def block_relative_residual(x):
+        """
+        Max. Residuum aller Gleichungen, jeweils relativ zur Größenordnung
+        ihrer Terme (NICHT zur Größe der Lösung - sonst würde Divergenz
+        zur Asymptote als Lösung akzeptiert, z.B. 1/(x-2)=0 mit x=1e83).
+        """
+        values = dict(known_values)
+        values.update(zip(var_list, x))
+        worst = 0.0
+        for eq in equations:
+            worst = max(worst, _relative_residual(eq, values, context))
+            if not np.isfinite(worst):
+                return float('inf')
+        return worst
+
     import warnings
     for x_start in start_variations[:15]:  # Maximal 15 Versuche
         try:
@@ -1143,19 +1246,19 @@ def _solve_block_simultaneously(
             if result.success or result.status in [1, 2, 3, 4]:
                 # Zurückskalieren
                 solution = result.x * scales
-                residual = np.max(np.abs(result.fun))
 
-                # Relative Toleranz: Residuum sollte klein relativ zur Lösungsgröße sein
-                typical_scale = np.max(np.abs(solution)) if np.any(solution != 0) else 1.0
-                relative_residual = residual / max(1.0, typical_scale)
+                if not np.all(np.isfinite(solution)):
+                    continue
+
+                relative_residual = block_relative_residual(solution)
 
                 if relative_residual < 1e-8:
                     result_dict = {var: val for var, val in zip(var_list, solution)}
                     return True, result_dict, f"Block gelöst ({n_vars} Variablen)"
 
-                if np.all(np.isfinite(solution)) and residual < best_residual:
+                if relative_residual < best_residual:
                     best_solution = solution
-                    best_residual = residual
+                    best_residual = relative_residual
 
         except Exception:
             pass
@@ -1168,34 +1271,33 @@ def _solve_block_simultaneously(
                 warnings.simplefilter("ignore")
                 solution, info, ier, _ = fsolve(block_func, x_start, full_output=True)
 
-            residual = np.max(np.abs(info['fvec']))
-            typical_scale = np.max(np.abs(solution)) if np.any(solution != 0) else 1.0
+            if not np.all(np.isfinite(solution)):
+                continue
 
-            if ier == 1 and np.all(np.isfinite(solution)) and residual < 1e-6 * max(1.0, typical_scale):
+            relative_residual = block_relative_residual(solution)
+
+            if ier == 1 and relative_residual < 1e-8:
                 result_dict = {var: val for var, val in zip(var_list, solution)}
                 return True, result_dict, f"Block gelöst ({n_vars} Variablen)"
 
-            if np.all(np.isfinite(solution)) and residual < best_residual:
+            if relative_residual < best_residual:
                 best_solution = solution
-                best_residual = residual
+                best_residual = relative_residual
         except Exception:
             pass
 
-    # Akzeptiere gute Näherung mit relativer Toleranz
-    if best_solution is not None:
-        typical_scale = np.max(np.abs(best_solution)) if np.any(best_solution != 0) else 1.0
-        relative_residual = best_residual / max(1.0, typical_scale)
+    # Akzeptiere gute Näherung mit relativer Toleranz (relativ zur Termgröße)
+    if best_solution is not None and best_residual < 1e-4:
+        result_dict = {var: val for var, val in zip(var_list, best_solution)}
+        return True, result_dict, f"Block gelöst (rel. Residuum: {best_residual:.2e})"
 
-        if relative_residual < 1e-4:
-            result_dict = {var: val for var, val in zip(var_list, best_solution)}
-            return True, result_dict, f"Block gelöst (rel. Residuum: {relative_residual:.2e})"
-
-    return False, {}, f"Block-Konvergenz fehlgeschlagen (Residuum: {best_residual:.2e})"
+    return False, {}, f"Block-Konvergenz fehlgeschlagen (rel. Residuum: {best_residual:.2e})"
 
 
 def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = None,
                        known_values: Optional[Dict[str, float]] = None,
-                       inferred_units: Optional[Dict[str, str]] = None) -> float:
+                       inferred_units: Optional[Dict[str, str]] = None,
+                       use_geometric_mean: bool = True) -> float:
     """
     Ermittelt sinnvolle Startwerte basierend auf Einheiten - OHNE Variablennamen-Heuristik.
 
@@ -1260,7 +1362,10 @@ def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = No
     # - User-Definition: hoehe = 10 m → hoehe: m
 
     # Fallback: Geometrisches Mittel aller bekannten Werte
-    if known_values:
+    # (abschaltbar: als WURZEL-AUSWAHL-Anker ungeeignet, weil sonst eine
+    # völlig unbeteiligte Konstante bestimmt, welche von mehreren Wurzeln
+    # gewählt wird - z.B. sin(alpha)=0.5 -> 150 statt 30)
+    if use_geometric_mean and known_values:
         positive_vals = [abs(v) for v in known_values.values()
                         if isinstance(v, (int, float)) and v > 0.01]
         if positive_vals:
@@ -1295,7 +1400,11 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
     Returns:
         (success, value)
     """
+    import time
     from scipy.optimize import brentq
+
+    # Zeitbudget: unlösbare Gleichungen dürfen die GUI nicht minutenlang einfrieren
+    deadline = time.monotonic() + 10.0
 
     def func(x):
         local_ctx = context.copy()
@@ -1306,10 +1415,57 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
         except Exception:
             return float('inf')
 
+    def rel_residual_at(x):
+        """Residuum relativ zur Termgröße der Gleichung (skalenunabhängig)."""
+        values = dict(known_values)
+        values[unknown] = x
+        return _relative_residual(equation, values, context)
+
+    def is_acceptable_root(x, tol=1e-9):
+        return np.isfinite(x) and rel_residual_at(x) < tol
+
+    def is_credible_root(x):
+        """
+        Prüft ob x eine ECHTE Nullstelle ist - nicht Underflow einer
+        abklingenden Funktion (z.B. (x-3)*exp(-(x-3)^2) ist für x>30
+        numerisch exakt 0) und nicht eine Polstelle.
+
+        Kriterium: |f(x)| muss klein sein IM VERGLEICH zur Funktion in der
+        Umgebung. An einer echten Nullstelle wächst |f| beidseitig (oder
+        mindestens einseitig, z.B. an Clamping-Grenzen); auf einem
+        Underflow-Plateau bleibt die Umgebung ebenfalls praktisch null.
+        """
+        if not np.isfinite(x):
+            return False
+        h0 = 0.05 * max(1.0, abs(x))
+        try:
+            f_x = abs(func(x))
+            f_p = abs(func(x + h0))
+            f_m = abs(func(x - h0))
+        except Exception:
+            return False
+        # Polstellen/Eval-Fehler in der Umgebung als "sehr groß" behandeln
+        f_p = min(f_p, 1e300) if np.isfinite(f_p) else 1e300
+        f_m = min(f_m, 1e300) if np.isfinite(f_m) else 1e300
+        f_max, f_min = max(f_p, f_m), min(f_p, f_m)
+
+        # Fall 1: Gleichung relativ zur Termgröße erfüllt (mehrterminge
+        # Gleichungen) UND Umgebung deutlich größer als das Residuum.
+        # f_max > 1e-250 schließt Denormal-/Underflow-Plateaus aus.
+        if rel_residual_at(x) < 1e-9 and f_max > 1e-250 and f_x <= 1e-3 * f_max:
+            return True
+
+        # Fall 2: |f| wächst BEIDSEITIG deutlich (klassische isolierte
+        # Nullstelle, auch bei Ein-Term-Gleichungen wie f(x)=0)
+        return f_min > 1e-250 and f_x <= 1e-6 * f_min
+
     # === Phase 1: Schneller Newton-Raphson Versuch ===
     # Für einfache (oft lineare) Gleichungen konvergiert dies in wenigen Iterationen
-    # Verwende intelligente Startwerte basierend auf Einheiten (generisch) oder Variablennamen (Fallback)
-    initial_guess = _get_initial_value(unknown, manual_initial, known_values, inferred_units)
+    # Startwert OHNE Geometrisches-Mittel-Fallback: bei Gleichungen mit mehreren
+    # Wurzeln (z.B. sin(alpha)=0.5) würde sonst eine unbeteiligte Konstante
+    # bestimmen, zu welcher Wurzel Newton konvergiert
+    initial_guess = _get_initial_value(unknown, manual_initial, known_values,
+                                       inferred_units, use_geometric_mean=False)
 
     try:
         x = initial_guess
@@ -1317,10 +1473,12 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
         for iteration in range(30):  # Max 30 Iterationen
             fx = func(x)
 
-            # Prüfe ob bereits Lösung gefunden
-            # Absolutes Residuum muss klein sein (Gleichung = 0)
-            if abs(fx) < 1e-10:
-                return True, x
+            # Prüfe ob bereits Lösung gefunden (mit Schutz gegen
+            # Underflow/Asymptote - siehe is_credible_root)
+            if abs(fx) < 1e-10 or is_acceptable_root(x):
+                if is_credible_root(x):
+                    return True, x
+                break  # Verdächtig flach -> Bracket-Suche
 
             # Skalierte Schrittweite für numerische Ableitung
             # Bei großen x-Werten (z.B. 1e6) brauchen wir größere h
@@ -1340,9 +1498,9 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
 
             # Prüfe Konvergenz (relative Änderung)
             if abs(x_new - x) < 1e-10 * max(1, abs(x)):
-                # Verifiziere Lösung - absolutes Residuum muss klein sein
+                # Verifiziere Lösung (Underflow-/Polstellen-sicher)
                 fx_new = func(x_new)
-                if abs(fx_new) < 1e-8:
+                if (abs(fx_new) < 1e-8 or is_acceptable_root(x_new)) and is_credible_root(x_new):
                     return True, x_new
                 break
 
@@ -1400,6 +1558,8 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
         """Evaluiere Funktion an Punkten und gib gültige (x, f(x)) Paare zurück."""
         results = []
         for x in points:
+            if time.monotonic() > deadline:
+                break  # Zeitbudget erschöpft
             try:
                 v = func(x)
                 if np.isfinite(v) and abs(v) < 1e20:
@@ -1418,6 +1578,14 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
                 brackets.append((x1, x2))
         return brackets
 
+    def find_exact_zeros(points):
+        """
+        Testpunkte, die EXAKT auf einer Nullstelle liegen (v1*v2 < 0 übersieht sie).
+        Der Isolations-Check filtert Underflow-Plateaus aus (dort ist f(x) für
+        ganze x-Bereiche numerisch exakt 0, ohne dass Nullstellen vorliegen).
+        """
+        return [x for x, v in points if v == 0.0 and is_credible_root(x)]
+
     def refine_interval(x1, x2, depth=0):
         """Verfeinere ein Intervall adaptiv um Singularitäten zu finden."""
         if depth > 5 or abs(x2 - x1) < 1e-6:
@@ -1432,12 +1600,15 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
         if brackets:
             return brackets
 
-        # Rekursiv verfeinern wenn große Wertänderung
+        # Rekursiv verfeinern wenn große RELATIVE Wertänderung
+        # (absolute Schwelle wäre skalenabhängig: bei Residuen ~1e6 überall,
+        # bei Residuen ~1e-3 nie erfüllt)
         if len(evaluated) >= 2:
             for i in range(len(evaluated) - 1):
                 px1, pv1 = evaluated[i]
                 px2, pv2 = evaluated[i + 1]
-                if abs(pv2 - pv1) > 1.0:  # Große Änderung deutet auf Singularität
+                local_scale = max(abs(pv1), abs(pv2), 1e-12)
+                if abs(pv2 - pv1) > 0.5 * local_scale:  # Großer Sprung deutet auf Singularität
                     sub_brackets = refine_interval(px1, px2, depth + 1)
                     if sub_brackets:
                         return sub_brackets
@@ -1446,47 +1617,66 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
     # Erste Auswertung
     valid_points = eval_points(test_points)
     brackets = find_brackets(valid_points)
+    exact_zeros = find_exact_zeros(valid_points)
 
     # Wenn keine Brackets gefunden, suche nach Regionen mit großen Änderungen
-    if not brackets:
-        # Sortiere nach Größe der Änderung (größte zuerst)
+    if not brackets and not exact_zeros:
+        # Sortiere nach Größe der Änderung (größte zuerst, skalenunabhängig)
         changes = []
         for i in range(len(valid_points) - 1):
             x1, v1 = valid_points[i]
             x2, v2 = valid_points[i + 1]
             change = abs(v2 - v1)
-            if change > 0.1:  # Schon moderate Änderungen untersuchen
+            if change > 0:
                 changes.append((change, x1, x2))
         changes.sort(reverse=True)
 
         for _, x1, x2 in changes[:20]:  # Top 20 Regionen untersuchen
+            if time.monotonic() > deadline:
+                break
             brackets = refine_interval(x1, x2)
             if brackets:
                 break
 
-    # Versuche alle gefundenen Brackets
-    best_root = None
-    best_residual = float('inf')
+    # Versuche alle gefundenen Brackets und sammle KANDIDATEN.
+    # Bei mehreren Wurzeln (z.B. x^2-2x=5) wird NICHT einfach die erste
+    # (= negativste) genommen, sondern die dem Startwert nächstgelegene -
+    # das ist bei physikalischen Größen fast immer die gewünschte Lösung.
+    candidates = [(0.0, z) for z in exact_zeros]
+    fallback_root = None
+    fallback_residual = float('inf')
 
     for a, b in brackets:
+        if time.monotonic() > deadline and candidates:
+            break
         try:
             root = brentq(func, a, b, xtol=1e-12, rtol=1e-12)
-            residual = abs(func(root))
-            if np.isfinite(root) and np.isfinite(residual):
-                # Absolutes Residuum sollte sehr klein sein (Gleichung = 0)
-                # Bei korrekter Lösung ist f(x) ≈ 0, unabhängig von der Größe von x
-                if residual < 1e-8:
-                    return True, float(root)
-                elif residual < best_residual:
-                    best_root = root
-                    best_residual = residual
+            if not np.isfinite(root):
+                continue
+            rel = rel_residual_at(root)
+            if rel < 1e-8:
+                candidates.append((rel, float(root)))
+            elif rel < fallback_residual:
+                fallback_root = float(root)
+                fallback_residual = rel
         except Exception:
             pass
 
-    # Beste gefundene Lösung zurückgeben wenn akzeptabel
-    # Absolutes Residuum muss klein sein - bei f(x)=0 muss f(root) ≈ 0 sein
-    if best_root is not None and best_residual < 1e-6:
-        return True, float(best_root)
+    if candidates:
+        # Wähle die Wurzel, die dem Auswahl-Anker am nächsten liegt.
+        # Der Anker ist der Startwert OHNE Geometrisches-Mittel-Fallback:
+        # unbeteiligte Konstanten dürfen die Wurzelwahl nicht beeinflussen
+        # (z.B. sin(alpha)=0.5 mit F=100 -> sonst 150 statt 30).
+        # Tie-Break: bevorzuge die positive/größere Wurzel - bei physikalischen
+        # Größen wie T, p, m_dot ist das fast immer die gewünschte.
+        anchor = _get_initial_value(unknown, manual_initial, known_values,
+                                    inferred_units, use_geometric_mean=False)
+        best = min(candidates, key=lambda c: (abs(c[1] - anchor), -c[1]))
+        return True, best[1]
+
+    # Beste gefundene Näherung zurückgeben wenn akzeptabel (relativ zur Termgröße)
+    if fallback_root is not None and fallback_residual < 1e-6:
+        return True, fallback_root
 
     # Fallback: fsolve mit verschiedenen Startwerten
     # Beginne mit intelligentem Startwert basierend auf Einheiten (generisch)
@@ -1497,14 +1687,16 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
         fallback_starts.extend([scale, scale * 0.1, scale * 0.5, scale * 2, scale * 10])
 
     for x0 in fallback_starts:
+        if time.monotonic() > deadline:
+            break  # Zeitbudget erschöpft
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 solution, info, ier, _ = fsolve(func, x0, full_output=True)
-            residual = abs(info['fvec'][0])
-            # Absolutes Residuum muss klein sein - Gleichung ist normiert auf f(x)=0
-            # Bei korrekter Lösung sollte f(x) ≈ 0 sein
-            if ier == 1 and np.isfinite(solution[0]) and residual < 1e-8:
+            # Akzeptanz relativ zur Termgröße + Isolations-Check gegen
+            # Underflow-Plateaus (absolut kleines Residuum reicht NICHT -
+            # sonst würde z.B. 1/(x-2)=0 mit x=1e83 akzeptiert)
+            if ier == 1 and np.isfinite(solution[0]) and is_credible_root(float(solution[0])):
                 return True, float(solution[0])
         except Exception:
             pass
@@ -1591,20 +1783,28 @@ def _try_sequential_evaluation(
 
 def _try_vectorized_evaluation(equations: List[str], variables: Set[str],
                                 sweep_vars: Dict[str, np.ndarray],
-                                initial_values: Dict[str, float]) -> Tuple[bool, Dict[str, np.ndarray], str]:
+                                constants: Optional[Dict[str, float]] = None) -> Tuple[bool, Dict[str, np.ndarray], str]:
     """
     Versucht direkte vektorisierte Auswertung für einfache Zuweisungen.
 
     Funktioniert wenn alle Gleichungen die Form "var = ausdruck" haben,
     wobei der Ausdruck nur von Sweep-Variablen und bereits berechneten Variablen abhängt.
+
+    WICHTIG: Nur echte KONSTANTEN werden vorbelegt - niemals Startwerte
+    (initial_values sind Schätzwerte; sie als Ergebnisse einzutragen würde
+    stillschweigend falsche Zahlen liefern, wenn eine Gleichung die Variable
+    benutzt, bevor ihre definierende Gleichung ausgewertet wurde).
+    Fehlende Variablen führen zu einem Eval-Fehler und werden im nächsten
+    Durchlauf berechnet - die Reihenfolge löst sich also von selbst auf.
     """
     n_points = len(list(sweep_vars.values())[0])
     results = {name: arr.copy() for name, arr in sweep_vars.items()}
 
-    # Füge initiale Werte als Arrays hinzu
-    for var, val in initial_values.items():
-        if var in variables:
-            results[var] = np.full(n_points, val)
+    # Füge Konstanten (echte feste Werte) als Arrays hinzu
+    if constants:
+        for var, val in constants.items():
+            if var not in results:
+                results[var] = np.full(n_points, val)
 
     # Kontext für Auswertung
     context = _get_eval_context()
@@ -1700,8 +1900,9 @@ def solve_parametric(
     if constants is None:
         constants = {}
 
-    # Versuche zuerst vektorisierte direkte Auswertung
-    success, results, msg = _try_vectorized_evaluation(equations, variables, sweep_vars, initial_values)
+    # Versuche zuerst vektorisierte direkte Auswertung (mit Konstanten,
+    # NICHT mit Startwerten - siehe _try_vectorized_evaluation)
+    success, results, msg = _try_vectorized_evaluation(equations, variables, sweep_vars, constants)
     if success:
         return True, results, msg
 
@@ -1723,6 +1924,11 @@ def solve_parametric(
 
     failed_points = []
 
+    # Warm-Start: Die Lösung des Vorpunkts dient als Startwert für den
+    # nächsten Punkt. Ohne das kann der Lösungszweig zwischen Sweep-Punkten
+    # springen (z.B. x^2-2x=a: Punkt 1 negative Wurzel, Rest positive).
+    point_initial = dict(initial_values)
+
     # Löse für jeden Sweep-Punkt mit der robusten solve_system Methode
     for i in range(n_points):
         # Setze aktuelle Sweep-Werte als Konstanten
@@ -1735,7 +1941,7 @@ def solve_parametric(
         try:
             # Verwende solve_system für jeden Punkt (nutzt Block-Dekomposition und Bracket-Suche)
             success, solution, msg = solve_system(
-                equations, variables, initial_values, constants=combined_constants
+                equations, variables, point_initial, constants=combined_constants
             )
 
             if success:
@@ -1745,6 +1951,10 @@ def solve_parametric(
                         results[var][i] = solution[var]
                     else:
                         results[var][i] = np.nan
+                # Warm-Start für den nächsten Punkt
+                warm = {var: float(solution[var]) for var in var_list
+                        if var in solution and np.isfinite(solution[var])}
+                point_initial = {**initial_values, **warm}
             else:
                 failed_points.append(i)
                 for var in var_list:
