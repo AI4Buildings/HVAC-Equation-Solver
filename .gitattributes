@@ -1,0 +1,4 @@
+# Zeilenenden der Startskripte festlegen (Windows-cmd braucht CRLF, Shell braucht LF)
+*.bat text eol=crlf
+*.sh text eol=lf
+*.command text eol=lf

@@ -259,6 +259,25 @@ def unit_from_dimensionality(dim) -> str:
         return ""
 
 
+def si_label_from_dimensionality(dim) -> str:
+    """
+    Lesbares SI-Label einer Dimension für Meldungen (W/m^2, W, K, J/kg, ...).
+    Anders als unit_from_dimensionality ohne Anzeige-Präfixe (kW, kJ/kg, bar).
+    """
+    if dim is None or not PINT_AVAILABLE:
+        return ""
+    try:
+        from units import STANDARD_UNITS
+        if dim == ureg.dimensionless.dimensionality:
+            return "dimensionslos"
+        for pint_unit, label in STANDARD_UNITS:
+            if ureg.Quantity(1.0, pint_unit).dimensionality == dim:
+                return label
+        return unit_from_dimensionality(dim) or str(dim)
+    except Exception:
+        return str(dim)
+
+
 def unit_from_quantity(quantity) -> str:
     """Extrahiert ein Anzeige-Label aus einer pint Quantity (nur Dimension zählt)."""
     if quantity is None or not PINT_AVAILABLE:
@@ -319,6 +338,8 @@ _HUMID_OUT = {
     'rho_a': 'kg/m^3',
     'rho_w': 'kg/m^3',
     'p_w': 'Pa',
+    'cp': 'J/(kg*K)',
+    'cp_ha': 'J/(kg*K)',
     'p_tot': 'Pa',
 }
 
@@ -958,6 +979,8 @@ def _rev(node, target: DimensionInfo, known, rank: int, out):
                         _rev(node.left, _dim(_dimless_q()), known, rank, out)
                 elif ml:
                     _rev(node.left, l, known, rank, out)
+                # Ein Exponent ist immer dimensionslos (z.B. n in (m_1/m_0)^n)
+                _rev(node.right, _dim(_dimless_q()), known, rank, out)
         except Exception:
             pass
         return
@@ -2620,14 +2643,19 @@ def check_all_unit_consistency(solution: Dict[str, float],
                         conversion_factor=0
                     ))
             elif error['type'] == 'dimension_mismatch':
-                # Format: {equation: "links [dim] ≠ rechts [dim]"}
-                # Zeigt die Gleichung mit Dimensionsinformation
-                dim_info = f"links: {error['left_dim']} ≠ rechts: {error['right_dim']}"
+                # Format: {equation: "links: W/m^2 ≠ rechts: W"} - lesbare SI-Labels
+                # statt pint-Rohtext ([mass] / [time] ** 3)
+                left_unit = error.get('left_unit') or error['left_dim']
+                right_unit = error.get('right_unit') or error['right_dim']
+                dim_info = f"links: {left_unit} ≠ rechts: {right_unit}"
+                # Variable = linke Seite, wenn dort ein reiner Variablenname steht
+                lhs = _remove_comments(original_eq).split('=', 1)[0].strip()
+                variable = lhs if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', lhs) else 'Dimensionsfehler'
                 warnings.append(UnitWarning(
-                    variable='⚠ Dimensionsfehler',
+                    variable=variable,
                     equations=[original_eq],
                     units={original_eq: dim_info},
-                    explanation=f"Dimensionsfehler: {error['left_dim']} ≠ {error['right_dim']}",
+                    explanation=f"Dimensionsfehler: {left_unit} ≠ {right_unit}",
                     conversion_factor=0
                 ))
 
@@ -2798,6 +2826,8 @@ def check_equation_dimensions(equation: str, unit_map: Dict[str, str]) -> Option
             'type': 'dimension_mismatch',
             'left_dim': str(left_dim),
             'right_dim': str(right_dim),
+            'left_unit': si_label_from_dimensionality(left_dim),
+            'right_unit': si_label_from_dimensionality(right_dim),
             'equation': equation
         }
 

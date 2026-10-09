@@ -37,6 +37,8 @@ OUTPUT_MAP = {
     'rho_w': (None, None),                          # Special handling: W / Vda
     't_dp': ('Tdp', lambda x: x),                   # K -> K
     't_wb': ('Twb', lambda x: x),                   # K -> K
+    'cp': ('cp', lambda x: x),                      # J/(kg_dry_air K), wie cp(AirH2O) in EES
+    'cp_ha': ('cp_ha', lambda x: x),                # J/(kg_humid_air K)
 }
 
 # Mapping of input parameters

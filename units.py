@@ -10,6 +10,7 @@ Features:
 - Automatische Einheiten für CoolProp-Funktionen
 """
 
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Tuple, List, Dict, Optional, Any
@@ -67,6 +68,8 @@ HUMID_AIR_UNITS = {
     'rho_a': 'kg/m^3',
     'rho_w': 'kg/m^3',
     'p_w': 'Pa',              # SI: Pa
+    'cp': 'J/(kg*K)',         # spez. Wärmekapazität je kg trockene Luft
+    'cp_ha': 'J/(kg*K)',      # spez. Wärmekapazität je kg feuchte Luft
 }
 
 # Einheiten für Strahlungs-Funktionen (ANZEIGE-Einheiten; die Funktionen
@@ -177,6 +180,43 @@ def _dimensionality(pint_unit: str):
     if pint_unit not in _DIMENSIONALITY_CACHE:
         _DIMENSIONALITY_CACHE[pint_unit] = ureg.Quantity(1.0, pint_unit).dimensionality
     return _DIMENSIONALITY_CACHE[pint_unit]
+
+
+def is_absolute_temperature_unit(unit_str: Optional[str]) -> bool:
+    """True für absolute Temperatureinheiten (K, °C, °F), False für delta_K & Co."""
+    if not unit_str or 'delta' in unit_str.lower():
+        return False
+    try:
+        quantity = ureg.Quantity(1.0, normalize_unit(unit_str.strip()))
+    except Exception:
+        return False
+    return quantity.dimensionality == ureg.kelvin.dimensionality
+
+
+def initial_values_from_units(variables, all_units: Dict[str, Optional[str]],
+                              known_values: Dict[str, float]) -> Dict[str, float]:
+    """
+    Startwerte (SI) für Variablen aus ihren Einheiten - generisch, nicht namensabhängig.
+
+    Absolute Temperaturen starten beim Mittelwert der vorgegebenen Temperaturen der
+    Aufgabe statt pauschal bei 350 K: liegen alle Temperaturen z.B. zwischen -10 °C
+    und 25 °C, gäbe 350 K Temperaturdifferenzen das falsche Vorzeichen
+    (Ra ~ T_Raum - T_Scheibe < 0 -> Ra^(1/6) nicht reell -> keine Suchrichtung).
+    """
+    temperatures = [float(value) for name, value in known_values.items()
+                    if isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+                    and is_absolute_temperature_unit(all_units.get(name))]
+    mean_temperature = sum(temperatures) / len(temperatures) if temperatures else None
+    result = {}
+    for var in variables:
+        unit = all_units.get(var)
+        if unit is None:
+            continue
+        if mean_temperature is not None and is_absolute_temperature_unit(unit):
+            result[var] = mean_temperature
+        else:
+            result[var] = get_initial_from_unit(unit)
+    return result
 
 
 def get_initial_from_unit(unit_str: str) -> float:
@@ -336,11 +376,18 @@ COMPATIBLE_UNITS = {
 
 # Regex für Wert mit Einheit
 # Matches: "15", "15.5", "-3.14", "1.5e-3", "15°C", "100kJ/kg", "4.18kJ/(kg*K)"
+_UNIT_BODY = r'(?:[a-zA-Z0-9²³µ°/*()·⋅]|\^-?)*'   # Zeichen einer Einheit, auch h^-1
 VALUE_WITH_UNIT_PATTERN = re.compile(
     r'^'
     r'(-?\d+\.?\d*(?:[eE][+-]?\d+)?)'  # Zahl (inkl. wissenschaftliche Notation)
-    r'\s*'                               # Optionale Leerzeichen
-    r'(°?[a-zA-Z²³µ][a-zA-Z0-9²³µ°/*^()]*)?'  # Optionale Einheit
+    r'(?:'
+    # Einheit, beginnend mit Buchstabe/°/µ (auch W/(m²·K), h^-1). Darf nicht mit
+    # einem Exponenten beginnen: sonst zerlegt Backtracking "1e5*y" in 1 und e5*y
+    r'\s*((?![eE][+-]?\d)°?[a-zA-Z²³µ]' + _UNIT_BODY + r')'
+    # oder Kehrwert-Einheit "1/h", "1/K" - nur NACH einem Leerzeichen
+    # (sonst wäre "0.51/h" mehrdeutig)
+    r'|\s+(1/(?:\(|°?[a-zA-Z²³µ])' + _UNIT_BODY + r')'
+    r')?'
     r'$'
 )
 
@@ -726,6 +773,49 @@ class UnitValue:
         return f"UnitValue({self.si_value})"
 
 
+class UnknownUnitError(Exception):
+    """
+    Einheit wird nicht erkannt.
+
+    Bewusst KEIN ValueError: der Parser fängt ValueError als "kein Wert mit
+    Einheit" ab und würde den Fehler sonst verschlucken.
+    """
+
+
+def unit_value_strict(value: float, unit_str: str, context: str = '') -> 'UnitValue':
+    """
+    Wie UnitValue.from_input, aber eine unbekannte Einheit ist ein FEHLER.
+
+    UnitValue.from_input fällt bei unbekannter Einheit auf "dimensionslos" mit
+    unverändertem Zahlenwert zurück - für Benutzereingaben würde das still
+    falsche Ergebnisse liefern.
+    """
+    unit_value = UnitValue.from_input(value, unit_str)
+    if unit_value.quantity is None:
+        where = f" in: {context}" if context else ""
+        raise UnknownUnitError(f"Unbekannte Einheit '{unit_str}'{where}")
+    return unit_value
+
+
+def check_unit_dimension(unit_value: 'UnitValue', expected_unit: str, context: str = '') -> None:
+    """
+    Prüft, ob ein Wert mit Einheit die erwartete Dimension hat (z.B. T=... muss
+    eine Temperatur sein). Sonst UnknownUnitError - verhindert stille Unsinns-
+    Werte wie "T=20 Grad" (pint: Giga-Radiant, dimensionslos 2e10).
+    """
+    if unit_value.quantity is None:
+        return
+    try:
+        expected_dim = ureg.Quantity(1.0, normalize_unit(expected_unit)).dimensionality
+        actual_dim = unit_value.quantity.dimensionality
+    except Exception:
+        return
+    if actual_dim != expected_dim:
+        where = f" in: {context}" if context else ""
+        raise UnknownUnitError(
+            f"Einheit '{unit_value.original_unit}' passt nicht (erwartet: {expected_unit}){where}")
+
+
 def normalize_unit(unit_str: str) -> str:
     """
     Normalisiert eine Einheit zu pint-kompatiblem Format.
@@ -752,6 +842,12 @@ def normalize_unit(unit_str: str) -> str:
     unit_str = unit_str.replace('³', '^3')
     unit_str = unit_str.replace('²', '^2')
     unit_str = unit_str.replace('µ', 'micro')
+    unit_str = unit_str.replace('·', '*').replace('⋅', '*')
+
+    # Exponent ohne '^' (m2, cm2, m3/h, kg/m3, W/m2K): Ziffern direkt nach einem
+    # Buchstaben sind ein Exponent. pint kennt diese Schreibweise nicht - früher
+    # wurde der Wert dann stillschweigend NICHT umgerechnet (20 cm2 -> 20 m²).
+    unit_str = re.sub(r'(?<=[A-Za-z])(\d+)', r'^\1', unit_str)
 
     # Normalisiere Bruch-Notation ohne Klammern
     # z.B. "kJ/kgK" -> "kJ/(kg*K)"
@@ -805,7 +901,7 @@ def parse_value_with_unit(text: str) -> Tuple[float, str]:
             raise ValueError(f"Ungültiges Format: {text}")
 
     value_str = match.group(1)
-    unit_str = match.group(2) or ""
+    unit_str = match.group(2) or match.group(3) or ""
 
     try:
         value = float(value_str)

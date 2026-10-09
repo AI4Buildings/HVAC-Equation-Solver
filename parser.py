@@ -18,18 +18,22 @@ from typing import List, Set, Tuple, Dict, Union, Optional
 
 # Einheiten-Modul (optional, falls nicht vorhanden wird ohne Einheiten gearbeitet)
 try:
-    from units import parse_value_with_unit, UnitValue
+    from units import (parse_value_with_unit, UnitValue, unit_value_strict, UnknownUnitError,
+                       check_unit_dimension)
     UNITS_AVAILABLE = True
 except ImportError:
     UNITS_AVAILABLE = False
     UnitValue = None
+
+    class UnknownUnitError(Exception):
+        """Platzhalter, wenn das Einheiten-Modul fehlt."""
 
 
 # Mathematische Funktionen die unterstützt werden
 MATH_FUNCTIONS = {
     'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
     'sinh', 'cosh', 'tanh',
-    'exp', 'ln', 'log10', 'sqrt', 'abs',
+    'exp', 'ln', 'lg', 'log10', 'sqrt', 'abs',
     'pi', 'max', 'min'
 }
 
@@ -100,6 +104,10 @@ def parse_vector(value_str: str) -> Union[np.ndarray, None]:
     """
     value_str = value_str.strip()
 
+    # Werteliste [v1 v2 ...] (Messdaten, per Zwischenablage eingefügt)
+    if value_str.startswith('[') and value_str.endswith(']'):
+        return _parse_value_list(value_str[1:-1])
+
     # Prüfe auf start:step:end Format
     match3 = VECTOR_PATTERN_3.match(value_str)
     if match3:
@@ -119,6 +127,33 @@ def parse_vector(value_str: str) -> Union[np.ndarray, None]:
         return _build_vector(start, step, end)
 
     return None
+
+
+class VectorSyntaxError(Exception):
+    """Werteliste [ ... ] ist fehlerhaft (z.B. Dezimalkomma, keine Zahl)."""
+
+
+def _parse_value_list(inner: str) -> np.ndarray:
+    """
+    Werteliste wie "1.5 2.0 2.5" oder "1.5; 2.0; 2.5" oder "1.5, 2.0" (auch mit
+    Zeilenumbrüchen/Tabulatoren, wie aus Excel/CSV kopiert). Dezimalzeichen ist
+    der Punkt; ein Dezimalkomma ("1,5 2,0") wird erkannt und gemeldet.
+    """
+    tokens = inner.split()
+    if len(tokens) > 1 and any(re.fullmatch(r'-?\d+,\d+', t) for t in tokens):
+        raise VectorSyntaxError("Dezimalkomma in der Werteliste? Dezimalzahlen mit Punkt schreiben "
+                                "(1.5 statt 1,5); Werte durch Leerzeichen, ';' oder ',' trennen")
+    values = []
+    for token in re.split(r'[\s,;]+', inner.strip()):
+        if not token:
+            continue
+        try:
+            values.append(float(token))
+        except ValueError:
+            raise VectorSyntaxError(f"'{token}' ist keine Zahl (Werteliste [ ... ])") from None
+    if not values:
+        raise VectorSyntaxError("Leere Werteliste [ ]")
+    return np.array(values, dtype=float)
 
 
 def _build_vector(start: float, step: float, end: float) -> Union[np.ndarray, None]:
@@ -151,7 +186,7 @@ def is_vector_assignment(line: str, parse_units: bool = False) -> Tuple[bool, st
         (is_vector, var_name, vector_string, unit_string)
         unit_string ist leer wenn keine Einheit gefunden wurde
     """
-    if '=' not in line or ':' not in line:
+    if '=' not in line or (':' not in line and '[' not in line):
         return False, '', '', ''
 
     parts = line.split('=', 1)
@@ -164,6 +199,12 @@ def is_vector_assignment(line: str, parse_units: bool = False) -> Tuple[bool, st
     # Links muss eine einfache Variable sein
     if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', left):
         return False, '', '', ''
+
+    # Werteliste: x = [v1 v2 ...] [Einheit]
+    list_match = re.match(r'^(\[[^\[\]]*\])\s*(.*)$', right, re.DOTALL)
+    if list_match:
+        unit_part = list_match.group(2).strip() if parse_units else ''
+        return True, left, list_match.group(1), unit_part
 
     # Rechts muss Vektor-Syntax sein
     if parse_vector(right) is not None:
@@ -229,6 +270,21 @@ def remove_comments(text: str) -> str:
     return ''.join(result)
 
 
+# Erwartete Einheit (Dimension) der Argumente von Stoffwert-/HumidAir-Funktionen
+ARG_EXPECTED_UNITS = {
+    't': 'K', 'p': 'Pa', 'p_tot': 'Pa', 'p_w': 'Pa',
+    'h': 'J/kg', 'u': 'J/kg', 's': 'J/(kg*K)',
+    'rho': 'kg/m^3', 'd': 'kg/m^3', 'v': 'm^3/kg',
+    'x': 'dimensionless', 'rh': 'dimensionless', 'rf': 'dimensionless', 'w': 'dimensionless',
+}
+
+# Erwartete Einheiten der Positionsargumente der Strahlungsfunktionen (nach T)
+RADIATION_ARG_UNITS = {
+    'eb': ('K', 'm'), 'blackbody': ('K', 'm', 'm'), 'blackbody_cumulative': ('K', 'm'),
+    'wien': ('K',), 'stefan_boltzmann': ('K',),
+}
+
+
 def _convert_arg_units(arg: str) -> str:
     """
     Converts units in a function argument to SI base units.
@@ -254,13 +310,16 @@ def _convert_arg_units(arg: str) -> str:
     if UNITS_AVAILABLE:
         try:
             magnitude, unit_str = parse_value_with_unit(value)
-            if unit_str:
-                from units import UnitValue
-                unit_value = UnitValue.from_input(magnitude, unit_str)
-                # Use SI base value for calculations
-                return f"{key}={unit_value.si_value}"
-        except (ValueError, Exception):
-            pass
+        except ValueError:
+            return arg  # Kein "Zahl + Einheit" (z.B. Ausdruck) -> unverändert
+        if unit_str:
+            # Unbekannte Einheit -> UnknownUnitError (nicht still dimensionslos)
+            unit_value = unit_value_strict(magnitude, unit_str, arg)
+            expected = ARG_EXPECTED_UNITS.get(key.lower())
+            if expected:
+                check_unit_dimension(unit_value, expected, arg)
+            # Use SI base value for calculations
+            return f"{key}={unit_value.si_value}"
 
     return arg
 
@@ -351,15 +410,25 @@ def _convert_positional_call(func_name: str, args_str: str, keep_case: bool = Tr
     Eb(500°C, 5µm) -> Eb(773.15, 5e-06). Argumente ohne Einheit bleiben unverändert.
     """
     args = []
-    for arg in _split_call_args(args_str):
+    expected_units = RADIATION_ARG_UNITS.get(func_name.lower(), ())
+    for index, arg in enumerate(_split_call_args(args_str)):
         converted = arg
-        if UNITS_AVAILABLE and '=' not in arg:
+        if (index < len(expected_units) and expected_units[index] == 'm'
+                and re.fullmatch(r'\s*[+]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*', arg)):
+            # Zahlenliteral als Wellenlänge: >= 0.01 als µm ("Eb(1000, 5)"), kleinere
+            # als m. Im Solver sind Wellenlängen danach immer SI (keine Heuristik)
+            value = float(arg)
+            converted = repr(value / 1e6 if value >= 0.01 else value)
+        elif UNITS_AVAILABLE and '=' not in arg:
             try:
                 magnitude, unit_str = parse_value_with_unit(arg)
-                if unit_str:
-                    converted = repr(UnitValue.from_input(magnitude, unit_str).calc_value)
             except ValueError:
-                pass
+                magnitude, unit_str = None, ''
+            if unit_str:
+                unit_value = unit_value_strict(magnitude, unit_str, arg)
+                if index < len(expected_units):
+                    check_unit_dimension(unit_value, expected_units[index], f"{func_name}({args_str})")
+                converted = repr(unit_value.calc_value)
         args.append(converted)
     return f"{func_name}({', '.join(args)})"
 
@@ -409,8 +478,12 @@ def tokenize_equation(equation: str) -> str:
     # Ersetze ^ durch **
     equation = equation.replace('^', '**')
 
-    # Ersetze ln durch log (numpy)
+    # Ersetze ln durch log (numpy), lg durch log10 (nur als Funktionsaufruf)
     equation = re.sub(r'\bln\b', 'log', equation)
+    equation = re.sub(r'\blg(?=\s*\()', 'log10', equation)
+
+    # Malpunkt als Multiplikation (0.475·10^-6)
+    equation = equation.replace('·', '*').replace('⋅', '*')
 
     # Ersetze log10
     equation = re.sub(r'\blog10\b', 'log10', equation)
@@ -535,7 +608,9 @@ def _eval_constant_expression(expr: str) -> Optional[float]:
     """
     try:
         value = eval(expr, {"__builtins__": {}}, _get_const_eval_context())
-        if isinstance(value, (int, float, np.floating)) and np.isfinite(value):
+        # Nur echte Zahlen - kein bool (aus Vergleichen wie "3 > 2"), keine Listen/Tupel
+        if (isinstance(value, (int, float, np.floating)) and not isinstance(value, (bool, np.bool_))
+                and np.isfinite(value)):
             return float(value)
     except Exception:
         pass
@@ -564,8 +639,8 @@ def _split_expression_with_unit(right: str) -> Optional[Tuple[float, str]]:
     unit_part = tokens[-1]
     expr_part = ' '.join(tokens[:-1]).strip()
 
-    # Einheit muss mit Buchstabe/°/µ beginnen und darf kein Operator-Rest sein
-    if not re.match(r'^[a-zA-Z°µ]', unit_part):
+    # Einheit muss mit Buchstabe/°/µ (oder 1/ für Kehrwerte) beginnen und darf kein Operator-Rest sein
+    if not re.match(r'^(?:[a-zA-Z°µ]|1/)', unit_part):
         return None
     # Ausdruck muss mindestens eine Ziffer enthalten
     if not re.search(r'\d', expr_part):
@@ -581,11 +656,246 @@ def _split_expression_with_unit(right: str) -> Optional[Tuple[float, str]]:
 
     # Ausdruck muss rein numerisch auswertbar sein
     expr_python = re.sub(r'\bln\b', 'log', expr_part.replace('^', '**'))
+    expr_python = re.sub(r'\blg(?=\s*\()', 'log10', expr_python).replace('·', '*').replace('⋅', '*')
     value = _eval_constant_expression(expr_python)
     if value is None:
         return None
 
     return value, unit_str
+
+
+class EquationSyntaxError(Exception):
+    """Gleichung ist syntaktisch nicht auswertbar (z.B. fehlendes '*')."""
+
+
+# Namen, die in Gleichungen als Funktion aufgerufen werden dürfen
+# (wie im Auswertungskontext des Solvers; Strahlungsfunktionen in beiden Schreibweisen)
+CALLABLE_NAMES = (
+    (MATH_FUNCTIONS - {'pi', 'ln'}) | {'log', 'log10'} | THERMO_FUNCTIONS
+    | {'HumidAir', 'humidair'}
+    | {'Eb', 'eb', 'Blackbody', 'blackbody', 'Blackbody_cumulative', 'blackbody_cumulative',
+       'Wien', 'wien', 'Stefan_Boltzmann', 'stefan_boltzmann'}
+)
+
+
+def _python_to_display(text: str) -> str:
+    """Python-Form einer Gleichung zurück in Eingabe-Schreibweise (für Meldungen)."""
+    text = text.replace('**', '^')
+    text = re.sub(r'\blog\(', 'ln(', text)
+    text = re.sub(r"'([A-Za-z0-9_()]+)'", r'\1', text)  # 'water' -> water
+    return unmangle(text)
+
+
+def _excerpt(equation: str, offset: int) -> str:
+    """Textausschnitt um eine Fundstelle (offset 0-basiert) in Eingabe-Schreibweise."""
+    start = max(0, offset - 18)
+    end = min(len(equation), offset + 18)
+    # Nicht mitten in einem Bezeichner schneiden (z.B. "lo…" statt "ln(")
+    while start > 0 and (equation[start - 1].isalnum() or equation[start - 1] == '_'):
+        start -= 1
+    while end < len(equation) and (equation[end].isalnum() or equation[end] == '_'):
+        end += 1
+    if equation[end:end + 1] == '(':
+        end += 1
+    before = _python_to_display(equation[start:offset])
+    after = _python_to_display(equation[offset:end])
+    prefix = '…' if start > 0 else ''
+    suffix = '…' if end < len(equation) else ''
+    return f"{prefix}{before}▶{after}{suffix}"
+
+
+# Anzahl der Positionsargumente der Funktionen (Signaturprüfung beim Einlesen)
+_ONE_ARGUMENT = {'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
+                 'exp', 'log', 'log10', 'sqrt', 'abs'}
+_RADIATION_ARGS = {'eb': 2, 'blackbody': 3, 'blackbody_cumulative': 2, 'wien': 1, 'stefan_boltzmann': 1}
+
+
+def _known_fluid(name: str) -> bool:
+    """Ist der Name ein CoolProp-Fluid oder ein Kurzname (Groß-/Kleinschreibung egal)?"""
+    try:
+        from thermodynamics import FLUID_ALIASES, get_available_fluids
+    except ImportError:
+        return True
+    if name.lower() in FLUID_ALIASES or any(c in name for c in ':&['):
+        return True  # Kurzname bzw. CoolProp-Spezialsyntax (INCOMP::, Gemische)
+    return name.lower() in {f.lower() for f in get_available_fluids()}
+
+
+def _check_call_signature(node, func_name: str, text: str, offset: int) -> None:
+    """
+    Prüft einen Funktionsaufruf gegen die Signatur der Funktion (generisch für
+    alle Funktionen): Anzahl der Argumente, Fluid- und Eigenschaftsnamen,
+    Parameternamen. Fehler werden sonst erst beim Lösen sichtbar - oder gar
+    nicht ("keine numerische Lösung").
+    """
+    shown = func_name
+    where = f"bei: {_excerpt(text, offset)}"
+    n_args, keywords = len(node.args), [k.arg for k in node.keywords]
+    lower = func_name.lower()
+
+    if func_name in _ONE_ARGUMENT:
+        if n_args != 1 or keywords:
+            raise EquationSyntaxError(f"{_python_to_display(shown + '(')[:-1]}() erwartet genau 1 Argument, {where}")
+        return
+    if func_name in ('max', 'min'):
+        if n_args < 2 or keywords:
+            raise EquationSyntaxError(f"{func_name}() erwartet mindestens 2 Argumente, {where}")
+        return
+    if lower in _RADIATION_ARGS:
+        if n_args != _RADIATION_ARGS[lower] or keywords:
+            raise EquationSyntaxError(
+                f"{func_name}() erwartet {_RADIATION_ARGS[lower]} Argument(e), gegeben {n_args}, {where}")
+        return
+
+    first = node.args[0] if node.args else None
+    first_text = first.value if isinstance(first, ast_module().Constant) and isinstance(first.value, str) else None
+
+    if lower in THERMO_FUNCTIONS:
+        from thermodynamics import INPUT_MAP as THERMO_INPUTS
+        if n_args != 1 or first_text is None:
+            raise EquationSyntaxError(f"{lower}(fluid, ...) braucht als erstes Argument den Stoff, {where}")
+        if not _known_fluid(first_text):
+            raise EquationSyntaxError(
+                f"Unbekanntes Fluid '{first_text}' (siehe Help > Fluid List), {where}")
+        bad = [k for k in keywords if k is None or k.lower() not in THERMO_INPUTS]
+        if bad:
+            raise EquationSyntaxError(
+                f"{lower}(): unbekannter Parameter '{bad[0]}' (gültig: T, p, h, s, x, rho, d, u, v), {where}")
+        if len(keywords) != 2:
+            raise EquationSyntaxError(
+                f"{lower}() braucht genau 2 Zustandsgrößen (z.B. T=..., p=...), gegeben {len(keywords)}, {where}")
+        return
+
+    if lower == 'humidair':
+        from humid_air import OUTPUT_MAP as HA_OUTPUTS, INPUT_MAP as HA_INPUTS
+        if n_args != 1 or first_text is None or first_text.lower() not in HA_OUTPUTS:
+            raise EquationSyntaxError(
+                f"HumidAir: unbekannte Eigenschaft '{first_text}' (gültig: "
+                f"{', '.join(HA_OUTPUTS)}), {where}")
+        bad = [k for k in keywords if k is None or k.lower() not in HA_INPUTS]
+        if bad:
+            raise EquationSyntaxError(
+                f"HumidAir(): unbekannter Parameter '{bad[0]}' (gültig: {', '.join(HA_INPUTS)}), {where}")
+        if len(keywords) != 3:
+            raise EquationSyntaxError(
+                f"HumidAir() braucht genau 3 Zustandsgrößen (z.B. T=..., rh=..., p_tot=...), "
+                f"gegeben {len(keywords)}, {where}")
+
+
+def ast_module():
+    import ast
+    return ast
+
+
+def _allowed_nodes():
+    import ast
+    return (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Call, ast.Name, ast.Load, ast.Constant,
+            ast.keyword, ast.Tuple,  # Tuple: eigene Meldung (Dezimalkomma)
+            ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.FloorDiv,
+            ast.USub, ast.UAdd)
+
+
+_ALLOWED_NODES = _allowed_nodes()
+_UNSUPPORTED_NODES = {
+    'List': "Wertelisten [..] nur als eigene Zeile 'x = [v1 v2 ...] Einheit' (Parameterstudie)",
+    'Subscript': "Indizes wie x[1] werden nicht unterstützt",
+    'Attribute': "Punkt-Zugriff (a.b) ist nicht erlaubt - Dezimalzahlen ohne Ziffer vor dem Punkt? (0.5 statt .5)",
+    'Compare': "Vergleiche (<, >, ==) werden nicht unterstützt (keine Fallunterscheidung)",
+    'BoolOp': "Logische Verknüpfungen (and/or) werden nicht unterstützt",
+    'IfExp': "Fallunterscheidungen (if/else) werden nicht unterstützt",
+    'Dict': "Ausdruck { } wird nicht unterstützt - Kommentare in {...} müssen geschlossen sein",
+    'Set': "Ausdruck { } wird nicht unterstützt - Kommentare in {...} müssen geschlossen sein",
+    'Lambda': "lambda als Funktion ist nicht erlaubt",
+}
+
+
+def _check_equation_syntax(left: str, right: str) -> None:
+    """
+    Prüft beide Seiten einer Gleichung (Python-Syntax) VOR dem Lösen - generisch
+    über den Syntaxbaum, ohne Annahmen über die Form einzelner Gleichungen:
+    - nicht parsebar (Syntaxfehler) -> Meldung mit Fundstelle
+    - Aufruf von etwas, das keine Funktion ist (Variable, Zahl, Klammer-
+      ausdruck vor '(') -> Meldung mit Fundstelle
+    Die Zeilennummer ergänzt parse_equations.
+    """
+    import ast
+    for side in (left, right):
+        try:
+            tree = ast.parse(side.strip(), mode='eval')
+        except SyntaxError as exc:
+            text = side.strip()
+            offset = min(len(text), max(0, (exc.offset or 1) - 1))
+            hint = (" - Dezimalkomma? Dezimalzahlen mit Punkt schreiben (0.71 statt 0,71)"
+                    if re.search(r'\d,\d', text) else "")
+            raise EquationSyntaxError(
+                f"Syntaxfehler ({exc.msg}) bei: {_excerpt(text, offset)}{hint}") from None
+
+        text = side.strip()
+        encoded = text.encode('utf-8')
+
+        def position(node, end=False):
+            offset = node.end_col_offset if end else node.col_offset
+            return len(encoded[:offset].decode('utf-8', errors='ignore'))
+
+        for node in ast.walk(tree):
+            # Positivliste der erlaubten Ausdrucksformen: alles andere ist in der
+            # Gleichungssprache nicht vorgesehen (und wird so auch nie an eval übergeben)
+            if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Constant):
+                # Eckige Klammern direkt nach einer Zahl: kein Index möglich -
+                # Einheit in EES-Schreibweise "1 [kg/s]"
+                raise EquationSyntaxError(
+                    f"Eckige Klammern nach einer Zahl - Einheiten ohne Klammern schreiben "
+                    f"(1 kg/s statt 1 [kg/s]); Wertelisten als eigene Zeile x = [1 2 3] Einheit, "
+                    f"bei: {_excerpt(text, position(node.slice) - 1)}")
+            if not isinstance(node, _ALLOWED_NODES):
+                raise EquationSyntaxError(
+                    f"{_UNSUPPORTED_NODES.get(type(node).__name__, 'Nicht unterstützter Ausdruck')}, "
+                    f"bei: {_excerpt(text, position(node))}")
+            if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float, str)):
+                raise EquationSyntaxError(f"Nicht unterstützter Wert, bei: {_excerpt(text, position(node))}")
+            # Komma außerhalb eines Funktionsaufrufs: in Gleichungen nie sinnvoll
+            # (meist Dezimalkomma: "0,71" ergibt sonst stillschweigend ein Tupel)
+            if isinstance(node, ast.Tuple):
+                raise EquationSyntaxError(
+                    f"Komma außerhalb eines Funktionsaufrufs - Dezimalkomma? Dezimalzahlen mit "
+                    f"Punkt schreiben (0.71 statt 0,71), bei: {_excerpt(text, position(node))}")
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in CALLABLE_NAMES:
+                _check_call_signature(node, func.id, text, position(node))
+                continue
+            # Fundstelle: erste '(' nach dem aufgerufenen Ausdruck (AST-Offsets sind UTF-8-Bytes)
+            func_end = len(encoded[:func.end_col_offset].decode('utf-8', errors='ignore'))
+            paren = text.find('(', func_end)
+            func_text = ast.get_source_segment(text, func) or ''
+            name = unmangle(func.id) if isinstance(func, ast.Name) else _python_to_display(func_text)
+            raise EquationSyntaxError(
+                f"'{name}' ist keine Funktion - vor '(' fehlt ein Operator oder der Funktionsname "
+                f"ist falsch, bei: {_excerpt(text, paren if paren >= 0 else func_end)}")
+
+
+def _join_bracket_lines(lines: List[str]) -> List[str]:
+    """
+    Fügt eine über mehrere Zeilen gehende Werteliste "x = [ ... ]" zu einer
+    Zeile zusammen (z.B. eine aus Excel eingefügte Spalte). Die verbrauchten
+    Zeilen werden zu Leerzeilen, damit die Zeilennummern erhalten bleiben.
+    """
+    result = list(lines)
+    i = 0
+    while i < len(result):
+        line = result[i]
+        if line.count('[') > line.count(']') and '=' in line:
+            j = i
+            joined = line
+            while joined.count('[') > joined.count(']') and j + 1 < len(result):
+                j += 1
+                joined += ' ' + result[j]
+                result[j] = ''
+            result[i] = joined
+            i = j
+        i += 1
+    return result
 
 
 def _mangle_line(line: str) -> str:
@@ -612,6 +922,19 @@ def _mangle_line(line: str) -> str:
 
 def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set[str], dict, dict, dict, dict]:
     """
+    Parst den Eingabetext (siehe _parse_equations). Einlesefehler (Syntax,
+    unbekannte/unpassende Einheit) werden mit der Zeilennummer ergänzt.
+    """
+    position = [0]
+    try:
+        return _parse_equations(text, parse_units, position)
+    except (EquationSyntaxError, UnknownUnitError) as exc:
+        raise type(exc)(f"Zeile {position[0]}: {exc}") from None
+
+
+def _parse_equations(text: str, parse_units: bool, position: List[int]
+                     ) -> Tuple[List[str], Set[str], dict, dict, dict, dict]:
+    """
     Parst den Eingabetext und extrahiert Gleichungen und Variablen.
 
     Unterstützt Einheiten-Syntax: T = 15°C, m = 10g, h = 2500kJ/kg
@@ -637,7 +960,7 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
     # Teile in Zeilen auf; Python-Schlüsselwörter als Variablennamen intern
     # umbenennen (lambda -> _kw_lambda), auch in den Originalzeilen, damit die
     # Einheiten-Analyse dieselben Namen sieht. Anzeige: display_name()/unmangle()
-    lines = [_mangle_line(line) for line in text.split('\n')]
+    lines = [_mangle_line(line) for line in _join_bracket_lines(text.split('\n'))]
     original_lines = [mangle_keywords(line) for line in original_text.split('\n')]
 
     equations = []
@@ -653,7 +976,8 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
 
     # Pass 1: Identifiziere alle Konstanten (direkte Zuweisungen)
     pre_constants = set()
-    for line in lines:
+    for line_index, line in enumerate(lines):
+        position[0] = line_index + 1
         line = line.strip()
         if not line or '=' not in line:
             continue
@@ -700,6 +1024,7 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
 
     # Pass 2: Normale Verarbeitung
     for i, line in enumerate(lines):
+        position[0] = i + 1
         line = line.strip()
 
         # Hole Original-Zeile (mit Kommentaren, falls vorhanden)
@@ -716,7 +1041,10 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
         # Prüfe auf Vektor-Zuweisung (z.B. T = 0:10:100 oder T = 0:10:100 °C)
         is_vec, var_name, vec_str, vec_unit = is_vector_assignment(line, parse_units=parse_units)
         if is_vec:
-            vec_array = parse_vector(vec_str)
+            try:
+                vec_array = parse_vector(vec_str)
+            except VectorSyntaxError as exc:
+                raise EquationSyntaxError(str(exc)) from None
             # Prüfe ob Vektor erfolgreich geparst wurde
             if vec_array is None:
                 continue
@@ -724,16 +1052,28 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
             if vec_unit and UNITS_AVAILABLE:
                 try:
                     from units import UnitValue
+                    # Temperaturdifferenz (dT..., delta...): Faktor, KEIN Offset -
+                    # wie bei Einzelwerten (dT = 0:5:20 °C -> 0..20 K, nicht 273..293 K)
+                    lower_name = var_name.lower()
+                    diff_factor = {'K': 1.0, 'kelvin': 1.0, '°C': 1.0, 'C': 1.0, 'degC': 1.0,
+                                   'celsius': 1.0, '°F': 5.0 / 9.0, 'degF': 5.0 / 9.0,
+                                   'fahrenheit': 5.0 / 9.0}.get(vec_unit.strip())
+                    if (lower_name.startswith('dt') or lower_name.startswith('delta')) and diff_factor:
+                        sweep_vars[var_name] = vec_array * diff_factor
+                        unit_values[var_name] = UnitValue.from_input(float(vec_array[0]) * diff_factor, 'delta_K')
+                        continue
                     # Konvertiere IMMER elementweise: nur so werden Offset-Einheiten
                     # (°C -> K: +273.15) korrekt behandelt. Ein multiplikativer
                     # Faktor wäre bei 20:10:50 °C für alle Werte außer dem ersten falsch.
                     calc_values = np.array([
-                        UnitValue.from_input(float(v), vec_unit).calc_value
+                        unit_value_strict(float(v), vec_unit, line).calc_value
                         for v in vec_array
                     ])
                     sweep_vars[var_name] = calc_values
                     # Speichere UnitValue für Anzeige (erster Wert)
                     unit_values[var_name] = UnitValue.from_input(float(vec_array[0]), vec_unit)
+                except UnknownUnitError:
+                    raise
                 except Exception:
                     # Bei Fehler: verwende Original-Werte ohne Konvertierung
                     sweep_vars[var_name] = vec_array
@@ -793,7 +1133,9 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
                             # Erstelle UnitValue mit delta_K als Differenz-Einheit
                             unit_values[var_name] = UnitValue.from_input(magnitude * diff_factor, 'delta_K')
                     else:
-                        unit_value = UnitValue.from_input(magnitude, unit_str)
+                        # Unbekannte Einheit -> UnknownUnitError (kein ValueError,
+                        # wird also unten NICHT verschluckt)
+                        unit_value = unit_value_strict(magnitude, unit_str, line)
                         # Verwende calc_value für Berechnungen (konvertiert zu Standard-Einheit)
                         # z.B. 10 kg/h → 0.00278 kg/s, aber 20°C bleibt 20°C
                         initial_values[var_name] = unit_value.calc_value
@@ -841,6 +1183,7 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
 
         # Erstelle Gleichung in der Form: left - right = 0
         equation = f"({left}) - ({right})"
+        _check_equation_syntax(left, right)
         equations.append(equation)
 
         # Speichere Original-Zeile für Anzeige

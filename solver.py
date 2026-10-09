@@ -11,6 +11,26 @@ from typing import List, Set, Dict, Tuple, Optional, Any, Union
 from dataclasses import dataclass, field
 from numpy import exp, log, log10, sqrt, pi
 from numpy import sinh, cosh, tanh
+import time as _time
+
+# Gesamtzeitlimit eines Lösungslaufs (solve_system): verschachtelte Versuche
+# (Zerlegung, Tearing, simultan, Startvarianten) dürfen sich nicht zu Minuten
+# aufsummieren - die GUI wäre so lange eingefroren.
+SOLVE_TIME_LIMIT = 60.0
+_deadline: Optional[float] = None
+
+
+class SolveTimeout(BaseException):
+    """
+    Zeitlimit überschritten. Bewusst BaseException: die Teil-Löser fangen
+    numerische Fehler mit 'except Exception' ab und dürfen das Zeitlimit
+    nicht verschlucken.
+    """
+
+
+def _check_deadline() -> None:
+    if _deadline is not None and _time.monotonic() > _deadline:
+        raise SolveTimeout()
 
 # Versuche Einheiten-Modul zu laden für unit-basierte Startwerte
 try:
@@ -83,6 +103,8 @@ class SolveAnalysis:
     blocks: List[BlockInfo] = field(default_factory=list)
     solve_order: List[str] = field(default_factory=list)  # Reihenfolge der Lösungsschritte
     unit_warnings: List[UnitWarning] = field(default_factory=list)  # Einheiten-Inkonsistenzen
+    hints: List[str] = field(default_factory=list)  # Generische Hinweise (z.B. mögliche Tippfehler)
+    evaluation_errors: List[str] = field(default_factory=list)  # Funktions-/Auswertungsfehler
 
     def add_constant(self, original: str, parsed: str, var: str, value: float):
         """Fügt eine Konstante hinzu."""
@@ -268,6 +290,49 @@ def solve_system(
     return_analysis: bool = False
 ) -> Union[Tuple[bool, Dict[str, float], str], Tuple[bool, Dict[str, float], str, SolveAnalysis]]:
     """
+    Löst das Gleichungssystem (Strategie siehe _solve_system_impl) innerhalb
+    des Gesamtzeitlimits SOLVE_TIME_LIMIT. Bei Überschreitung: Teillösung und
+    Meldung mit den noch offenen Unbekannten (kein Einfrieren der GUI).
+
+    Returns:
+        success, solution, message[, analysis] wie _solve_system_impl
+    """
+    global _deadline
+    own_deadline = _deadline is None
+    if own_deadline:
+        _deadline = _time.monotonic() + SOLVE_TIME_LIMIT
+    state = {}
+    try:
+        return _solve_system_impl(equations, variables, initial_values, initial_guess, constants,
+                                  original_equations, return_analysis, _state=state)
+    except SolveTimeout:
+        if not own_deadline or not state:
+            raise
+        remaining = sorted(state['vars'])
+        names = ', '.join(v.replace('_kw_', '') for v in remaining[:8]) + (', ...' if len(remaining) > 8 else '')
+        msg = (f"Zeitlimit von {SOLVE_TIME_LIMIT:.0f} s überschritten: {len(state['eqs'])} Gleichungen "
+               f"mit {len(remaining)} Unbekannten ungelöst ({names}). Startwerte vorgeben "
+               f"(Solve > Initial Values) oder das System vereinfachen")
+        result = dict(state['known'])
+        if return_analysis:
+            return False, result, msg, state['analysis']
+        return False, result, msg
+    finally:
+        if own_deadline:
+            _deadline = None
+
+
+def _solve_system_impl(
+    equations: List[str],
+    variables: Set[str],
+    initial_values: Optional[Dict[str, float]] = None,
+    initial_guess: float = 1.0,
+    constants: Optional[Dict[str, float]] = None,
+    original_equations: Optional[Dict[str, str]] = None,
+    return_analysis: bool = False,
+    _state: Optional[dict] = None
+) -> Union[Tuple[bool, Dict[str, float], str], Tuple[bool, Dict[str, float], str, SolveAnalysis]]:
+    """
     Löst das Gleichungssystem mit blockweiser Dekomposition.
 
     Strategie:
@@ -314,6 +379,10 @@ def solve_system(
     known_values = constants.copy()
     remaining_equations = list(equations)
     remaining_vars = set(variables)
+    if _state is not None:
+        # dieselben Objekte (werden nur in place verändert): Teilstand bei Zeitlimit
+        _state.update(known=known_values, eqs=remaining_equations, vars=remaining_vars,
+                      analysis=analysis)
 
     # Konstanten zur Analysis hinzufügen
     for var, value in constants.items():
@@ -330,6 +399,7 @@ def solve_system(
     max_iterations = len(equations) * 3 + 1
     iteration = 0
     violated_constraints = []  # Widersprüchliche Constraint-Gleichungen
+    evaluation_errors = {}     # Gleichung -> Fehlermeldung der direkten Auswertung
     # Gescheiterte Blöcke merken: Blöcke sind Zusammenhangskomponenten der
     # Unbekannten, neue Werte aus anderen Blöcken ändern sie nicht - ein
     # erneuter (teurer) Versuch nach jedem anderen gelösten Block wäre sinnlos.
@@ -351,13 +421,14 @@ def solve_system(
                     try:
                         local_context = context.copy()
                         local_context.update(known_values)
-                        result = eval(expr, {"__builtins__": {}}, local_context)
+                        result = _as_real(eval(expr, {"__builtins__": {}}, local_context))
 
                         if np.isfinite(result):
                             known_values[var] = float(result)
                             remaining_vars.discard(var)
                             remaining_equations.remove(eq)
                             stats['direct'] += 1
+                            evaluation_errors.pop(eq, None)
 
                             # Berechne Residuum und füge zur Analysis hinzu
                             residual = _calculate_residual(eq, known_values, context)
@@ -366,8 +437,14 @@ def solve_system(
 
                             made_progress = True
                             break
-                    except Exception:
-                        pass
+                        # Alle Größen bekannt, Ergebnis aber nicht definiert (0/0, ln(-1), ...)
+                        evaluation_errors[eq] = (f"{var} ist nicht definiert "
+                                                 f"(Ergebnis {result}, z.B. Division durch 0)")
+                    except NameError:
+                        pass  # Noch unbekannte Größe im Ausdruck - später erneut
+                    except Exception as exc:
+                        # Fehler einer Funktion (z.B. CoolProp/HumidAir) - Meldung merken
+                        evaluation_errors[eq] = f"{var}: {exc}"
 
         # 2b: Gleichungen mit einer Unbekannten iterativ lösen
         if not made_progress:
@@ -380,14 +457,19 @@ def solve_system(
                 if len(unknowns) == 0:
                     # Überprüfe ob die Gleichung erfüllt ist (Residuum nahe 0)
                     residual = _calculate_residual(eq, known_values, context)
-                    rel_residual = _relative_residual(eq, known_values, context)
+                    involved = _get_equation_unknowns(eq, set(), set(known_values))
+                    value_scale = max((abs(float(known_values[v])) for v in involved
+                                       if np.isfinite(known_values[v])), default=0.0)
+                    rel_residual = _relative_residual(eq, known_values, context,
+                                                      scale_floor=1e-9 * value_scale)
                     remaining_equations.remove(eq)
                     orig = original_equations.get(eq, eq)
                     analysis.add_direct(orig, eq, "(constraint)", 0.0, residual)
                     # Verletzte Constraints (z.B. "x+1=3" UND "x+1=4") dürfen NICHT
                     # stillschweigend entfernt werden - das System ist widersprüchlich
                     if not np.isfinite(rel_residual) or rel_residual > 1e-4:
-                        violated_constraints.append((orig, residual))
+                        violated_constraints.append(
+                            _describe_violation(eq, orig, known_values, constants, context))
                     made_progress = True
                     break
 
@@ -426,6 +508,26 @@ def solve_system(
                     )
                     if not success:
                         failed_blocks.add(block_key)
+                        if block_solution:
+                            # Unabhängig gelöste Kerne übernehmen; der Rest bildet einen
+                            # neuen, kleineren Block (Meldung nennt dann nur ihn)
+                            known_values.update(block_solution)
+                            remaining_vars -= set(block_solution)
+                            for eq in block_eqs:
+                                if (eq in remaining_equations
+                                        and not _get_equation_unknowns(eq, set(known_values), remaining_vars)
+                                        and _relative_residual(eq, known_values, context) < 1e-6):
+                                    remaining_equations.remove(eq)
+                            if block_analysis is not None:
+                                for eq_info in block_analysis.direct_evals:
+                                    analysis.direct_evals.append(eq_info)
+                                for eq_info in block_analysis.single_unknowns:
+                                    analysis.single_unknowns.append(eq_info)
+                                for sub_block in block_analysis.sub_blocks:
+                                    sub_block.block_number = len(analysis.blocks) + 1
+                                    analysis.blocks.append(sub_block)
+                            made_progress = True
+                            break
 
                     if success:
                         # Aktualisiere bekannte Werte
@@ -483,10 +585,10 @@ def solve_system(
     if not remaining_equations:
         # Widersprüchliche Constraints -> KEIN Erfolg melden
         if violated_constraints:
-            details = '; '.join(
-                f"'{orig}' (Residuum: {res:.4g})" for orig, res in violated_constraints[:3]
-            )
-            msg = f"Widersprüchliches System: {len(violated_constraints)} Gleichung(en) verletzt: {details}"
+            details = '; '.join(violated_constraints[:3])
+            msg = (f"Widersprüchliches System (überbestimmt): {details}. "
+                   f"Eine der vorgegebenen Größen muss stattdessen berechnet werden "
+                   f"(Werte in SI-Einheiten).")
             if return_analysis:
                 return False, result, msg, analysis
             return False, result, msg
@@ -510,9 +612,46 @@ def solve_system(
     else:
         # Nicht alle Gleichungen gelöst
         msg = f"Unvollständig: {len(remaining_equations)} Gleichungen, {len(remaining_vars)} Unbekannte verbleibend"
+        # Fehler bei der Auswertung noch offener Gleichungen (z.B. 0/0, CoolProp-Fehler)
+        open_errors = [f"'{original_equations.get(eq, eq)}': {text}"
+                       for eq, text in evaluation_errors.items() if eq in remaining_equations]
+        analysis.evaluation_errors = open_errors
+        if open_errors:
+            msg += ". Auswertungsfehler: " + "; ".join(open_errors[:3])
         if return_analysis:
             return False, result, msg, analysis
         return False, result, msg
+
+
+def _describe_violation(equation: str, original: str, values: Dict[str, float],
+                        constants: Dict[str, float], context: dict) -> str:
+    """
+    Beschreibt eine verletzte Gleichung für die Fehlermeldung: beide Seiten mit
+    Zahlenwert statt nur des Residuums, z.B.
+    "q_dot ist vorgegeben (50), aus 'q_dot=U*A*dT' folgt 29.06".
+    """
+    import ast
+    local_ctx = context.copy()
+    local_ctx.update(values)
+
+    def side_value(node):
+        expr = ast.fix_missing_locations(ast.Expression(body=node))
+        return float(_as_real(eval(compile(expr, '<side>', 'eval'), {"__builtins__": {}}, local_ctx)))
+
+    try:
+        tree = ast.parse(equation, mode='eval').body
+        if not (isinstance(tree, ast.BinOp) and isinstance(tree.op, ast.Sub)):
+            raise ValueError
+        left_val, right_val = side_value(tree.left), side_value(tree.right)
+    except Exception:
+        residual = _calculate_residual(equation, values, context)
+        return f"'{original}' verletzt (Residuum: {residual:.4g})"
+
+    parts = _direct_assignment(equation)
+    if parts and parts[0] in constants:
+        return (f"{parts[0]} ist vorgegeben ({left_val:.6g}), "
+                f"aus '{original}' folgt {right_val:.6g}")
+    return f"'{original}' verletzt: links = {left_val:.6g}, rechts = {right_val:.6g}"
 
 
 def _calculate_residual(equation: str, known_values: Dict[str, float], context: dict) -> float:
@@ -528,11 +667,16 @@ def _calculate_residual(equation: str, known_values: Dict[str, float], context: 
 
 def _additive_term_scale(expression: str, local_ctx: dict) -> Optional[float]:
     """
-    Größenordnung einer Gleichung: das betragsgrößte additive Term-Ergebnis.
+    Größenordnung einer Gleichung: das betragsgrößte additive Term-Ergebnis -
+    auch innerhalb von Produkten und Quotienten.
 
     Für "(m1*h1 + m2*h2 - m3*h3) - (0)" ist die Skala max(|m1*h1|, |m2*h2|, |m3*h3|).
+    Für "(Q_3) - (2*(0.4*(J_3 - J_1) + 0.4*(J_3 - J_2)))" zählen die inneren Terme
+    (~0.8*|J|), nicht der am Lösungspunkt verschwindende Wert des Produkts.
     Damit lässt sich ein Residuum RELATIV zur Gleichungsgröße bewerten -
     unabhängig davon, ob mit J/kg (~1e6) oder Wirkungsgraden (~1) gerechnet wird.
+    Gehen dagegen ALLE Terme gegen null (Asymptote, z.B. Eb(T, lambda) bei
+    lambda -> unendlich), bleibt auch die Skala winzig: keine Scheinlösung.
     """
     import ast
     try:
@@ -540,33 +684,70 @@ def _additive_term_scale(expression: str, local_ctx: dict) -> Optional[float]:
     except SyntaxError:
         return None
 
-    terms = []
+    def value(node):
+        expr = ast.fix_missing_locations(ast.Expression(body=node))
+        result = eval(compile(expr, '<term_scale>', 'eval'), {"__builtins__": {}}, local_ctx)
+        result = _as_real(result)
+        if not isinstance(result, (int, float, np.floating, np.integer)) or not np.isfinite(result):
+            raise ValueError
+        return abs(float(result))
 
-    def collect(node):
+    def scale(node):
         if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
-            collect(node.left)
-            collect(node.right)
-        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-            collect(node.operand)
-        else:
-            terms.append(node)
+            return max(scale(node.left), scale(node.right))
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            return scale(node.operand)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            return max(value(node.left) * scale(node.right), scale(node.left) * value(node.right))
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            divisor = value(node.right)
+            return scale(node.left) / divisor if divisor > 0 else value(node)
+        return value(node)
 
-    collect(tree.body)
+    try:
+        best = scale(tree.body)
+    except Exception:
+        # Teilausdruck nicht auswertbar: nur die äußeren Terme bewerten
+        best = 0.0
+        terms = []
 
-    best = 0.0
-    for term in terms:
-        try:
-            expr = ast.fix_missing_locations(ast.Expression(body=term))
-            value = eval(compile(expr, '<term_scale>', 'eval'), {"__builtins__": {}}, local_ctx)
-            if isinstance(value, (int, float, np.floating)) and np.isfinite(value):
-                best = max(best, abs(float(value)))
-        except Exception:
-            pass
+        def collect(node):
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
+                collect(node.left)
+                collect(node.right)
+            elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+                collect(node.operand)
+            else:
+                terms.append(node)
 
-    return best if best > 0 else None
+        collect(tree.body)
+        for term in terms:
+            try:
+                best = max(best, value(term))
+            except Exception:
+                pass
+
+    return best if np.isfinite(best) and best > 0 else None
 
 
-def _relative_residual(equation: str, values: Dict[str, float], context: dict) -> float:
+def _residual_and_scale(equation: str, values: Dict[str, float], context: dict) -> Tuple[float, float]:
+    """(|Residuum|, Größenordnung der Terme) einer Gleichung; (inf, 0) wenn nicht auswertbar."""
+    local_ctx = context.copy()
+    local_ctx.update(values)
+    try:
+        res = _as_real(eval(equation, {"__builtins__": {}}, local_ctx))
+    except Exception:
+        return float('inf'), 0.0
+    if not np.isfinite(res):
+        return float('inf'), 0.0
+    scale = _additive_term_scale(equation, local_ctx)
+    if scale is None or not np.isfinite(scale):
+        scale = 0.0
+    return abs(float(res)), scale
+
+
+def _relative_residual(equation: str, values: Dict[str, float], context: dict,
+                       scale_floor: float = 0.0) -> float:
     """
     Residuum einer Gleichung relativ zur Größenordnung ihrer Terme.
 
@@ -588,8 +769,11 @@ def _relative_residual(equation: str, values: Dict[str, float], context: dict) -
         scale = 1.0
     # Kein großzügiger Floor: Wenn ALLE Terme winzig sind (z.B. 1/(x-2) bei
     # x=1e83), muss das Residuum RELATIV zu diesen winzigen Termen klein sein -
-    # sonst wird Divergenz zur Asymptote als Lösung akzeptiert
-    return abs(float(res)) / max(scale, 1e-300)
+    # sonst wird Divergenz zur Asymptote als Lösung akzeptiert.
+    # scale_floor: Untergrenze aus dem Umfeld (andere Gleichungen des Blocks,
+    # bekannte Werte) - sonst gilt z.B. "q_x = eps*y" mit eps = 0 und
+    # q_x = 1e-17 (numerisch null) als um 100 % verletzt.
+    return abs(float(res)) / max(scale, scale_floor, 1e-300)
 
 
 def format_solution(solution: Dict[str, Any], precision: int = 6) -> str:
@@ -1040,6 +1224,188 @@ def _solve_block_by_tearing(
     return False, {}, "Tearing nicht möglich"
 
 
+def _find_tear_set(
+    equations: List[str],
+    variables: Set[str],
+    known_vars: Set[str]
+) -> Optional[Tuple[List[str], List[Tuple[str, str]], List[str]]]:
+    """
+    Sucht eine kleine Menge von Tearing-Variablen (k >= 1): werden sie geschätzt,
+    lassen sich alle übrigen Blockvariablen der Reihe nach direkt berechnen;
+    genau k Gleichungen bleiben als Residuen. Der Block reduziert sich so auf
+    ein k-dimensionales System (z.B. 12 -> 4 bei Radiositätsnetz + Stoffwerten
+    bei Filmtemperatur), und alle Zwischengrößen sind stets konsistent.
+
+    Greedy (generisch): zuerst Variablen ohne eigene Bestimmungsgleichung
+    ("var = ausdruck" ohne var rechts), bevorzugt häufig vorkommende.
+
+    Returns:
+        (tear_vars, [(var, ausdruck), ...], residuum_gleichungen) oder None
+    """
+    variables = set(variables)
+    direct = {}
+    for eq in equations:
+        parts = _direct_assignment(eq)
+        if parts and parts[0] in variables:
+            deps = _get_equation_unknowns(parts[1], known_vars, variables)
+            if parts[0] not in deps:
+                direct[eq] = (parts[0], parts[1], deps)
+    has_direct = {var for var, _, _ in direct.values()}
+    counts = {v: sum(1 for eq in equations if v in _get_equation_unknowns(eq, known_vars, {v}))
+              for v in variables}
+
+    tears, determined, sequence, used = [], set(), [], set()
+
+    def propagate():
+        progress = True
+        while progress:
+            progress = False
+            for eq in equations:
+                if eq in used or eq not in direct:
+                    continue
+                var, expr, deps = direct[eq]
+                if var not in determined and deps <= determined:
+                    sequence.append((var, expr))
+                    determined.add(var)
+                    used.add(eq)
+                    progress = True
+
+    propagate()
+    while determined != variables:
+        open_vars = variables - determined
+        tear = min(open_vars, key=lambda v: (v in has_direct, -counts[v], v))
+        tears.append(tear)
+        determined.add(tear)
+        propagate()
+    residual_eqs = [eq for eq in equations if eq not in used]
+    if len(residual_eqs) != len(tears):
+        return None
+    return tears, sequence, residual_eqs
+
+
+def _solve_block_by_multi_tearing(
+    equations: List[str],
+    variables: Set[str],
+    known_values: Dict[str, float],
+    context: dict,
+    manual_initial: Optional[Dict[str, float]] = None,
+    inferred_units: Optional[Dict[str, str]] = None
+) -> Tuple[bool, Dict[str, float], str]:
+    """Löst einen Block über mehrere Tearing-Variablen (siehe _find_tear_set)."""
+    import time
+    import warnings
+    from scipy.optimize import least_squares
+
+    found = _find_tear_set(equations, variables, set(known_values.keys()))
+    if found is None:
+        return False, {}, "Tearing nicht möglich"
+    tears, sequence, residual_eqs = found
+    if len(tears) >= len(variables):
+        return False, {}, "Tearing bringt keine Reduktion"
+
+    deadline = time.monotonic() + 20.0
+
+    def chain(x):
+        values = dict(known_values)
+        values.update(zip(tears, x))
+        local_ctx = context.copy()
+        local_ctx.update(values)
+        for var, expr in sequence:
+            value = _as_real(eval(expr, {"__builtins__": {}}, local_ctx))
+            values[var] = value
+            local_ctx[var] = value
+        return values
+
+    def raw_residuals(x):
+        _check_deadline()
+        values = chain(x)
+        local_ctx = context.copy()
+        local_ctx.update(values)
+        out = []
+        for eq in residual_eqs:
+            try:
+                value = _as_real(eval(eq, {"__builtins__": {}}, local_ctx))
+            except Exception:
+                value = np.nan
+            out.append(value if np.isfinite(value) else 1e10)
+        return np.array(out, dtype=float)
+
+    def make_residuals(weights):
+        def residuals(x_norm):
+            try:
+                return raw_residuals(x_norm * scales) / weights
+            except Exception:
+                return np.full(len(residual_eqs), 1e10)
+        return residuals
+
+    def start_weights(x):
+        """
+        Feste Gewichte je Gleichung = Termgröße am Startpunkt (Gleichungen in
+        W/m² und in K vergleichbar gewichtet). Fest, nicht mitlaufend: eine
+        mitlaufende Normierung macht das Problem nicht-glatt, wenn Terme gegen
+        null gehen (z.B. adiabate Wand: alle J gleich -> Termgröße 0).
+        """
+        try:
+            values = chain(x)
+        except Exception:
+            return None
+        found_scales = [_residual_and_scale(eq, values, context)[1] for eq in residual_eqs]
+        top = max((sc for sc in found_scales if np.isfinite(sc)), default=0.0)
+        if not top > 0:
+            return None
+        return np.array([sc if np.isfinite(sc) and sc > 1e-6 * top else 1e-6 * top
+                         for sc in found_scales], dtype=float)
+
+    x0 = np.array([_get_initial_value(v, manual_initial, known_values, inferred_units) for v in tears],
+                  dtype=float)
+    scales = np.maximum(np.abs(x0), 1e-10)
+    starts = [x0 / scales]
+    # Gleichartige Größen mit identischem Startwert (z.B. drei Scheibentemperaturen):
+    # zusätzlich gestaffelt starten (in Namensreihenfolge ab- und aufsteigend), sonst
+    # sind Differenzen wie T_1 - T_2 am Start exakt null (Ra = 0, (9000/Ra) -> inf)
+    for direction in (-1.0, 1.0):
+        staggered = x0.copy()
+        for value in set(x0.tolist()):
+            same = sorted((i for i in range(len(tears)) if x0[i] == value), key=lambda i: tears[i])
+            if len(same) > 1:
+                for rank, i in enumerate(same):
+                    staggered[i] = value * (1.0 + direction * 0.003 * rank)
+        if not np.array_equal(staggered, x0):
+            starts.append(staggered / scales)
+    starts += [np.ones(len(tears)) / scales, 0.5 * np.ones(len(tears)) / scales,
+               1.5 * x0 / scales, 0.5 * x0 / scales, 2.0 * x0 / scales]
+    attempts = []
+    for start in starts:
+        attempts.append((start, None))      # absolute Residuen
+        attempts.append((start, 'start'))   # fest gewichtet mit Termgrößen am Start
+    for start, weighting in attempts:
+        if time.monotonic() > deadline:
+            break
+        weights = np.ones(len(residual_eqs))
+        if weighting == 'start':
+            weights = start_weights(start * scales)
+            if weights is None:
+                continue
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                result = least_squares(make_residuals(weights), start, method='lm', xtol=1e-14, ftol=1e-14,
+                                       max_nfev=300 * len(tears))
+            values = chain(result.x * scales)
+            solution = {var: float(values[var]) for var in variables}
+        except Exception:
+            continue
+        if not all(np.isfinite(v) for v in solution.values()):
+            continue
+        check_values = dict(known_values)
+        check_values.update(solution)
+        pairs = [_residual_and_scale(eq, check_values, context) for eq in equations]
+        worst = max(res / max(sc, 1e-300) for res, sc in pairs)
+        if worst < 1e-8:
+            return True, solution, f"Block per Tearing gelöst ({len(tears)} von {len(variables)} Variablen)"
+    return False, {}, "Tearing-Iteration nicht konvergiert"
+
+
 def _solve_core(
     equations: List[str],
     variables: Set[str],
@@ -1058,6 +1424,11 @@ def _solve_core(
         attempted.add(frozenset(equations))
     if len(variables) >= 2:
         success, solution, msg = _solve_block_by_tearing(
+            equations, variables, known_values, context, manual_initial, inferred_units
+        )
+        if success:
+            return success, solution, msg
+        success, solution, msg = _solve_block_by_multi_tearing(
             equations, variables, known_values, context, manual_initial, inferred_units
         )
         if success:
@@ -1109,13 +1480,19 @@ def _solve_equation_block(
         )
         if success:
             return success, solution, msg, block_analysis
+        # Teilergebnis (unabhängig lösbare Kerne) behalten - nicht verwerfen
+        partial, partial_analysis = solution, block_analysis
         if frozenset(equations) in attempted:
-            return False, {}, msg, None  # Gesamtblock wurde bereits als Kern versucht
+            return False, partial, msg, partial_analysis  # Gesamtblock bereits als Kern versucht
+    else:
+        partial, partial_analysis = {}, None
 
     # Fallback: Löse den gesamten Block (Tearing, sonst simultan)
     success, solution, msg = _solve_core(
         equations, variables, known_values, context, manual_initial, inferred_units
     )
+    if not success:
+        return False, partial, msg, partial_analysis
     return success, solution, msg, None  # Keine BlockAnalysis für simultane Lösung
 
 
@@ -1339,6 +1716,7 @@ def _solve_block_simultaneously(
 
     # Residuen-Funktion (nicht normalisiert, für Auswertung)
     def block_func(x):
+        _check_deadline()
         local_ctx = context.copy()
         local_ctx.update(known_values)
         local_ctx.update({var: val for var, val in zip(var_list, x)})
@@ -1369,6 +1747,11 @@ def _solve_block_simultaneously(
 
     start_variations = [
         x0_norm,
+        # Neutrale Startpunkte unabhängig von der Heuristik (der Fallback
+        # "geometrisches Mittel bekannter Werte" kann weit danebenliegen, z.B.
+        # m = 24000 als Exponent in N = C*Re^m -> Überlauf, keine Suchrichtung)
+        np.ones(n_vars) / scales,
+        0.5 * np.ones(n_vars) / scales,
         x0_norm * 1.5,
         x0_norm * 0.5,
         x0_norm * 2.0,
@@ -1392,12 +1775,13 @@ def _solve_block_simultaneously(
         """
         values = dict(known_values)
         values.update(zip(var_list, x))
-        worst = 0.0
-        for eq in equations:
-            worst = max(worst, _relative_residual(eq, values, context))
-            if not np.isfinite(worst):
-                return float('inf')
-        return worst
+        pairs = [_residual_and_scale(eq, values, context) for eq in equations]
+        if any(not np.isfinite(res) for res, _ in pairs):
+            return float('inf')
+        # Termgröße auch innerhalb von Produkten (_additive_term_scale): echte
+        # Null-Gleichungen (Q = 0 = 2*(J_3 - J_1 + ...)) haben große innere Terme,
+        # eine Asymptote (alle Terme -> 0) bleibt dagegen erkennbar
+        return max(res / max(scale, 1e-300) for res, scale in pairs)
 
     import warnings
     for x_start in start_variations[:15]:  # Maximal 15 Versuche
@@ -1592,6 +1976,7 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
         return values
 
     def func(x):
+        _check_deadline()
         try:
             local_ctx = context.copy()
             local_ctx.update(values_at(x))
@@ -1712,8 +2097,9 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
     # Erzeuge Testpunkte mit dichter Abdeckung
     test_points = set()
 
-    # Logarithmische Skalierung für extreme Bereiche (erweitert bis 1e9)
-    for exp in range(-2, 10):
+    # Logarithmische Skalierung für extreme Bereiche (1e-12 bis 1e9): intern ist
+    # alles SI - Wellenlängen (~1e-6 m), Viskositäten (~1e-5 m²/s) sind üblich
+    for exp in range(-12, 10):
         base = 10**exp
         test_points.update([base, -base, 0.5*base, 2*base, 5*base, -0.5*base, -2*base, -5*base])
 
@@ -2059,7 +2445,8 @@ def solve_parametric(
     sweep_vars: Dict[str, np.ndarray],
     initial_values: Optional[Dict[str, float]] = None,
     progress_callback=None,
-    constants: Optional[Dict[str, float]] = None
+    constants: Optional[Dict[str, float]] = None,
+    original_equations: Optional[Dict[str, str]] = None
 ) -> Tuple[bool, Dict[str, Union[float, np.ndarray]], str]:
     """
     Löst das Gleichungssystem für jeden Wert der Sweep-Variablen.
@@ -2089,31 +2476,46 @@ def solve_parametric(
     # Versuche zuerst vektorisierte direkte Auswertung (mit Konstanten,
     # NICHT mit Startwerten - siehe _try_vectorized_evaluation)
     success, results, msg = _try_vectorized_evaluation(equations, variables, sweep_vars, constants)
+    # Nicht definierte Werte (0/0, ln(-1), ...) entstehen vektorisiert still als NaN -
+    # dann punktweise lösen, damit die betroffenen Punkte mit Grund gemeldet werden
+    if success and any(isinstance(results.get(var), np.ndarray) and not np.all(np.isfinite(results[var]))
+                       for var in variables):
+        success = False
     if success:
+        _collapse_sweep_independent(results, equations, variables, sweep_vars)
+        results.update(constants)  # Konstanten als Einzelwerte, nicht als Arrays
         return True, results, msg
 
     # Bestimme die Länge des Sweeps (alle Sweep-Variablen müssen gleich lang sein)
-    sweep_lengths = [len(arr) for arr in sweep_vars.values()]
-    if len(set(sweep_lengths)) > 1:
-        return False, {}, f"Alle Sweep-Variablen müssen gleich lang sein. Gefunden: {sweep_lengths}"
+    sweep_lengths = {name: len(arr) for name, arr in sweep_vars.items()}
+    if len(set(sweep_lengths.values())) > 1:
+        detail = ", ".join(f"{name} ({count} Werte)" for name, count in sweep_lengths.items())
+        return False, {}, (f"Alle Parameterstudien-Variablen müssen gleich viele Werte haben: {detail}. "
+                           f"Die Werte werden punktweise kombiniert - Schrittweiten anpassen.")
 
-    n_points = sweep_lengths[0]
+    n_points = next(iter(sweep_lengths.values()))
 
     # Sortiere die zu lösenden Variablen
     var_list = sorted(list(variables))
 
     # Initialisiere Ergebnis-Arrays
-    results = {var: np.zeros(n_points) for var in var_list}
+    results = {var: np.full(n_points, np.nan) for var in var_list}
     # Füge auch die Sweep-Variablen zum Ergebnis hinzu
     for name, arr in sweep_vars.items():
         results[name] = arr.copy()
 
     failed_points = []
+    first_failure = None  # (Punktnummer, Meldung) des ersten gescheiterten Punkts
 
     # Warm-Start: Die Lösung des Vorpunkts dient als Startwert für den
     # nächsten Punkt. Ohne das kann der Lösungszweig zwischen Sweep-Punkten
     # springen (z.B. x^2-2x=a: Punkt 1 negative Wurzel, Rest positive).
     point_initial = dict(initial_values)
+    # Notbremse: nach einem gescheiterten Punkt gibt es keinen Warm-Start; scheitern
+    # zwei Punkte hintereinander am Zeitlimit, scheitern meist alle weiteren auch
+    # (n Punkte x 60 s). Dann abbrechen statt die GUI stundenlang zu blockieren.
+    consecutive_timeouts = 0
+    aborted_after = None
 
     # Löse für jeden Sweep-Punkt mit der robusten solve_system Methode
     for i in range(n_points):
@@ -2127,45 +2529,96 @@ def solve_parametric(
         try:
             # Verwende solve_system für jeden Punkt (nutzt Block-Dekomposition und Bracket-Suche)
             success, solution, msg = solve_system(
-                equations, variables, point_initial, constants=combined_constants
+                equations, variables, point_initial, constants=combined_constants,
+                original_equations=original_equations
             )
+        except Exception as exc:
+            success, solution, msg = False, {}, str(exc)
 
-            if success:
-                # Erfolg - speichere Lösung
-                for var in var_list:
-                    if var in solution:
-                        results[var][i] = solution[var]
-                    else:
-                        results[var][i] = np.nan
-                # Warm-Start für den nächsten Punkt
-                warm = {var: float(solution[var]) for var in var_list
-                        if var in solution and np.isfinite(solution[var])}
-                point_initial = {**initial_values, **warm}
-            else:
-                failed_points.append(i)
-                for var in var_list:
-                    results[var][i] = np.nan
-        except Exception as e:
+        # Auch bei einem gescheiterten Punkt alle Größen übernehmen, die gelöst
+        # wurden - sonst stünde dort z.B. C = m*c als NaN, obwohl wohldefiniert
+        for var in var_list:
+            value = solution.get(var)
+            if value is not None and np.isfinite(value):
+                results[var][i] = value
+
+        if success:
+            # Warm-Start für den nächsten Punkt
+            warm = {var: float(solution[var]) for var in var_list
+                    if var in solution and np.isfinite(solution[var])}
+            point_initial = {**initial_values, **warm}
+        else:
             failed_points.append(i)
-            for var in var_list:
-                results[var][i] = np.nan
+            if first_failure is None:
+                first_failure = (i + 1, msg)
+
+        consecutive_timeouts = consecutive_timeouts + 1 if (not success and msg.startswith("Zeitlimit")) else 0
+        if consecutive_timeouts >= 2 and i < n_points - 1:
+            aborted_after = i + 1
+            failed_points.extend(range(i + 1, n_points))
+            if progress_callback:
+                progress_callback(n_points, n_points)
+            break
 
         # Fortschritts-Callback
         if progress_callback:
             progress_callback(i + 1, n_points)
 
+    _collapse_sweep_independent(results, equations, variables, sweep_vars)
+
     # Füge Konstanten zum Ergebnis hinzu
     results.update(constants)
 
-    # Zusammenfassung
+    # Zusammenfassung (Punkte für die Anzeige ab 1 gezählt)
     if not failed_points:
         msg = f"Parameterstudie erfolgreich: {n_points} Punkte berechnet"
         return True, results, msg
-    elif len(failed_points) < n_points:
-        msg = f"Parameterstudie teilweise erfolgreich: {n_points - len(failed_points)}/{n_points} Punkte berechnet"
+    points = ", ".join(str(i + 1) for i in failed_points[:8]) + (" ..." if len(failed_points) > 8 else "")
+    reason = f"Punkt {first_failure[0]}: {first_failure[1]}"
+    if aborted_after is not None:
+        reason = (f"Abgebrochen nach Punkt {aborted_after}: Zeitlimit an zwei Punkten hintereinander "
+                  f"überschritten (Startwerte vorgeben: Solve > Initial Values). {reason}")
+    if len(failed_points) < n_points:
+        msg = (f"Parameterstudie teilweise erfolgreich: {n_points - len(failed_points)}/{n_points} "
+               f"Punkte berechnet, ohne Lösung: Punkt {points}. {reason}")
         return True, results, msg
-    else:
-        return False, results, "Parameterstudie fehlgeschlagen: Keine Konvergenz"
+    return False, results, f"Parameterstudie fehlgeschlagen: kein Punkt gelöst. {reason}"
+
+
+def _collapse_sweep_independent(results: Dict[str, Any], equations: List[str],
+                                variables: Set[str], sweep_vars: Dict[str, np.ndarray]) -> None:
+    """
+    Größen, die strukturell NICHT von den Sweep-Variablen abhängen (z.B. Radien
+    aus gegebenen Durchmessern), als Einzelwert statt als konstantes Array.
+
+    Strukturell (generisch): Jede Unbekannte wird über ein maximales Matching
+    der Gleichung zugeordnet, die sie bestimmt; sie hängt vom Sweep ab, wenn
+    diese Gleichung eine Sweep-Variable oder eine abhängige Größe enthält.
+    """
+    try:
+        from diagnostics import _incidence, _maximum_matching
+    except ImportError:
+        return
+    unknowns = set(variables)
+    incidence = _incidence(equations, unknowns)
+    eq_match, var_match = _maximum_matching(equations, incidence)
+    sweep_names = set(sweep_vars)
+    dependent = {v for v in unknowns if v not in var_match}  # strukturell offen: vorsichtig
+    changed = True
+    while changed:
+        changed = False
+        for var in sorted(unknowns - dependent):
+            eq = var_match[var]
+            if (_get_equation_unknowns(eq, set(), sweep_names)
+                    or (set(incidence[eq]) - {var}) & dependent):
+                dependent.add(var)
+                changed = True
+    for var in unknowns - dependent:
+        values = results.get(var)
+        if isinstance(values, np.ndarray):
+            finite = values[np.isfinite(values)]
+            if finite.size:
+                results[var] = float(finite[0])
 
 
 if __name__ == "__main__":

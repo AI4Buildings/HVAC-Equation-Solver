@@ -4,7 +4,7 @@ Equation solver for teaching and rapid calculation of thermodynamic state change
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Version](https://img.shields.io/badge/Version-3.2.0-orange.svg)
+![Version](https://img.shields.io/badge/Version-4.0.0-orange.svg)
 
 ## Features
 
@@ -13,30 +13,44 @@ Equation solver for teaching and rapid calculation of thermodynamic state change
 - **Humid Air**: Psychrometric calculations (`h = HumidAir(h, T=25°C, rh=0.5, p_tot=1bar)`)
 - **Blackbody Radiation**: Planck's radiation functions (`Eb`, `Blackbody`, `Wien`, `Stefan_Boltzmann`)
 - **Robust Solver**: Block decomposition with bracket search and Brent's method
-- **Parameter Studies**: Simple sweep syntax (`p = 25:5:50 bar`)
+- **Parameter Studies**: Simple sweep syntax (`p = 25:5:50 bar`) and value lists for measured data (`T = [20 25 31] °C`)
 - **Unit System**: Automatic unit parsing, propagation and consistency checking
 - **GUI**: Modern CustomTkinter interface with plotting capabilities
 - **Temperature Display**: Configurable display in °C or K (Settings)
 
 ## Installation
 
-### Required Libraries
+The solver runs **locally and offline**; internet is only needed once for installation
+and for updates. **Step-by-step instructions for students (German): [INSTALLATION.md](INSTALLATION.md)**
+
+Short version:
+1. Install Python 3.12 from <https://www.python.org/downloads/> (Windows: tick "Add python.exe to PATH").
+2. Download the latest release (GitHub → Releases → *Source code (zip)*) and unzip it.
+3. Install once: double-click `installieren_windows.bat` (Windows) / `installieren_mac.command`
+   (macOS), or run `./install.sh` (Linux). This creates a local environment `.venv`
+   in the program folder with the packages from `requirements.txt`.
+4. Start: `starten_windows.bat` / `starten_mac.command` / `./start.sh`.
+
+Update: replace the program folder with the new release (or `git pull`) and run the
+install script again. The current version is shown in the title bar and status bar.
+
+### Required Libraries (for developers)
 
 ```bash
-pip install numpy scipy CoolProp matplotlib pint customtkinter
+pip install -r requirements.txt
 ```
 
 | Library | Version | Purpose |
 |---------|---------|---------|
-| numpy | >= 1.20 | Array operations, mathematical functions |
-| scipy | >= 1.7 | Numerical solvers (fsolve, brentq) |
-| CoolProp | >= 6.4 | Thermodynamic property data |
-| matplotlib | >= 3.5 | Diagrams and plots (optional) |
-| pint | >= 0.20 | Unit handling and dimensional analysis |
-| customtkinter | >= 5.0 | Modern GUI |
-| tkinter | - | GUI (included in Python standard library) |
+| numpy | >= 1.24, < 3 | Array operations, mathematical functions |
+| scipy | >= 1.10, < 2 | Numerical solvers (least_squares, fsolve, brentq) |
+| CoolProp | >= 6.6, < 8 | Thermodynamic property data |
+| matplotlib | >= 3.7, < 4 | Diagrams and plots |
+| pint | >= 0.23, < 1 | Unit handling and dimensional analysis |
+| customtkinter | >= 5.2, < 6 | Modern GUI |
+| tkinter | - | GUI (included in Python from python.org) |
 
-### Start the Program
+### Start the Program (developers)
 
 ```bash
 python3 main.py
@@ -62,6 +76,13 @@ HVAC-Equation-Solver/
 ├── radiation.py         # Blackbody radiation functions
 ├── units.py             # Unit handling and conversion (v3.0)
 ├── unit_constraints.py  # Unit propagation and consistency checking (v3.0)
+├── diagnostics.py       # Generic error analysis (structure, numerics, name hints)
+├── version.py           # Program version (shown in title and status bar)
+├── requirements.txt     # Required packages
+├── install.sh / start.sh                          # Install/start (macOS, Linux)
+├── installieren_mac.command / starten_mac.command  # Double-click (macOS)
+├── installieren_windows.bat / starten_windows.bat  # Double-click (Windows)
+├── INSTALLATION.md      # Installation and update guide for students (German)
 ├── test_regressions.py  # Regression tests: parser, solver, units
 ├── test_unit_constraints.py  # Unit propagation / dimension checks
 ├── test_berechnungen.py # Thermodynamics & heat transfer problems vs. reference values
@@ -131,6 +152,23 @@ T = 0:10:100 °C
 p = 1 bar
 h = enthalpy(water, T=T, p=p)
 ```
+
+### Measured Data (Value Lists)
+
+```
+T_a = [-5.2 -4.8 -3.9 -2.7] °C
+m_dot = [0.95
+         1.02
+         1.00
+         0.98] kg/s
+T_i = 20 °C
+c_p = 1006 J/(kg*K)
+Q_dot = m_dot*c_p*(T_i - T_a)
+```
+
+Values are separated by spaces, tabs, line breaks, `;` or `,` (decimal point).
+A column copied from Excel/CSV/TXT can be pasted between `[` and `]`.
+Several lists are combined point by point.
 
 ## Steam Power Cycle Example
 
@@ -249,9 +287,20 @@ Input: `T`, `p_tot`, `rh`, `w`, `p_w`, `h`
 
 Like everything else, radiation quantities are SI internally: wavelengths in m
 (`L = 5 µm` → 5e-6 m), `Eb` in W/m³ (displayed as W/(m²·µm)), `Wien` in m
-(displayed in µm). Plain numbers as wavelengths are still accepted: values < 0.01
-are taken as metres, larger ones as µm (`Eb(1000, 5)` = `Eb(1000, 5e-6)`).
+(displayed in µm). Plain numbers written directly in the call are still accepted:
+values < 0.01 are taken as metres, larger ones as µm (`Eb(1000, 5)` = `Eb(1000, 5e-6)`).
+Variables are always SI: `L = 5` without a unit is 5 m - write `L = 5 µm`.
 Units may also be written directly in the arguments: `Eb(500 °C, 5 µm)`.
+
+## Error Analysis
+
+Errors are analysed generically, never by recognising particular equations:
+syntax errors are reported per line with their position (`▶`); the structure of the
+system is analysed with a Dulmage-Mendelsohn decomposition (which unknowns are
+under-determined, which equations over-determine something - even when the total
+counts match); unknowns that could not be solved numerically are listed with their
+lines; and unknowns that occur in only one equation and look like a typo of existing
+names (e.g. `r_1h_i` = `r_1` + `h_i`) are shown as hints.
 
 ## Unit System
 
@@ -269,7 +318,11 @@ V = 200 L
 ```
 
 Every unit is converted to SI for the calculation (also cm², L, kW/m², kW/(m²K),
-mPa·s, mm²/s, µm). Python keywords may be used as variable names, e.g.
+mPa·s, mm²/s, µm). Exponents may be written without `^` (`20 cm2`, `500 m3/h`,
+`10 W/m2K`), and `·` is accepted as multiplication (`W/(m²·K)`). Unknown units are
+reported as an error instead of being silently ignored, and units in function
+arguments are checked against the expected dimension (`T=` temperature, `p=`
+pressure, ...). Python keywords may be used as variable names, e.g.
 `lambda = 0.04 W/mK` for a thermal conductivity.
 
 ### Automatic Unit Propagation

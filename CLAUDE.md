@@ -26,6 +26,16 @@ pip install numpy scipy CoolProp matplotlib pint customtkinter
 python3 main.py
 ```
 
+### Installation für Studierende (offline nutzbar)
+
+Anleitung: `INSTALLATION.md`. Die Skripte `installieren_windows.bat`,
+`installieren_mac.command` (→ `install.sh`) und `install.sh` legen im Programmordner
+eine eigene Umgebung `.venv` an und installieren `requirements.txt`; gestartet wird
+mit `starten_windows.bat` / `starten_mac.command` / `start.sh`. Internet nur für
+Installation und Update (neues Release bzw. `git pull`, dann Installation erneut).
+Programmversion: `version.py` (Titel- und Statusleiste). `.bat`-Dateien müssen CRLF und
+ASCII bleiben (siehe `.gitattributes`).
+
 ## Architektur
 
 ```
@@ -38,6 +48,11 @@ equation_solver/
 ├── radiation.py         # Schwarzkörper-Strahlungsfunktionen (Planck, vektorisiert)
 ├── units.py             # Einheitenhandling und Konvertierung (v3.0)
 ├── unit_constraints.py  # Einheiten-Propagation und Konsistenzprüfung (v3.0)
+├── diagnostics.py       # Generische Fehleranalyse (Struktur, Numerik, Namens-Hinweise)
+├── version.py           # Programmversion (Titel- und Statusleiste)
+├── requirements.txt     # Benötigte Pakete (mit getesteten Versionsbereichen)
+├── install.sh, start.sh, installieren_*/starten_*  # Installation/Start je OS
+├── INSTALLATION.md      # Installations- und Update-Anleitung (Studierende)
 ├── test_regressions.py  # Regressionstests Parser/Solver/Einheiten
 ├── test_unit_constraints.py  # Tests Einheiten-Propagation/Dimensionsprüfung
 ├── test_berechnungen.py # Berechnungsaufgaben Thermodynamik/Wärmeübertragung
@@ -66,16 +81,31 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 ### Parser (parser.py)
 - Converts equation syntax to Python: `^` → `**`, `ln` → `log`
 - Comments: `"..."` and `{...}` (auch verschachtelt und mehrzeilig)
+- Dezimalkomma wird als Fehler gemeldet (Punkt verwenden); `·` als Malzeichen; `lg` = `log10`
+- Einheiten-Kehrwerte nach Leerzeichen: `n = 0.3 1/h`, `1/K`, `h^-1`
+- Signaturprüfung beim Einlesen: Fluidname, Eigenschafts-/Parameternamen und
+  Argumentanzahl aller Funktionen (enthalpy, HumidAir, Eb, sqrt, max, ...)
 - **Python-Schlüsselwörter als Variablennamen** (`lambda` für λ, `in`, `is`, ...) sind
   erlaubt: intern umbenannt (`lambda` → `_kw_lambda`), angezeigt wieder als `lambda`
   (`parser.display_name()` / `parser.unmangle()`)
 - Thermodynamic function calls: `enthalpy(water, T=100, p=1)` → `enthalpy('water', T=100, p=1)`
+- **Syntaxprüfung beim Einlesen** (generisch über den Python-Syntaxbaum): nicht parsebare
+  Zeilen und Aufrufe von etwas, das keine Funktion ist (Variable/Zahl/Klammer vor `(`),
+  werden mit Zeilennummer und Fundstelle `▶` gemeldet, z.B.
+  `Zeile 14: 'r_1' ist keine Funktion - ... bei: 1 /( r_1  ▶( (1/r_1/h_i) + ln(…`
 - Extracts variables from equations (filters function names and parameter keys)
 - Vector syntax: `T = 0:10:100` (start:step:end) or `T = 0:100` (start:end, step=1)
   - MATLAB-Semantik: Die Schrittweite wird nie verfälscht; der Endwert ist nur
     enthalten, wenn er exakt auf dem Raster liegt (`0:0.3:1` → 0, 0.3, 0.6, 0.9)
   - Sweeps mit Offset-Einheiten (`T = 20:10:50 °C`) werden elementweise korrekt
-    konvertiert (Offset, kein Faktor)
+    konvertiert (Offset, kein Faktor); bei Temperaturdifferenzen (`dT = 0:5:20 °C`)
+    ohne Offset
+- **Wertelisten** (Messdaten): `T_a = [-5.2 -4.8 -3.9] °C`, Trennzeichen Leerzeichen,
+  Tabulator, Zeilenumbruch, `;` oder `,`; Dezimalpunkt (Dezimalkomma wird gemeldet).
+  Eine Liste darf über mehrere Zeilen gehen (Spalte aus Excel/CSV/TXT zwischen `[`
+  und `]` einfügen); Zeilennummern in Fehlermeldungen bleiben erhalten. Mehrere
+  Listen/Sweeps werden punktweise kombiniert (gleiche Länge). `1 [kg/s]`
+  (EES-Einheitenschreibweise) wird mit Hinweis abgelehnt
 - **Direct assignments** like `T_1 = 450`, `m = 10000/3600` or `m_dot = 10000/3600 kg/s`
   (numerischer Ausdruck + Einheit) are treated as constants
 - **Wichtig:** Eine Zeile ist nur dann eine Direktzuweisung, wenn links ein REINER
@@ -94,32 +124,72 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
      direkt auswerten (z.B. Filmtemperatur-Iteration: T_s → T_f → Stoffwerte → Ra → Nu →
      Wärmestrom), wird nur über diese Variable mit Bracket-Suche iteriert - robust auch
      bei schlechten Startwerten
+   - **Mehrfach-Tearing**: sonst wenige Tearing-Variablen (z.B. Radiositäten + Oberflächen-
+     temperaturen), alle übrigen der Reihe nach direkt; `least_squares` über k Variablen,
+     Residuen fest gewichtet mit der Termgröße am Startpunkt (mitlaufende Normierung wäre
+     nicht glatt, wenn Terme gegen null gehen, z.B. adiabate Wand)
    - sonst simultan mit `least_squares` (Levenberg-Marquardt) / `fsolve`, Zeitbudget ~20 s
-   - gescheiterte Blöcke werden nicht erneut versucht
+   - gescheiterte Blöcke werden nicht erneut versucht; unabhängig gelöste Teilblöcke bleiben
+     in der (Teil-)Lösung
 5. **Iteration**: Schritte 2-4 werden wiederholt bis alle Gleichungen gelöst sind
 
 #### Robuste Wurzelfindung für einzelne Gleichungen
-- **Bracket-Suche**: ~4000 Testpunkte (auch negative) über Größenordnungen bis ±5e9
+- **Bracket-Suche**: ~4000 Testpunkte (auch negative) über Größenordnungen von 1e-12 bis ±5e9
 - **Adaptive Verfeinerung**: Bei großen relativen Funktionsänderungen wird das Intervall verfeinert
 - **Brent's Methode**: Robuste Wurzelfindung bei Vorzeichenwechsel (Polstellen werden
   über einen Plausibilitätscheck verworfen, ebenso Underflow-Plateaus abklingender Funktionen)
 - **Wurzelauswahl**: Bei mehreren Wurzeln wird die dem Startwert nächstgelegene gewählt
   (Tie-Break: positive Wurzel); `sin(alpha) = 0.5` liefert 30, nicht 150 oder −210
-- **Standard-Startwert**: 1.0 für alle Variablen (bzw. einheitenbasiert, siehe unten)
+- **Standard-Startwert**: 1.0 für alle Variablen bzw. einheitenbasiert
+  (`units.initial_values_from_units`): typischer Wert je Dimension; unbekannte ABSOLUTE
+  Temperaturen starten beim Mittel der vorgegebenen Temperaturen (statt pauschal 350 K,
+  sonst falsches Vorzeichen von Differenzen wie T_Raum - T_Scheibe -> Ra^(1/6) nicht reell).
+  Mehrfach-Tearing startet gleichartige Größen mit gleichem Startwert zusätzlich gestaffelt
 - **Residuen-Bewertung**: relativ zur Größenordnung der Gleichungsterme - Divergenz
   zur Asymptote (z.B. `1/(x-2) = 0`) wird NICHT als Lösung akzeptiert
-- **Zeitbudget**: max. ~10 s pro Einzelgleichung (unlösbare Gleichungen frieren die GUI nicht ein)
+- **Zeitbudget**: max. ~10 s pro Einzelgleichung und `solver.SOLVE_TIME_LIMIT` = 60 s pro
+  Lösungslauf (bzw. pro Punkt einer Parameterstudie). Bei Überschreitung: Teillösung +
+  Meldung "Abbruch nach Zeitlimit" mit den offenen Unbekannten (`SolveTimeout` ist
+  BaseException, damit die `except Exception`-Fallbacks das Limit nicht verschlucken)
 - **Komplexe Zwischenwerte** (z.B. `Ra^(1/6)` mit negativem `Ra`) gelten als ungültige
   Auswertung, nicht als Absturz
 - **Konsistenzprüfung**: Constraint-Gleichungen (0 Unbekannte) mit großem Residuum
   führen zu "Widersprüchliches System" statt stillschweigendem Erfolg
 - **Parameterstudien**: Warm-Start - die Lösung des Vorpunkts ist Startwert des nächsten
   Punkts (verhindert Sprünge zwischen Lösungsästen)
+- **Auswertungsfehler** (0/0, CoolProp-/HumidAir-Fehlermeldungen) werden in der Meldung
+  mit Originalzeile genannt statt "keine Lösung"
+- Parameterstudien: gescheiterte Punkte werden gemeldet (Nummer + Grund), gelöste Größen
+  dieser Punkte bleiben erhalten; sweep-unabhängige Größen erscheinen als Einzelwert.
+  Scheitern zwei Punkte hintereinander am Zeitlimit, wird die Studie abgebrochen
+  (ohne Warm-Start scheitern sonst meist alle weiteren: n Punkte x 60 s)
 
 #### Parameterstudien
 - Sweep-Variablen werden als Konstanten für jeden Punkt behandelt
 - Für jeden Sweep-Punkt wird `solve_system` mit Block-Dekomposition aufgerufen
 - Vektorisierte Auswertung für direkte Funktionen ohne Iteration
+
+### Fehleranalyse (diagnostics.py)
+
+**Grundsatz:** Fehleranalysen sind immer GENERISCH - sie arbeiten auf der Struktur des
+Gleichungssystems bzw. auf Namen, nie auf der Form einzelner Gleichungen. Keine
+Sonderbehandlung für bestimmte Gleichungstypen.
+
+1. **Syntax** (parser.py, je Zeile): Python-Syntaxbaum, Zeile + Fundstelle
+2. **Struktur** (`analyze_structure`): Dulmage-Mendelsohn-Zerlegung des bipartiten
+   Graphen Gleichungen ↔ Unbekannte (maximales Matching). Liefert den unterbestimmten
+   Teil (welche Unbekannten in welchen Zeilen, wie viele Gleichungen fehlen) und den
+   überbestimmten Teil - auch wenn die Gesamtzahl von Gleichungen und Unbekannten stimmt
+3. **Numerik** (`describe_unsolved`): Unbekannte, die trotz korrekter Struktur nicht
+   gelöst wurden, mit Zeilen und möglichen Ursachen
+4. **Namens-Hinweise** (`name_hints`): Unbekannte, die nur in EINER Gleichung vorkommen,
+   daraus implizit berechnet werden und deren Name einem vorhandenen Namen bis auf
+   Schreibweise gleicht oder aus zwei vorhandenen Namen besteht (`r_1h_i` = `r_1`+`h_i`).
+   Nur Hinweis (GUI: "ⓘ HINWEISE (n)", klickbar) - ein formal lösbares System mit
+   Tippfehler kann strukturell nicht als Fehler erkannt werden
+
+Überbestimmte, aber widerspruchsfreie Teile sind erlaubt (der Solver prüft die
+zusätzlichen Gleichungen); bei Widerspruch nennt die Meldung beide Seiten.
 
 ### Thermodynamik (thermodynamics.py)
 - CoolProp wrapper with intuitive syntax
@@ -180,8 +250,11 @@ rho = HumidAir(rho_tot, T=25°C, rh=0.5, p_tot=1bar)
   - `Wien(T)` - Wellenlänge maximaler Emission [m] (Anzeige: µm)
   - `Stefan_Boltzmann(T)` - Gesamtemission [W/m²]
 - Einheiten intern SI wie überall: T in K, λ in m (`L = 5 µm` → 5e-6 m)
-- Reine Zahlen als Wellenlänge werden erkannt: Werte < 0.01 gelten als Meter, größere
-  als µm - `Eb(1000, 5)` und `Eb(1000, 5e-6)` sind gleich
+- Zahlenliterale als Wellenlänge im Aufruf werden erkannt: Werte < 0.01 gelten als Meter,
+  größere als µm - `Eb(1000, 5)` und `Eb(1000, 5e-6)` sind gleich (Umrechnung im Parser).
+  Variablen sind dagegen immer SI: `L = 5` ohne Einheit sind 5 m (wie `T = 20` → 20 K);
+  der Solver verwendet SI-Varianten ohne Heuristik, sonst hätte eine iterierte
+  Wellenlänge zwei Lösungsäste (4.1e-6 als m und 4.1 als µm)
 - Einheiten auch direkt in den Argumenten: `Eb(500 °C, 5 µm)`, `Wien(500 °C)`
 - Eingabe: `T = 500 °C` oder `T = 773.15 K`
 - Groß-/Kleinschreibung egal: `Eb` = `eb`, `Blackbody` = `blackbody`
@@ -274,7 +347,15 @@ p = 1 bar                {Druck}
 sigma = 5.67e-8 W/m^2K^4 {Stefan-Boltzmann}
 L = 4 µm                 {Wellenlänge}
 h = 25 W/m^2K            {Wärmeübergangskoeffizient}
+A = 20 cm2               {Exponent auch ohne ^: m2, m3/h, kg/m3, W/m2K}
+U = 0.3 W/(m²·K)         {Malpunkt erlaubt}
 ```
+
+- Unbekannte Einheiten sind ein **Fehler** ("Unbekannte Einheit 'qcm'") - früher wurde
+  der Zahlenwert stillschweigend unumgerechnet übernommen.
+- Einheiten in Funktionsargumenten werden auf die Dimension geprüft: `T=` Temperatur,
+  `p=`/`p_tot=` Druck, `h=` J/kg, `s=` J/(kg·K), `x=`/`rh=`/`w=` dimensionslos, Strahlung
+  `(T, λ, ...)` - `enthalpy(water, T=20 Grad, p=1 bar)` ergibt eine Fehlermeldung.
 
 ### Konsistente SI-Berechnung
 
@@ -373,6 +454,12 @@ Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahi
 
 ## Bekannte Einschränkungen / Design-Entscheidungen
 
+0. **Temperaturskala**: Temperaturen werden intern in Kelvin gerechnet. Physikalische
+   Gesetze (p·v = R·T, σT⁴, Isentrope) funktionieren direkt; Formeln, die in °C
+   definiert sind (Heizkurve T_VL = a + b·ϑ_a, Magnus-Formel, cp(ϑ)-Polynome), müssen
+   mit ϑ = T − T_0 (T_0 = 0 °C) geschrieben werden - sonst falsches Ergebnis ohne
+   Meldung. Mathematisch nicht von Gesetzen in K unterscheidbar, daher keine Warnung.
+
 1. **Quality-Clamping**: Dampfqualität x wird auf [0, 1] begrenzt (thermodynamics.py), damit der iterative Solver nicht mit ungültigen Werten abstürzt.
 
 2. **Volumen als Input**: `v` wird intern zu Dichte umgerechnet (`rho = 1/v`), da CoolProp mit Dichte arbeitet.
@@ -396,6 +483,13 @@ Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahi
 - File: New, Open, Save, Save As (.hes, .txt)
 - View: Schriftgröße 6-36pt (Standard: 16pt)
 - Solve: F5 oder Button, Initial Values Dialog
+- Zwischenablage: Kopieren/Ausschneiden im Editor schreibt zusätzlich fest in die
+  System-Zwischenablage (macOS `pbcopy`, Linux `wl-copy`/`xclip`/`xsel`) - Tk stellt
+  Inhalte sonst nur bereit, solange das Programm läuft (nach Neustart wäre er weg)
+- Einheiten-Warnungen: Klick auf "⚠ UNIT WARNINGS (n)" im Results-Tab springt zu den
+  Warnungen im Residuals-Tab (Variable, Gleichung, links/rechts in SI-Einheiten)
+- Widersprüchliches (überbestimmtes) System: Meldung nennt vorgegebenen und berechneten
+  Wert, z.B. "q_dot ist vorgegeben (50), aus 'q_dot=...' folgt 29.06"
 - Ergebnisanzeige: Wert und Einheit stammen immer aus derselben Einheit. Die Settings
   (°C/K, bar/Pa, kJ/J, kW/W) gelten für Temperaturen, Drücke, J/kJ, J/kg, J/(kg·K), W/kW;
   andere Einheiten (MW, kWh, W/(m²K), W/K, ...) bleiben wie eingegeben bzw. abgeleitet.
@@ -404,7 +498,10 @@ Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahi
   - New Plot Window: Mehrere Y-Variablen, Labels, Titel, Optionen
   - Quick Plot X-Y: Schneller einfacher Plot
   - **Interaktive Toolbar**: Zoom, Pan, Home, Save (oben im Plot-Fenster)
-- Help: Function Reference, Fluid List
+- Help: Function Reference (Syntax, Einheiten, Funktionen, Meldungen), Fluid List
+  (aus `thermodynamics.FLUID_ALIASES` und der CoolProp-Fluidliste erzeugt - alle 124 Fluide)
+- Settings: Anzeige-Einheiten (°C/K, bar/Pa, kJ/J, kW/W) wirken sofort auf die Ergebnisse
+- Einheiten werden als °C, °F, µm angezeigt (intern pint-Namen degC, degF, um)
 
 ## Parameterstudien (Sweep)
 

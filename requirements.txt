@@ -1,0 +1,10 @@
+# HVAC Equation Solver - benötigte Python-Pakete
+# Getestet mit Python 3.12: numpy 2.4, scipy 1.16, CoolProp 7.1, matplotlib 3.9,
+# pint 0.24, customtkinter 5.2.2. Obergrenzen schützen vor inkompatiblen
+# Hauptversionen; tkinter ist Teil von Python (bei python.org-Installern enthalten).
+numpy>=1.24,<3
+scipy>=1.10,<2
+CoolProp>=6.6,<8
+matplotlib>=3.7,<4
+pint>=0.23,<1
+customtkinter>=5.2,<6

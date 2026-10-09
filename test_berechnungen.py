@@ -552,6 +552,21 @@ check("E10 Druck in atm und kPa", "p_1 = 1 atm\np_2 = 250 kPa\ndp = p_2 - p_1", 
 check("E11 Volumenstrom m^3/h", "V_dot = 500 m^3/h\nrho = 1.2 kg/m^3\nm_dot = rho*V_dot", {'m_dot': 500 / 3600 * 1.2})
 check("E12 dT in °C (Differenz)", "dT_1 = 10 °C\nm = 1 kg/s\nc = 4.19 kJ/(kg*K)\nQ = m*c*dT_1", {'Q': 41900.0})
 check("E13 Mitteltemperatur aus °C", "T_1 = 10 °C\nT_2 = 30 °C\nT_m = (T_1 + T_2)/2", {'T_m': 293.15})
+check("E14 Exponent ohne ^ (cm2, W/m2K) MIT Einheiten", """alpha=10 W/m2K
+
+lambda=0.04 W/mK
+
+A=20cm2
+
+T_1=20°C
+T_2=15°C
+
+Q_dot=A*alpha*(T_1-T_2)""", {'A': 0.002, 'alpha': 10.0, 'Q_dot': 0.1})
+check("E14 Exponent ohne ^ OHNE Einheiten", "alpha = 10\nA = 0.002\nT_1 = 293.15\nT_2 = 288.15\n"
+      "Q_dot = A*alpha*(T_1 - T_2)", {'Q_dot': 0.1})
+check("E15 Volumenstrom m3/h, Dichte kg/m3", "V_dot = 500 m3/h\nrho = 1.2 kg/m3\nm_dot = rho*V_dot",
+      {'m_dot': 500 / 3600 * 1.2})
+check("E16 Malpunkt W/(m²·K)", "U = 0.3 W/(m²·K)\nA = 10 m2\ndT = 30 K\nQ = U*A*dT", {'Q': 90.0})
 
 
 # ---------------------------------------------------------------------------

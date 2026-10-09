@@ -41,6 +41,10 @@ Thumbs.db
 *.hes
 *.txt
 !README.txt
+!requirements.txt
 
 # Claude Code
 .claude/
+
+# Lehr-/Benchmark-Beispiele (nicht veröffentlichen)
+Testbeispiele/

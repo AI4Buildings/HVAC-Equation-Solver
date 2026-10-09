@@ -19,17 +19,23 @@ from typing import Optional
 import customtkinter as ctk
 
 from parser import parse_equations, validate_system, display_name, unmangle
+from version import __version__
 from solver import solve_system, solve_parametric, format_solution, SolveAnalysis
+import solver as solver_module
 import numpy as np
 
 # Versuche Units-Modul zu laden
 try:
-    from units import get_compatible_units, UnitValue, detect_unit_from_equation, get_initial_from_unit
+    from units import (get_compatible_units, UnitValue, detect_unit_from_equation, get_initial_from_unit,
+                       initial_values_from_units)
     UNITS_AVAILABLE = True
 except ImportError:
     UNITS_AVAILABLE = False
     def get_initial_from_unit(unit_str):
         return 1.0
+
+    def initial_values_from_units(variables, all_units, known_values):
+        return {var: 1.0 for var in variables if all_units.get(var) is not None}
 
 # Versuche Constraint-Propagation zu laden
 try:
@@ -37,6 +43,13 @@ try:
     CONSTRAINT_PROPAGATION_AVAILABLE = True
 except ImportError:
     CONSTRAINT_PROPAGATION_AVAILABLE = False
+
+# Generische Fehleranalyse (Struktur, Numerik, Namens-Hinweise)
+try:
+    from diagnostics import analyze_structure, describe_structure, name_hints, diagnose
+    DIAGNOSTICS_AVAILABLE = True
+except ImportError:
+    DIAGNOSTICS_AVAILABLE = False
 
 # CustomTkinter Einstellungen
 ctk.set_appearance_mode("dark")
@@ -95,12 +108,28 @@ FONT_SIZE_DEFAULT = 16
 # Alle Werte intern in SI - Zahlen OHNE Einheit werden als SI interpretiert.
 FUNCTION_HELP_TEXT = """=== HVAC EQUATION SOLVER - FUNCTION REFERENCE ===
 
+SYNTAX:
+-------
+One equation per line, in any form and any order:
+  x + y = 10            T_2 = T_1 + dT        Q = m*cp*(T_2 - T_1)
+  ^ = power (x^2), * must always be written (2*x, r_1*(a+b));
+  · can be used instead of * (0.475·10^-6)
+Decimal POINT, not comma: 0.71 (a comma is reported as error)
+Comments: "text" or {text} (also over several lines)
+Values with units only in assignments 'name = number unit':
+  T_1 = 20 °C    p = 1 bar    A = 20 cm2    V_dot = 500 m3/h
+  U = 0.3 W/(m²·K)   (m2 = m^2 = m², · or * between units)
+  n = 0.3 1/h        (reciprocal units after a space; also h^-1)
+Not allowed: units inside equations (T_2 - 20 °C) - define a
+variable instead (T_0 = 20 °C, then T_2 - T_0).
+
 INTERNAL UNITS (SI):
 --------------------
 All calculations use SI base units internally:
   Temperature  K           Pressure       Pa
   Enthalpy     J/kg        Entropy, cp    J/(kg K)
   Energy       J           Power          W
+  Length       m           (also µm, cm, mm -> m)
 Inputs with units are converted automatically:
   T = 25 °C    p = 1 bar    h = 100 kJ/kg    Q = 5 kW
 Plain numbers WITHOUT unit are SI values (p=1 means 1 Pa!).
@@ -113,14 +142,20 @@ asin(x), acos(x), atan(x)  Inverse trig functions (result in degrees)
 sinh(x), cosh(x), tanh(x)  Hyperbolic functions (radians)
 exp(x)                      e^x
 ln(x)                       Natural logarithm
-log10(x)                    Base 10 logarithm
+log10(x), lg(x)             Base 10 logarithm
 sqrt(x)                     Square root
 abs(x)                      Absolute value
+max(a, b), min(a, b)        Maximum / minimum
 pi                          Pi constant
+Angles are in degrees. Formulas from the literature that use radians
+(e.g. view factors): atan(x)*pi/180 gives the angle in radians.
+Not available (unlike EES): IF/case distinctions, own functions,
+optimisation (min/max search); use parametric studies instead.
 
 THERMODYNAMIC FUNCTIONS (CoolProp):
 -----------------------------------
 Syntax: function(fluid, param1=value1, param2=value2)
+Fluid names: see Help > Fluid List (not case-sensitive).
 
 Properties (results in SI):
   enthalpy(...)      Specific enthalpy [J/kg]
@@ -144,6 +179,7 @@ State properties (2 required; SI or with unit):
   s = Entropy [J/(kg K)]     e.g. s=7 kJ/(kg*K)
   x = Vapor quality [-]
   rho (or d) [kg/m3], u [J/kg], v [m3/kg]
+A unit that does not fit the property (e.g. p=1 kg) is reported.
 
 Examples:
   h = enthalpy(water, T=373.15 K, p=1 bar)   {100°C, 1 bar}
@@ -154,8 +190,10 @@ HUMID AIR FUNCTIONS:
 --------------------
 Syntax: HumidAir(property, T=..., rh=..., p_tot=...)  (3 inputs)
 Outputs: T, T_dp, T_wb [K], h [J/kg dry air], w [kg/kg],
-         rh [-], p_w [Pa], rho_tot, rho_a, rho_w [kg/m3]
-Inputs:  T [K], p_tot [Pa], rh [-], w [kg/kg], p_w [Pa], h [J/kg]
+         rh [-], p_w [Pa], rho_tot, rho_a, rho_w [kg/m3],
+         cp [J/(kg K), per kg dry air], cp_ha [per kg humid air]
+Inputs:  T [K], p_tot [Pa], rh (or rF) [-], w [kg/kg], p_w [Pa],
+         h [J/kg]
 
   h = HumidAir(h, T=298.15 K, rh=0.5, p_tot=1 bar)   {25°C}
   h = HumidAir(h, T=25 °C, rh=0.5, p_tot=1 bar)      {also valid}
@@ -164,10 +202,9 @@ Inputs:  T [K], p_tot [Pa], rh [-], w [kg/kg], p_w [Pa], h [J/kg]
 
 RADIATION FUNCTIONS (Blackbody):
 --------------------------------
-Temperature T in K. Wavelengths may be given with unit (µm, nm, m)
-or as plain numbers: plain values < 0.01 are taken as metres,
-otherwise as µm. Put units on variables (T_s = 500 °C,
-L = 5 µm) and pass the variables; inside the call use plain numbers.
+Temperature T in K, wavelengths in m (SI). Units can be used for
+variables and inside the call (500 °C, 5 µm). Plain numbers as
+wavelength: values < 0.01 are taken as metres, otherwise as µm.
 
   Eb(T, lambda)              Spectral emissive power
                              [W/m3 internally, shown as W/(m2 µm)]
@@ -182,34 +219,27 @@ Examples:
   L = 5 µm
   E = Eb(T_s, L)                       {spectral power at 5 µm}
   lambda_max = Wien(T_s)               {peak wavelength}
-  E_1 = Eb(573.15, 5)                  {300°C; plain 5 -> 5 µm}
+  E_1 = Eb(300 °C, 5 µm)               {units inside the call}
+  E_2 = Eb(573.15, 5)                  {numbers in the call: K and µm}
+Variables without unit are SI: L = 5 is 5 m - write L = 5 µm.
   f = Blackbody(1273.15, 0.4, 0.7)     {visible fraction, 1000°C}
   E_total = Stefan_Boltzmann(373.15)   {total emission at 100°C}
 
-RESERVED VARIABLE NAMES (DO NOT USE):
--------------------------------------
-Python keywords (cause syntax errors):
-  lambda, if, else, for, while, class, def, return,
-  import, from, as, try, except, with, pass, break,
-  continue, and, or, not, in, is, True, False, None
-
-Mathematical constants/functions (will be overwritten):
-  pi, e, sin, cos, tan, exp, ln, sqrt, abs, max, min
-
-Thermodynamic functions (case-insensitive):
-  enthalpy, entropy, density, temperature, pressure, etc.
-
-TIPS:
-  - Use descriptive names: lambda_1 instead of lambda
-  - Use subscripts: T_1, p_2, h_in, h_out
-  - For wavelength: use 'L', 'wl', or 'lambda_1'
-  - Euler's number: use exp(1) instead of e
+VARIABLE NAMES:
+---------------
+Letters, digits and _ (not starting with a digit), case-sensitive.
+Python keywords can be used: lambda = 0.04 W/mK works.
+Not usable: and, or, not, True, False, None.
+e is a normal variable; Euler's number: exp(1).
+Avoid naming a variable like a function you also call
+(sin, exp, ln, sqrt, max, pi, enthalpy, cp, ...).
 
 TEMPERATURE DIFFERENCES:
 ------------------------
-Variables starting with "dT" or "delta" are recognized as
-temperature differences and use the unit "delta_K"
-(also for input in °C: dT_1 = 10 °C -> 10 K, no offset).
+Variables starting with "dT" or "delta" are temperature
+differences with the unit "delta_K" (also for input in °C:
+dT_1 = 10 °C -> 10 K, no offset). Differences of two
+temperatures (T_1 - T_2) are recognized automatically.
 
 Examples:
   dT_N = 49.83 K        {Recognized as delta_K}
@@ -217,7 +247,17 @@ Examples:
   dT_log = (T1-T2)/ln((T1-T0)/(T2-T0))  {Inferred as delta_K}
 
 This avoids incorrect offset conversions (K -> °C).
-Regular temperatures (T_1, T_VL, etc.) remain in K.
+Absolute temperatures (T_1, T_VL, etc.) are shown in °C.
+
+TEMPERATURE SCALE - IMPORTANT:
+------------------------------
+Temperatures are calculated in KELVIN. Physical laws work
+directly (p*v = R*T, sigma*T^4, T_2 = T_1*(p_2/p_1)^...).
+Formulas DEFINED IN °C (heating curve T_VL = a + b*theta_a,
+Magnus formula, cp(theta) polynomials) need theta = T - T_0:
+  T_0 = 0 °C
+  T_VL = a + b*(T_a - T_0)      {heating curve in °C}
+Otherwise the result is wrong without any error message.
 
 PARAMETRIC STUDIES (Sweeps):
 ----------------------------
@@ -229,8 +269,94 @@ Examples:
   p = 1:0.5:3 bar       {1, 1.5, 2, 2.5, 3 bar}
 Without unit, values are SI (T = 20:5:40 would be 20..40 K).
 
-After solving: Use Plot menu for visualization
+Value lists (e.g. measured data):
+  T_a = [-5.2 -4.8 -3.9 -2.7] °C
+  m_dot = [0.95; 1.02; 1.00; 0.98] kg/s
+Separators: space, tab, line break, ';' or ','. Decimal POINT.
+A list may span several lines - paste a column from Excel/CSV/
+TXT between [ and ] (via clipboard). Unit after the ].
+
+Several sweep variables / lists are combined point by point
+(same number of values). Points without solution are reported.
+
+After solving: Plot > New Plot Window (several curves) or
+Plot > Quick Plot X-Y.
+
+MESSAGES:
+---------
+Errors name the line and mark the position with ▶, e.g.
+  Zeile 14: 'r_1' ist keine Funktion ... bei: r_1 ▶( ...
+Unterbestimmt  = equations missing (lists the unknowns)
+Überbestimmt / Widersprüchlich = too many or conflicting values
+Abbruch nach Zeitlimit = no solution within 60 s: set initial
+  values (Solve > Initial Values) or simplify the system
+⚠ UNIT WARNINGS (n) and ⓘ HINWEISE (n) above the results are
+clickable and open the details in the Residuals tab.
 """
+
+
+def pretty_unit(unit: str) -> str:
+    """Anzeigeform einer Einheit: degC -> °C, degF -> °F, um -> µm (pint versteht beide)."""
+    import re
+    unit = unit.replace('degC', '°C').replace('degF', '°F')
+    return re.sub(r'(?<![A-Za-z])um(?![A-Za-z])', 'µm', unit)
+
+
+def fluid_help_text() -> str:
+    """
+    Text der Fluidliste - aus den Daten erzeugt (Kurznamen in thermodynamics.py,
+    vollständige Liste aus CoolProp), damit die Hilfe nie vom Programm abweicht.
+    """
+    from thermodynamics import FLUID_ALIASES, get_available_fluids
+    lines = ["=== AVAILABLE FLUIDS (CoolProp) ===", "",
+             "Usage: enthalpy(water, T=20 °C, p=1 bar)",
+             "Fluid names are not case-sensitive. Humid air: use HumidAir(...).", "",
+             "SHORT NAMES:"]
+    by_fluid = {}
+    for alias, fluid in FLUID_ALIASES.items():
+        by_fluid.setdefault(fluid, []).append(alias)
+    for fluid in sorted(by_fluid, key=str.lower):
+        lines.append(f"  {fluid:<12} {', '.join(sorted(by_fluid[fluid]))}")
+    fluids = get_available_fluids()
+    lines += ["", f"ALL COOLPROP FLUIDS ({len(fluids)}) - usable with these names:"]
+    width = max((len(f) for f in fluids), default=10) + 2
+    columns = 3
+    for i in range(0, len(fluids), columns):
+        lines.append("  " + "".join(f"{f:<{width}}" for f in fluids[i:i + columns]).rstrip())
+    return "\n".join(lines) + "\n"
+
+
+def export_to_system_clipboard(text: str) -> bool:
+    """
+    Übergibt Text fest an die Zwischenablage des Betriebssystems.
+
+    Tk stellt kopierten Text auf macOS (und unter X11) nur "auf Anfrage" bereit:
+    Solange das Programm läuft, können andere Programme einfügen - nach dem
+    Beenden ist der Inhalt aber verloren. Daher wird beim Kopieren zusätzlich
+    direkt in die System-Zwischenablage geschrieben.
+    Windows: Tk übergibt die Daten beim Beenden selbst (WM_RENDERALLFORMATS).
+    """
+    import shutil
+    import subprocess
+    if sys.platform == 'darwin':
+        command = ['pbcopy']
+    elif sys.platform.startswith('linux'):
+        for candidate in (['wl-copy'], ['xclip', '-selection', 'clipboard'],
+                          ['xsel', '--clipboard', '--input']):
+            if shutil.which(candidate[0]):
+                command = candidate
+                break
+        else:
+            return False
+    else:
+        return False
+    try:
+        # UTF-8 erzwingen, sonst werden °, ², µ je nach Locale verfälscht
+        env = dict(os.environ, LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8')
+        subprocess.run(command, input=text.encode('utf-8'), check=True, timeout=5, env=env)
+        return True
+    except Exception:
+        return False
 
 
 def _suppress_macos_warning(func):
@@ -255,7 +381,7 @@ class EquationSolverApp(ctk.CTk):
         super().__init__()
 
         # Fenster-Konfiguration
-        self.title("HVAC Equation Solver")
+        self.title(f"HVAC Equation Solver {__version__}")
         self.geometry("1200x800")
         self.minsize(800, 600)
 
@@ -289,6 +415,11 @@ class EquationSolverApp(ctk.CTk):
         self.pressure_display_unit = ctk.StringVar(value="bar")  # Standard: bar (statt Pa)
         self.energy_display_unit = ctk.StringVar(value="kJ")  # Standard: kJ (statt J)
         self.power_display_unit = ctk.StringVar(value="kW")  # Standard: kW (statt W)
+        # Änderung einer Anzeige-Einstellung -> Ergebnisse sofort neu anzeigen
+        self._last_results_args = None
+        for display_var in (self.temp_display_unit, self.pressure_display_unit,
+                            self.energy_display_unit, self.power_display_unit):
+            display_var.trace_add("write", lambda *args: self._refresh_results())
 
         # Grid-Konfiguration
         self.grid_columnconfigure(0, weight=1)
@@ -532,13 +663,35 @@ class EquationSolverApp(ctk.CTk):
         self.result_status_label.pack(side="left")
 
         # Unit Warning Label (⚠ UNIT WARNINGS)
+        # Klickbar: springt zu den Warnungen im Residuals Tab
+        self._unit_warning_font = ctk.CTkFont(size=12, weight="bold")
         self.unit_warning_label = ctk.CTkLabel(
             self.status_frame,
             text="",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=COLORS["warning"]
+            font=self._unit_warning_font,
+            text_color=COLORS["warning"],
+            cursor="hand2"
         )
         self.unit_warning_label.pack(side="left", padx=(20, 0))
+        self.unit_warning_label.bind("<Button-1>", lambda e: self.show_unit_warnings())
+        self.unit_warning_label.bind("<Enter>", lambda e: self._unit_warning_font.configure(underline=True))
+        self.unit_warning_label.bind("<Leave>", lambda e: self._unit_warning_font.configure(underline=False))
+        self.unit_warnings_content = None  # Inhalt der Warnungs-Sektion im Residuals Tab
+
+        # Hinweise (z.B. mögliche Tippfehler) - ebenfalls klickbar
+        self._hints_font = ctk.CTkFont(size=12, weight="bold")
+        self.hints_label = ctk.CTkLabel(
+            self.status_frame,
+            text="",
+            font=self._hints_font,
+            text_color=COLORS["info"],
+            cursor="hand2"
+        )
+        self.hints_label.pack(side="left", padx=(20, 0))
+        self.hints_label.bind("<Button-1>", lambda e: self.show_hints())
+        self.hints_label.bind("<Enter>", lambda e: self._hints_font.configure(underline=True))
+        self.hints_label.bind("<Leave>", lambda e: self._hints_font.configure(underline=False))
+        self.hints_content = None
 
         # Stats Label (15 direct, 1 iterative)
         self.result_stats_label = ctk.CTkLabel(
@@ -668,12 +821,63 @@ class EquationSolverApp(ctk.CTk):
                 expand_btn.configure(text="▼")
                 expand_var.set(True)
 
+        def expand():
+            content_frame.grid()
+            expand_btn.configure(text="▼")
+            expand_var.set(True)
+
         # Bind click to toggle
         expand_btn.bind("<Button-1>", lambda e: toggle())
         title_label.bind("<Button-1>", lambda e: toggle())
         header.bind("<Button-1>", lambda e: toggle())
 
+        content_frame.expand = expand  # z.B. für show_unit_warnings()
+        content_frame.section_frame = section_frame
         return content_frame
+
+    def _show_residuals_section(self, content):
+        """Wechselt zum Residuals Tab und zeigt eine Sektion aufgeklappt."""
+        if content is None:
+            return
+        self.tab_view.set("Residuals")
+        content.expand()
+        try:
+            # Warnungen/Hinweise stehen oben im Residuals Tab
+            self.update_idletasks()
+            total = max(1, self.residuals_content.winfo_height())
+            self.residuals_scroll._parent_canvas.yview_moveto(content.section_frame.winfo_y() / total)
+        except Exception:
+            pass
+
+    def show_unit_warnings(self):
+        """Wechselt zum Residuals Tab und zeigt die Einheiten-Warnungen (aufgeklappt)."""
+        if self.unit_warning_label.cget("text"):
+            self._show_residuals_section(self.unit_warnings_content)
+
+    def show_hints(self):
+        """Wechselt zum Residuals Tab und zeigt die Hinweise (aufgeklappt)."""
+        if self.hints_label.cget("text"):
+            self._show_residuals_section(self.hints_content)
+
+    def _update_hints_label(self, analysis):
+        """Hinweise-Label im Results Tab ("ⓘ HINWEISE (n)")."""
+        hints = getattr(analysis, "hints", []) if analysis else []
+        self.hints_label.configure(text=f"ⓘ HINWEISE ({len(hints)})" if hints else "")
+
+    def _structure_message(self, equations, variables, constants, original_equations, source_text) -> str:
+        """Strukturdiagnose (unter-/überbestimmte Teile + Namens-Hinweise) als Meldungstext."""
+        if not DIAGNOSTICS_AVAILABLE or not equations:
+            return ""
+        try:
+            report = analyze_structure(equations, variables)
+            messages = describe_structure(report, original_equations, source_text, include_over=True)
+            hints = name_hints(equations, variables, set(constants), original_equations, source_text)
+        except Exception:
+            return ""
+        text = " ".join(messages)
+        if hints:
+            text += " Hinweis: " + " ".join(hints)
+        return text.strip()
 
     def _add_equation_row(self, parent, equation: str, var: str, value: float, residual: float, row: int):
         """Fügt eine Zeile für eine Gleichung zu den Residuals hinzu."""
@@ -712,66 +916,69 @@ class EquationSolverApp(ctk.CTk):
 
     def _add_unit_warning_row(self, parent, warning, row: int):
         """Fügt eine Zeile für eine Einheiten-Warnung hinzu."""
-        from solver import UnitWarning
+        import re
 
         # Main container für diese Warnung
         warning_frame = ctk.CTkFrame(parent, fg_color=COLORS["bg_dark"], corner_radius=4)
         warning_frame.grid(row=row, column=0, sticky="ew", pady=3)
         warning_frame.grid_columnconfigure(0, weight=1)
 
-        # Variable Name Header
+        # Kopfzeile: betroffene Variable (bzw. Art der Warnung) + Art
         var_frame = ctk.CTkFrame(warning_frame, fg_color="transparent")
         var_frame.pack(fill="x", padx=8, pady=(5, 2))
 
+        name = warning.variable.lstrip("⚠ ").strip()
+        is_variable = bool(re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', name))
+        kind = "Dimensionsfehler" if "Dimensionsfehler" in warning.explanation else ""
         ctk.CTkLabel(
-            var_frame, text=f"Variable: {display_name(warning.variable)}",
+            var_frame, text=f"Variable: {display_name(name)}" if is_variable else name,
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLORS["warning"],
             anchor="w"
         ).pack(side="left")
-
-        # Faktor anzeigen
-        if warning.conversion_factor != 1.0:
+        if is_variable and kind:
             ctk.CTkLabel(
-                var_frame, text=f"Faktor {warning.conversion_factor:.0f}×",
+                var_frame, text=kind,
                 font=ctk.CTkFont(size=11, weight="bold"),
                 text_color=COLORS["error"],
                 anchor="e"
             ).pack(side="right")
 
-        # Gleichungen mit ihren Einheiten
-        for eq, unit in warning.units.items():
-            eq_frame = ctk.CTkFrame(warning_frame, fg_color="transparent")
-            eq_frame.pack(fill="x", padx=15, pady=1)
-
-            # Gleichung (gekürzt)
-            eq_display = eq if len(eq) < 45 else eq[:42] + "..."
+        # Umrechnungsfaktor nur, wenn er etwas aussagt (z.B. 100 für bar·m³ vs kJ)
+        if warning.conversion_factor not in (0, 1):
             ctk.CTkLabel(
-                eq_frame, text=f"• {eq_display}",
-                font=ctk.CTkFont(size=10),
-                text_color=COLORS["text_dim"],
-                anchor="w"
-            ).pack(side="left")
-
-            # Einheit
-            unit_display = unit if unit else "(dimensionslos)"
-            ctk.CTkLabel(
-                eq_frame, text=f"→ {unit_display}",
-                font=ctk.CTkFont(size=10),
-                text_color=COLORS["accent"],
+                var_frame, text=f"Faktor {warning.conversion_factor:g}×",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=COLORS["error"],
                 anchor="e"
-            ).pack(side="right")
+            ).pack(side="right", padx=(0, 10))
+
+        # Gleichungen mit Einheiten-Info (je Gleichung zwei Zeilen, umbrechend)
+        for eq, unit in warning.units.items():
+            ctk.CTkLabel(
+                warning_frame, text=f"• {unmangle(eq)}",
+                font=ctk.CTkFont(size=11),
+                text_color=COLORS["text"],
+                anchor="w", justify="left", wraplength=520
+            ).pack(fill="x", padx=15, pady=(1, 0))
+            ctk.CTkLabel(
+                warning_frame, text=f"   {unmangle(unit) if unit else '(dimensionslos)'}",
+                font=ctk.CTkFont(size=11),
+                text_color=COLORS["accent"],
+                anchor="w", justify="left", wraplength=520
+            ).pack(fill="x", padx=15, pady=(0, 1))
 
         # Hinweis
-        hint_frame = ctk.CTkFrame(warning_frame, fg_color="transparent")
-        hint_frame.pack(fill="x", padx=8, pady=(3, 5))
+        if is_variable and kind:
+            hint = f"⚠ Einheit von {display_name(name)} oder die Gleichung prüfen!"
+        else:
+            hint = "⚠ Prüfen Sie die Einheiten in Ihren Gleichungen!"
         ctk.CTkLabel(
-            hint_frame,
-            text="⚠ Prüfen Sie die Einheiten in Ihren Gleichungen!",
+            warning_frame, text=hint,
             font=ctk.CTkFont(size=10),
             text_color=COLORS["warning"],
             anchor="w"
-        ).pack(side="left")
+        ).pack(fill="x", padx=8, pady=(3, 5))
 
     def _update_residuals_tab(self, analysis: SolveAnalysis):
         """Aktualisiert den Residuals Tab mit den Lösungsdaten."""
@@ -787,16 +994,36 @@ class EquationSolverApp(ctk.CTk):
         current_row = 0
 
         # === Unit Warnings Section ===
+        self.unit_warnings_content = None
         if analysis.unit_warnings:
             content = self._create_collapsible_section(
                 self.residuals_content, "⚠ UNIT WARNINGS", len(analysis.unit_warnings), current_row,
                 header_color=COLORS["warning"]
             )
+            self.unit_warnings_content = content
             self.residuals_sections.append(content.master)
 
             for i, warning in enumerate(analysis.unit_warnings):
                 self._add_unit_warning_row(content, warning, i)
 
+            current_row += 1
+
+        # === Hinweise Section (generische Diagnose, z.B. mögliche Tippfehler) ===
+        self.hints_content = None
+        if getattr(analysis, "hints", None):
+            content = self._create_collapsible_section(
+                self.residuals_content, "ⓘ HINWEISE", len(analysis.hints), current_row,
+                header_color=COLORS["info"]
+            )
+            self.hints_content = content
+            self.residuals_sections.append(content.master)
+            for i, hint in enumerate(analysis.hints):
+                ctk.CTkLabel(
+                    content, text=f"• {hint}",
+                    font=ctk.CTkFont(size=11),
+                    text_color=COLORS["text"],
+                    anchor="w", justify="left", wraplength=560
+                ).grid(row=i, column=0, sticky="ew", pady=2)
             current_row += 1
 
         # === Constants Section ===
@@ -900,6 +1127,7 @@ class EquationSolverApp(ctk.CTk):
         version_text = f"Python {sys.version_info.major}.{sys.version_info.minor}"
         if COOLPROP_VERSION:
             version_text = f"CoolProp v{COOLPROP_VERSION}  •  {version_text}"
+        version_text = f"Version {__version__}  •  {version_text}"
 
         version_label = ctk.CTkLabel(
             statusbar,
@@ -996,11 +1224,26 @@ class EquationSolverApp(ctk.CTk):
             # Cursorposition einfügen und so eine Gleichung zerteilen.
             self.equations_text.bind(sequence, handler)
 
+        # Kopieren/Ausschneiden: zusätzlich fest an die System-Zwischenablage
+        # übergeben (siehe export_to_system_clipboard). Instanz-Binding läuft VOR
+        # der Text-Klassenbindung, daher erst nach deren Kopieren exportieren.
+        for sequence in ("<<Copy>>", "<<Cut>>"):
+            self.equations_text._textbox.bind(
+                sequence, lambda event: self.after_idle(self._export_clipboard), add="+")
+
         # Undo/Redo bindings (works on both Windows/Linux and macOS)
         self.equations_text.bind("<Control-z>", self._undo)
         self.equations_text.bind("<Command-z>", self._undo)
         self.equations_text.bind("<Control-y>", self._redo)  # Windows/Linux
         self.equations_text.bind("<Command-y>", self._redo)  # macOS
+
+    def _export_clipboard(self):
+        """Aktuellen Tk-Zwischenablageinhalt an das Betriebssystem übergeben."""
+        try:
+            text = self.clipboard_get()
+        except tk.TclError:
+            return
+        export_to_system_clipboard(text)
 
     # === Schriftgröße ===
 
@@ -1169,6 +1412,10 @@ class EquationSolverApp(ctk.CTk):
 
         equations_text = self.equations_text.get("1.0", "end-1c")
 
+        # Alte Lösung verwerfen, BEVOR geparst wird - sonst bliebe sie bei einem
+        # Parse-Fehler (z.B. unbekannte Einheit) stehen und Plot zeigte alte Daten
+        self.last_solution = None
+
         try:
             # Parse Gleichungen mit Einheiten
             equations, variables, initial_values, sweep_vars, original_equations, unit_values = parse_equations(equations_text, parse_units=True)
@@ -1203,7 +1450,8 @@ class EquationSolverApp(ctk.CTk):
                 return
 
             if not valid:
-                self._show_error(msg)
+                self._show_error(self._structure_message(
+                    equations, variables, initial_values, original_equations, equations_text) or msg)
                 self.status_label.configure(text="Error: System not solvable")
                 return
 
@@ -1230,11 +1478,11 @@ class EquationSolverApp(ctk.CTk):
                 self.inferred_units = all_units
 
                 # Leite Startwerte aus Einheiten ab (nur für Variablen ohne manuellen Startwert)
-                for var in variables:
+                unit_initial = initial_values_from_units(variables, all_units, constants)
+                self.auto_initial_values = unit_initial  # Anzeige im Initial-Values-Dialog
+                for var, value in unit_initial.items():
                     if var not in solver_initial:
-                        unit = all_units.get(var)
-                        if unit is not None:
-                            solver_initial[var] = get_initial_from_unit(unit)
+                        solver_initial[var] = value
 
             # Löse System
             if sweep_vars:
@@ -1244,7 +1492,8 @@ class EquationSolverApp(ctk.CTk):
 
                 success, solution, solve_msg = solve_parametric(
                     equations, variables, sweep_vars, solver_initial,
-                    progress_callback=progress_callback, constants=constants
+                    progress_callback=progress_callback, constants=constants,
+                    original_equations=original_equations
                 )
                 # Keine Residuals für Parameterstudien
                 analysis = None
@@ -1274,10 +1523,27 @@ class EquationSolverApp(ctk.CTk):
                     if unit_warnings:
                         analysis.unit_warnings = unit_warnings
 
+            # Generische Diagnose: Struktur/Numerik (bei Fehler) + Namens-Hinweise
+            diagnosis_errors = []
+            if DIAGNOSTICS_AVAILABLE and not sweep_vars:
+                try:
+                    diagnosis_errors, hints = diagnose(
+                        equations, variables, constants, original_equations, equations_text,
+                        solution if not success else None)
+                    if analysis is not None:
+                        analysis.hints = hints
+                except Exception:
+                    diagnosis_errors = []
+
             if success:
                 self._show_results(solution, solve_msg, n_equations, n_variables, "OK")
                 self.last_solution = solution
-                if sweep_vars:
+                if sweep_vars and solve_msg.startswith("Parameterstudie teilweise"):
+                    # Einzelne Punkte ohne Lösung: nicht als voller Erfolg anzeigen
+                    self._show_error(solve_msg, status_text="● PARTIAL SOLUTION",
+                                     status_color=COLORS["warning"])
+                    self.status_label.configure(text="Parametric study: some points failed")
+                elif sweep_vars:
                     self.status_label.configure(text=f"Parametric study: {len(list(sweep_vars.values())[0])} points")
                 else:
                     self.status_label.configure(text="Solution found")
@@ -1292,17 +1558,26 @@ class EquationSolverApp(ctk.CTk):
                             )
                         else:
                             self.unit_warning_label.configure(text="")
+                        self._update_hints_label(analysis)
             else:
                 # Erst die Teillösung, DANACH die Meldung des Solvers anzeigen -
                 # _show_results überschreibt Status- und Info-Zeile, sonst wäre
                 # z.B. "Widersprüchliches System: ..." nie sichtbar
+                is_contradiction = "widersprüch" in (solve_msg or "").lower()
+                # Nicht-Widerspruch: generische Diagnose (unterbestimmter Teil bzw.
+                # numerisch ungelöste Unbekannte) statt "Unvollständig: n Gleichungen ..."
+                if not is_contradiction and diagnosis_errors:
+                    timed_out = (solve_msg or "").startswith("Zeitlimit")
+                    solve_msg = " ".join(diagnosis_errors)
+                    if timed_out:
+                        solve_msg = (f"Abbruch nach Zeitlimit ({solver_module.SOLVE_TIME_LIMIT:.0f} s). "
+                                     + solve_msg)
                 if solution:
                     self._show_results(solution, "Partial solution", n_equations, n_variables, "FAIL")
                     self._show_error(solve_msg, status_text="● PARTIAL SOLUTION",
                                      status_color=COLORS["warning"])
                 else:
                     self._show_error(solve_msg)
-                is_contradiction = "widersprüch" in (solve_msg or "").lower()
                 self.status_label.configure(
                     text="Contradictory system" if is_contradiction else "Convergence problem")
                 # Auch bei Fehler Residuals anzeigen
@@ -1316,6 +1591,7 @@ class EquationSolverApp(ctk.CTk):
                         )
                     else:
                         self.unit_warning_label.configure(text="")
+                    self._update_hints_label(analysis)
 
         except Exception as e:
             self._show_error(str(e))
@@ -1360,7 +1636,7 @@ class EquationSolverApp(ctk.CTk):
                 pass
 
     # Einheiten, für die die Anzeige-Einstellungen (Settings) gelten
-    _TEMPERATURE_UNITS = {'K', 'degC', 'degF', 'kelvin', 'celsius', 'fahrenheit', '°C', '°F'}
+    _TEMPERATURE_UNITS = {'K', 'degC', 'degF', 'kelvin', 'celsius', 'fahrenheit', '°C', '°F'}  # noqa
     _PRESSURE_UNITS = {'Pa', 'bar', 'kPa', 'MPa', 'mbar', 'atm', 'psi'}
     _ENERGY_UNITS = {'J', 'kJ'}
     _POWER_UNITS = {'W', 'kW'}
@@ -1379,7 +1655,7 @@ class EquationSolverApp(ctk.CTk):
         """
         unit = unit_value.original_unit
         if unit in self._TEMPERATURE_UNITS:
-            return self.temp_display_unit.get()
+            return pretty_unit(self.temp_display_unit.get())
         if unit in self._PRESSURE_UNITS:
             return self.pressure_display_unit.get()
         energy = self.energy_display_unit.get()
@@ -1391,7 +1667,7 @@ class EquationSolverApp(ctk.CTk):
             return f"{energy}/(kg*K)"
         if unit in self._POWER_UNITS:
             return self.power_display_unit.get()
-        return unit
+        return pretty_unit(unit)
 
     @staticmethod
     def _si_to_unit(value_si: float, unit: str) -> float:
@@ -1420,6 +1696,10 @@ class EquationSolverApp(ctk.CTk):
         # Status zurücksetzen
         self.result_status_label.configure(text="", text_color=COLORS["text_dim"])
         self.unit_warning_label.configure(text="")  # Unit Warning zurücksetzen
+        self.unit_warnings_content = None
+        self.hints_label.configure(text="")
+        self.hints_content = None
+        self._last_results_args = None
         self.result_stats_label.configure(text="")
         self.info_label.configure(text="", text_color=COLORS["text_dim"])
 
@@ -1438,8 +1718,22 @@ class EquationSolverApp(ctk.CTk):
         self.residuals_sections = []
         self.residuals_placeholder.grid()
 
+    def _refresh_results(self):
+        """Zeigt die letzten Ergebnisse erneut an (z.B. nach Wechsel der Anzeige-Einheit)."""
+        if not self._last_results_args or not self.value_labels:
+            return
+        # Status- und Info-Zeile (evtl. Fehlermeldung) unverändert lassen
+        saved = [(label, label.cget("text"), label.cget("text_color"))
+                 for label in (self.result_status_label, self.info_label)]
+        for widget in self.var_rows_container.winfo_children():
+            widget.destroy()
+        self._show_results(*self._last_results_args)
+        for label, text, color in saved:
+            label.configure(text=text, text_color=color)
+
     def _show_results(self, solution: dict, solve_msg: str, n_eq: int, n_var: int, status: str):
         """Zeigt die Ergebnisse im Results Tab an."""
+        self._last_results_args = (solution, solve_msg, n_eq, n_var, status)
         # Status
         if status == "OK":
             self.result_status_label.configure(text="● SOLUTION FOUND", text_color=COLORS["success"])
@@ -1491,12 +1785,15 @@ class EquationSolverApp(ctk.CTk):
                 if np.all(np.isnan(display_val)):
                     val_text = f"[{len(val)}× nan]"
                 else:
-                    min_val = np.nanmin(display_val)
-                    max_val = np.nanmax(display_val)
-                    if min_val == max_val:
-                        val_text = f"[{len(val)}× {min_val:.4g}]"
+                    # Erster -> letzter Punkt (Reihenfolge der Parameterstudie), nicht min -> max
+                    finite = display_val[np.isfinite(display_val)]
+                    first_val, last_val = finite[0], finite[-1]
+                    if np.all(finite == first_val):
+                        val_text = f"[{len(val)}× {first_val:.4g}]"
                     else:
-                        val_text = f"[{len(val)}× {min_val:.4g}→{max_val:.4g}]"
+                        val_text = f"[{len(val)}× {first_val:.4g}→{last_val:.4g}]"
+                    if finite.size < len(val):
+                        val_text += f" ({len(val) - finite.size}× nan)"
             else:
                 if abs(display_val) >= 1e6 or (abs(display_val) < 1e-4 and display_val != 0):
                     val_text = f"{display_val:.6e}"
@@ -1505,7 +1802,7 @@ class EquationSolverApp(ctk.CTk):
 
             # Unit Dropdown oder Platzhalter (rechts außen, vor Value)
             if has_unit and not isinstance(val, np.ndarray):
-                compatible_units = get_compatible_units(display_unit)
+                compatible_units = [pretty_unit(u) for u in get_compatible_units(display_unit)]
                 if display_unit not in compatible_units:
                     compatible_units = [display_unit] + list(compatible_units)
 
@@ -1581,7 +1878,7 @@ class EquationSolverApp(ctk.CTk):
     def _show_error(self, message: str, status_text: str = "● ERROR",
                     status_color: Optional[str] = None):
         """Zeigt eine Fehlermeldung im Results Tab an (Info-Zeile, umbrechend)."""
-        message = message or ""
+        message = unmangle(message or "")  # _kw_lambda -> lambda
         self.result_status_label.configure(text=status_text,
                                            text_color=status_color or COLORS["error"])
         if len(message) > 300:
@@ -1788,7 +2085,8 @@ class EquationSolverApp(ctk.CTk):
             elif unit is not None:
                 # Zeige automatischen Startwert basierend auf Einheit (grau).
                 # Wird beim OK NICHT als manueller Wert übernommen.
-                auto_texts[var] = f"{get_initial_from_unit(unit):.6g}"
+                auto_value = getattr(self, 'auto_initial_values', {}).get(var, get_initial_from_unit(unit))
+                auto_texts[var] = f"{auto_value:.6g}"
                 entry.insert(0, auto_texts[var])
                 entry.configure(text_color=COLORS["text_dim"])
 
@@ -1848,7 +2146,9 @@ class EquationSolverApp(ctk.CTk):
             """Füllt alle leeren Felder mit automatischen Werten basierend auf Einheiten."""
             for var, entry in entries.items():
                 if not entry.get().strip() and units_of.get(var) is not None:
-                    auto_texts[var] = f"{get_initial_from_unit(units_of[var]):.6g}"
+                    auto_value = getattr(self, 'auto_initial_values', {}).get(
+                        var, get_initial_from_unit(units_of[var]))
+                    auto_texts[var] = f"{auto_value:.6g}"
                     entry.insert(0, auto_texts[var])
                     entry.configure(text_color=COLORS["text_dim"])
 
@@ -1858,8 +2158,14 @@ class EquationSolverApp(ctk.CTk):
         ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy).pack(side="right", padx=5)
         ctk.CTkButton(btn_frame, text="OK", command=apply_values).pack(side="right")
 
-    def show_plot_dialog(self):
-        """Zeigt Plot-Dialog."""
+    def show_plot_dialog(self, multi: bool = True):
+        """
+        Plot-Dialog für Parameterstudien.
+
+        multi=True  (New Plot Window): mehrere Y-Variablen, Titel, Gitter/Marker/Legende
+        multi=False (Quick Plot X-Y):  eine X- und eine Y-Variable
+        Daten und Achsen in den Anzeige-Einheiten (z.B. °C, bar).
+        """
         if not MATPLOTLIB_AVAILABLE:
             messagebox.showerror("Error", "matplotlib not available")
             return
@@ -1874,50 +2180,88 @@ class EquationSolverApp(ctk.CTk):
             return
 
         array_vars = sorted([k for k, v in self.last_solution.items() if isinstance(v, np.ndarray)])
+        shown_names = {display_name(v): v for v in array_vars}  # Anzeige -> intern
 
         dialog = ctk.CTkToplevel(self)
-        dialog.title("New Plot")
-        dialog.geometry("400x400")
+        dialog.title("New Plot" if multi else "Quick Plot X-Y")
+        dialog.geometry("420x620" if multi else "400x400")
         dialog.transient(self)
         dialog.grab_set()
 
         # X-Achse
         ctk.CTkLabel(dialog, text="X-Axis:", font=ctk.CTkFont(size=13)).pack(pady=(20, 5))
-        x_var = ctk.StringVar(value=array_vars[0] if array_vars else "")
-        x_combo = ctk.CTkComboBox(dialog, variable=x_var, values=array_vars, width=200)
+        x_var = ctk.StringVar(value=display_name(array_vars[0]))
+        x_combo = ctk.CTkComboBox(dialog, variable=x_var, values=list(shown_names), width=220)
         x_combo.pack()
 
-        # Y-Achse
-        ctk.CTkLabel(dialog, text="Y-Axis:", font=ctk.CTkFont(size=13)).pack(pady=(20, 5))
-        y_var = ctk.StringVar(value=array_vars[1] if len(array_vars) > 1 else array_vars[0] if array_vars else "")
-        y_combo = ctk.CTkComboBox(dialog, variable=y_var, values=array_vars, width=200)
-        y_combo.pack()
+        y_checks = {}
+        y_var = ctk.StringVar(value=display_name(array_vars[1] if len(array_vars) > 1 else array_vars[0]))
+        if multi:
+            # Mehrere Y-Variablen per Checkbox
+            ctk.CTkLabel(dialog, text="Y-Axis (one or more):", font=ctk.CTkFont(size=13)).pack(pady=(15, 5))
+            y_frame = ctk.CTkScrollableFrame(dialog, width=260, height=180)
+            y_frame.pack()
+            for index, name in enumerate(shown_names):
+                var = ctk.BooleanVar(value=(index == 1 or len(shown_names) == 1))
+                ctk.CTkCheckBox(y_frame, text=name, variable=var).pack(anchor="w", pady=2)
+                y_checks[name] = var
+            ctk.CTkLabel(dialog, text="Title (optional):", font=ctk.CTkFont(size=13)).pack(pady=(15, 5))
+            title_entry = ctk.CTkEntry(dialog, width=260)
+            title_entry.pack()
+        else:
+            ctk.CTkLabel(dialog, text="Y-Axis:", font=ctk.CTkFont(size=13)).pack(pady=(20, 5))
+            ctk.CTkComboBox(dialog, variable=y_var, values=list(shown_names), width=220).pack()
+            title_entry = None
 
-        # Grid Option
+        # Optionen
+        options = ctk.CTkFrame(dialog, fg_color="transparent")
+        options.pack(pady=15)
         grid_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(dialog, text="Show grid", variable=grid_var).pack(pady=20)
+        marker_var = ctk.BooleanVar(value=False)
+        legend_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(options, text="Grid", variable=grid_var).pack(side="left", padx=5)
+        if multi:
+            ctk.CTkCheckBox(options, text="Markers", variable=marker_var).pack(side="left", padx=5)
+            ctk.CTkCheckBox(options, text="Legend", variable=legend_var).pack(side="left", padx=5)
 
         def create_plot():
-            x_name, y_name = x_var.get(), y_var.get()
-            if not x_name or not y_name:
+            x_name = shown_names.get(x_var.get())
+            if multi:
+                y_names = [shown_names[n] for n, v in y_checks.items() if v.get()]
+            else:
+                y_names = [shown_names[y_var.get()]] if y_var.get() in shown_names else []
+            if not x_name or not y_names:
                 return
 
             # Daten in Anzeige-Einheiten (z.B. °C statt K), Achsen mit Einheit
             x_data, x_unit = self._display_values(x_name, self.last_solution[x_name])
-            y_data, y_unit = self._display_values(y_name, self.last_solution[y_name])
+            series = []
+            units = set()
+            for name in y_names:
+                y_data, y_unit = self._display_values(name, self.last_solution[name])
+                units.add(y_unit)
+                label = display_name(name) + (f" [{y_unit}]" if y_unit else "")
+                series.append((label, y_data))
             x_label = display_name(x_name) + (f" [{x_unit}]" if x_unit else "")
-            y_label = display_name(y_name) + (f" [{y_unit}]" if y_unit else "")
+            if len(series) == 1:
+                y_label = series[0][0]
+            elif len(units) == 1 and next(iter(units)):
+                y_label = f"[{next(iter(units))}]"
+            else:
+                y_label = ""
+            title = title_entry.get().strip() if title_entry is not None else ""
+            if not title:
+                title = f"{', '.join(display_name(n) for n in y_names)} vs {display_name(x_name)}"
 
-            self._create_plot_window(x_data, [(display_name(y_name), y_data)], x_label, y_label,
-                                      f"{display_name(y_name)} vs {display_name(x_name)}",
-                                      grid_var.get(), False, False)
+            self._create_plot_window(x_data, series, x_label, y_label, title, grid_var.get(),
+                                     legend_var.get() and len(series) > 1, marker_var.get())
             dialog.destroy()
 
-        ctk.CTkButton(dialog, text="Plot", command=create_plot).pack(pady=20)
+        ctk.CTkButton(dialog, text="Plot", command=create_plot).pack(pady=10)
 
     def show_quick_plot_dialog(self):
-        """Vereinfachter Plot-Dialog."""
-        self.show_plot_dialog()
+        """Vereinfachter Plot-Dialog (eine X- und eine Y-Variable)."""
+        self.show_plot_dialog(multi=False)
 
     def _create_plot_window(self, x_data, y_data_list, x_label="", y_label="", title="",
                             show_grid=True, show_legend=True, show_markers=False):
@@ -1978,38 +2322,12 @@ class EquationSolverApp(ctk.CTk):
         """Zeigt Fluid-Liste."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Available Fluids")
-        dialog.geometry("400x500")
+        dialog.geometry("620x600")
 
         text = ctk.CTkTextbox(dialog, font=ctk.CTkFont(family="Courier", size=11))
         text.pack(fill="both", expand=True, padx=10, pady=10)
 
-        help_text = """=== AVAILABLE FLUIDS ===
-
-WATER / STEAM:
-  Water, water, steam, h2o
-
-AIR:
-  Air, air
-
-REFRIGERANTS (HFCs):
-  R134a, R32, R410A, R407C
-
-REFRIGERANTS (HFOs):
-  R1234yf, R1234ze(E)
-
-NATURAL REFRIGERANTS:
-  R717 / Ammonia (ammonia, nh3)
-  R744 / CO2 (co2)
-  R290 / Propane (propane)
-
-GASES:
-  Nitrogen (n2)
-  Oxygen (o2)
-  Hydrogen (h2)
-  Helium (he)
-  Argon (ar)
-  Methane (ch4)
-"""
+        help_text = fluid_help_text()
         text.insert("1.0", help_text)
         text.configure(state="disabled")
 

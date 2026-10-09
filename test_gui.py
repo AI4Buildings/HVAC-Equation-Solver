@@ -210,6 +210,109 @@ for seq in ("<Control-o>", "<Control-s>", "<Control-plus>", "<Control-minus>",
           repr(get_text()[:30]))
     if seq == "<Control-o>":
         check("<Control-o> öffnet genau einen Dialog", len(_open_calls) == n_open + 1)
+
+print("\n=== Zwischenablage: Einfügen, Kopieren, Ausschneiden ===")
+import subprocess
+# Die Tests benutzen die echte System-Zwischenablage: Textinhalt sichern und
+# am Ende wiederherstellen (Bilder o.ä. lassen sich so nicht sichern)
+_clipboard_backup = None
+if sys.platform == "darwin":
+    _clipboard_backup = subprocess.run(["pbpaste"], capture_output=True).stdout
+paste_keys = ["<<Paste>>"] + (["<Command-v>"] if sys.platform == "darwin" else ["<Control-v>"])
+for how in paste_keys:
+    set_text("x = 1\n")
+    tb.edit_reset()
+    tb.focus_force()
+    app.clipboard_clear()
+    app.clipboard_append("A = 20 cm2\nT_1 = 20 °C")
+    tb.mark_set("insert", "end")
+    tb.event_generate(how)
+    app.update()
+    check(f"Einfügen per {how}", get_text() == "x = 1\nA = 20 cm2\nT_1 = 20 °C", repr(get_text()))
+tb.event_generate("<Command-z>" if sys.platform == "darwin" else "<Control-z>")
+app.update()
+check("Rückgängig nach Einfügen", get_text() == "x = 1\n", repr(get_text()))
+set_text("q_dot = 50 W/m2")
+tb.tag_add("sel", "1.0", "1.5")
+tb.event_generate("<<Copy>>")
+app.update()
+check("Kopieren in die Zwischenablage", app.clipboard_get() == "q_dot" and get_text() == "q_dot = 50 W/m2")
+tb.tag_add("sel", "1.0", "1.8")
+tb.event_generate("<<Cut>>")
+app.update()
+check("Ausschneiden", app.clipboard_get() == "q_dot = " and get_text() == "50 W/m2", repr(get_text()))
+
+# Kopieren übergibt den Text fest an die System-Zwischenablage
+exported = []
+_original_export = main.export_to_system_clipboard
+main.export_to_system_clipboard = lambda text: exported.append(text) or True
+set_text("T_1 = 20 °C")
+tb.tag_add("sel", "1.0", "end-1c")
+tb.event_generate("<<Copy>>")
+app.update()
+main.export_to_system_clipboard = _original_export
+check("Kopieren -> Export an System-Zwischenablage", exported == ["T_1 = 20 °C"], str(exported))
+
+if sys.platform == "darwin":
+    # Echter Ablauf: kopieren, Programm beenden, danach einfügen
+    child = (
+        "import sys, warnings; warnings.filterwarnings('ignore');"
+        f"sys.path.insert(0, {os.path.dirname(os.path.abspath(__file__))!r});"
+        "from main import EquationSolverApp;"
+        "app = EquationSolverApp(); app.deiconify(); app.update();"
+        "tb = app.equations_text._textbox;"
+        "app.equations_text.insert('1.0', 'A = 20 cm² ⋅ µm'); tb.focus_force(); app.update();"
+        "tb.tag_add('sel', '1.0', 'end-1c'); tb.event_generate('<<Copy>>'); app.update();"
+        "app.destroy()")
+    subprocess.run(["pbcopy"], input=b"vorher")
+    subprocess.run([sys.executable, "-c", child], capture_output=True, timeout=60)
+    after_exit = subprocess.run(["pbpaste"], capture_output=True,
+                                env=dict(os.environ, LANG="en_US.UTF-8")).stdout.decode("utf-8")
+    check("Zwischenablage bleibt nach Programmende erhalten", after_exit == "A = 20 cm² ⋅ µm", repr(after_exit))
+    # Neu gestartetes Programm (frischer Prozess) fügt ein
+    restarted = (
+        "import sys, warnings; warnings.filterwarnings('ignore');"
+        f"sys.path.insert(0, {os.path.dirname(os.path.abspath(__file__))!r});"
+        "from main import EquationSolverApp;"
+        "app = EquationSolverApp(); app.deiconify(); app.update();"
+        "tb = app.equations_text._textbox; tb.focus_force(); app.update();"
+        "tb.event_generate('<<Paste>>'); app.update();"
+        "sys.stdout.buffer.write(app.equations_text.get('1.0', 'end-1c').encode('utf-8'));"
+        "app.destroy()")
+    pasted = subprocess.run([sys.executable, "-c", restarted], capture_output=True,
+                            timeout=60).stdout.decode("utf-8")
+    check("Nach Neustart einfügbar", pasted == "A = 20 cm² ⋅ µm", repr(pasted))
+
+# Messdaten-Spalte (z.B. aus Excel/TXT kopiert) in eine Werteliste einfügen und lösen
+set_text("T = [\n] °C\ny = 2*T")
+tb.focus_force()
+app.clipboard_clear()
+app.clipboard_append("20\r\n25\r\n30\r\n")
+tb.mark_set("insert", "1.5")
+tb.event_generate("<<Paste>>")
+app.update()
+app.solve()
+app.update()
+check("Eingefügte Messdaten-Spalte als Werteliste gelöst",
+      app.last_solution is not None and np.allclose(app.last_solution.get("T", []), [293.15, 298.15, 303.15]),
+      get_text() + " | " + app.info_label.cget("text"))
+
+# Zeitlimit: Meldung nennt den Abbruch, Teillösung wird angezeigt
+import solver as _solver_module
+_old_limit = _solver_module.SOLVE_TIME_LIMIT
+_solver_module.SOLVE_TIME_LIMIT = 3.0
+set_text("p = 1 bar\na = exp(b) + c^2 + 1 + enthalpy(water, T=T_1, p=p)/1e6\nb = exp(c) + a^2 + 1\n"
+         "c = exp(a) + b^2 + 1\nT_1 = 300 + d\nd^2 + e^2 = -1 - a^2\ne = d + f\nf*g = 1 + a\n"
+         "g = sin(f) + 1\ny = 2*k\nk = 5")
+app.solve()
+app.update()
+_solver_module.SOLVE_TIME_LIMIT = _old_limit
+check("Zeitlimit: Meldung + Teillösung in der GUI",
+      "Zeitlimit (3 s)" in app.info_label.cget("text") and "y" in app.value_labels
+      and "PARTIAL" in app.result_status_label.cget("text"), app.info_label.cget("text"))
+
+if _clipboard_backup is not None:
+    subprocess.run(["pbcopy"], input=_clipboard_backup)
 app.set_font_size(main.FONT_SIZE_DEFAULT)
 app.withdraw()
 app.update()
@@ -235,8 +338,10 @@ check("Open löscht manuelle Startwerte", app.manual_initial_values == {})
 solve("T_1 = 20 °C\np = 1 bar\nh_x = 100 kJ/kg\nh_x = enthalpy(water, T=T_x, p=p)")
 dlg = open_dialog(app.show_initial_values_dialog)
 entries = value_entries(dlg)
-auto_expected = f"{main.get_initial_from_unit(app.inferred_units.get('T_x')):.6g}"
-check("Dialog zeigt grauen Auto-Wert", len(entries) == 1 and entries[0].get() == auto_expected,
+# Auto-Startwert unbekannter Temperatur = Mittel der vorgegebenen Temperaturen (T_1 = 20 °C)
+auto_expected = "293.15"
+check("Dialog zeigt grauen Auto-Wert (Mittel der gegebenen Temperaturen)",
+      len(entries) == 1 and entries[0].get() == auto_expected,
       str([e.get() for e in entries]))
 check("Keine editierbare Einheiten-ComboBox mehr (manual_units entfernt)",
       not any(isinstance(w, ctk.CTkComboBox) for w in all_children(dlg)))
@@ -396,7 +501,7 @@ check("Temperaturdifferenz theta = 70 delta_K", shown("theta") == (70.0, "delta_
 solve("R_si = 0.13 m^2*K/W\nd_1 = 20 cm\nlambda_1 = 2.3 W/mK\nT_i = 20 °C\nT_e = -10 °C\n"
       "U = 1/(R_si + d_1/lambda_1 + 0.04)\nq = U*(T_i - T_e)\nT_si = T_i - q*R_si")
 v, u = shown("T_si")
-check("Oberflächentemperatur T_si = 4.82 °C (absolut, nicht delta_K)", close(v, 4.82164, 1e-3) and u == "degC",
+check("Oberflächentemperatur T_si = 4.82 °C (absolut, nicht delta_K)", close(v, 4.82164, 1e-3) and u == "°C",
       str((v, u)))
 v, u = shown("U")
 check("U-Wert in W/(m²K), nicht 0.0039 kW/m²K", close(v, 3.89171) and u.startswith("W/"), str((v, u)))
@@ -408,9 +513,9 @@ check("Funktion im Ausdruck: Q_dot in kW (nicht kJ/kg)", close(v, 502.096) and u
 
 solve("T = 1000 K\nlambda_max = Wien(T)\nL = 5 µm\nE_l = Eb(T, L)")
 v, u = shown("lambda_max")
-check("Wien: 2.898 µm (nicht 2.9e6 µm)", close(v, 2.89777) and u == "um", str((v, u)))
+check("Wien: 2.898 µm (nicht 2.9e6 µm)", close(v, 2.89777) and u == "µm", str((v, u)))
 v, u = shown("E_l")
-check("Eb: 7139.6 W/(m²·µm)", close(v, 7139.62) and u == "W/(m^2*um)", str((v, u)))
+check("Eb: 7139.6 W/(m²·µm)", close(v, 7139.62) and u == "W/(m^2*µm)", str((v, u)))
 check("Eingabe 5 µm wird als 5 µm angezeigt", shown("L") == (5.0, "µm"), str(shown("L")))
 
 solve("P_el = 2 MW\nUA = 500 W/K\nE = 3 MJ\nx = P_el*2")
@@ -422,12 +527,12 @@ check("Berechnete Leistung in kW (Settings)", close(v, 4000.0) and u == "kW", st
 
 solve("T = 20:10:50 °C\nh = enthalpy(water, T=T, p=1 bar)")
 check("Sweep T in °C angezeigt (nicht 293→323)",
-      app.value_labels["T"].cget("text") == "[4× 20→50]" and shown("T")[1] == "degC",
+      app.value_labels["T"].cget("text") == "[4× 20→50]" and shown("T")[1] == "°C",
       app.value_labels["T"].cget("text"))
 check("Sweep h in kJ/kg angezeigt", shown("h")[1] == "kJ/kg" and "84.01" in app.value_labels["h"].cget("text"),
       app.value_labels["h"].cget("text"))
 plot_T, plot_unit = app._display_values("T", app.last_solution["T"])
-check("Plot-Daten in Anzeige-Einheit (°C)", np.allclose(plot_T, [20, 30, 40, 50]) and plot_unit == "degC")
+check("Plot-Daten in Anzeige-Einheit (°C)", np.allclose(plot_T, [20, 30, 40, 50]) and plot_unit == "°C")
 
 solve("lambda = 0.6 W/mK\nd = 0.1 m\nalpha = 2*lambda/d")
 check("Schlüsselwort 'lambda' als Variable, Anzeige als 'lambda'",
@@ -445,6 +550,159 @@ solve("m_dot = 2.78\np_1 = 3000000\nT_1 = 723.15\nh_1 = enthalpy(water, T=T_1, p
 check("Reines Zahlen-Blatt: W_dot ohne (falsches) kJ/kg-Label", shown("W_dot")[1] == "-",
       str(shown("W_dot")))
 check("Reines Zahlen-Blatt: h_1 = enthalpy(...) weiterhin in kJ/kg", shown("h_1")[1] == "kJ/kg")
+
+solve("alpha=10 W/m2K\n\nlambda=0.04 W/mK\n\nA=20cm2\n\nT_1=20°C\nT_2=15°C\n\nQ_dot=A*alpha*(T_1-T_2)")
+v, u = shown("Q_dot")
+check("Exponent ohne ^: Q_dot = 0.1 W mit Einheit (kW-Einstellung)", close(v, 1e-4) and u == "kW", str((v, u)))
+check("Eingabe 20cm2 wird als '20 cm2' angezeigt", shown("A") == (20.0, "cm2"), str(shown("A")))
+
+ROHR = """h_e=11 W/m2K
+T_e=10°C
+h_i=2000 W/m2K
+T_i=90 °C
+lambda_1=50 W/mK
+lambda_2=0.04 W/mK
+r_1=0.1 m
+r_2=0.104 m
+q_dot=50 W/m2
+
+r_3=r_2+s
+
+L=1 m
+U_r_1  = 1 /( r_1  *( (1/r_1/h_i) + ln(r_2/r_1)/lambda_1 + ln(r_3/r_2)/lambda_2  +  (1/r_3/h_e) ) )
+q_dot=U_r_1*2*r_1*pi*L*(T_i-T_e)"""
+solve(ROHR)
+check("Unit-Warnung angezeigt", app.unit_warning_label.cget("text") == "⚠ UNIT WARNINGS (1)",
+      app.unit_warning_label.cget("text"))
+section = app.unit_warnings_content
+section.grid_remove()                       # Sektion zugeklappt
+app.tab_view.set("Results")
+app.unit_warning_label._label.event_generate("<Button-1>")   # Klick auf das Label
+app.update()
+check("Klick auf UNIT WARNINGS öffnet Residuals-Tab", app.tab_view.get() == "Residuals", app.tab_view.get())
+check("Klick klappt die Warnungs-Sektion auf", bool(section.winfo_manager()))
+warning_texts = [w.cget("text") for w in all_children(section) if isinstance(w, ctk.CTkLabel)]
+check("Warnung nennt die Variable (q_dot)", "Variable: q_dot" in warning_texts, str(warning_texts))
+check("Warnung mit lesbaren Einheiten (W/m^2 vs. W)",
+      any("links: W/m^2 ≠ rechts: W" in t for t in warning_texts), str(warning_texts))
+check("Kein sinnloses 'Faktor 0×'", not any("Faktor" in t for t in warning_texts), str(warning_texts))
+app.tab_view.set("Results")
+
+solve(ROHR.replace(" W/m2K", "").replace(" W/mK", "").replace("°C", "").replace(" °C", "")
+      .replace(" W/m2", "").replace(" m\n", "\n").replace("r_3=r_2+s", "r_3=r_2+s\ns=0.1"))
+info = app.info_label.cget("text")
+check("Widerspruch nennt vorgegebenen und berechneten Wert",
+      "q_dot ist vorgegeben (50)" in info and "29.0642" in info and "überbestimmt" in info, info)
+
+solve(ROHR.replace("r_1  *( (1/r_1/h_i)", "r_1  ( (1/r_1/h_i)"))
+info = app.info_label.cget("text")
+check("Fehlendes '*': Zeile + Fundstelle statt 'Unvollständig'",
+      "Zeile 14:" in info and "'r_1' ist keine Funktion" in info and "r_1  ▶(" in info, info)
+
+ROHR_TYPO = ROHR.replace("q_dot=50 W/m2", "q_dot=50 W").replace("(1/r_1/h_i)", "(1/r_1h_i)")
+solve(ROHR_TYPO)
+info = app.info_label.cget("text")
+check("Tippfehler r_1h_i: Strukturdiagnose statt Zählung",
+      "Unterbestimmt" in info and "r_1h_i, r_3, s" in info and "Zeilen 11, 14" in info, info)
+check("Tippfehler r_1h_i: Namens-Hinweis in der Meldung", "r_1 und h_i" in info, info)
+
+solve(ROHR_TYPO.replace("r_3=r_2+s", "r_3=r_2+s\ns=0.1"))
+check("Formal lösbar mit Tippfehler: Lösung + Hinweis-Label",
+      "SOLUTION FOUND" in app.result_status_label.cget("text")
+      and app.hints_label.cget("text") == "ⓘ HINWEISE (1)", app.hints_label.cget("text"))
+app.deiconify()
+app.update()
+app.tab_view.set("Results")
+app.update()
+app.hints_label._label.event_generate("<Button-1>")
+app.update()
+check("Klick auf HINWEISE öffnet Residuals-Tab", app.tab_view.get() == "Residuals", app.tab_view.get())
+hint_texts = [w.cget("text") for w in all_children(app.hints_content) if isinstance(w, ctk.CTkLabel)]
+check("Hinweis-Sektion nennt r_1h_i", any("r_1h_i" in t for t in hint_texts), str(hint_texts))
+app.tab_view.set("Results")
+app.withdraw()
+app.update()
+
+solve("a = 2\nexp(z) = -a\nb = a*3")
+check("Numerisch unlösbar: verständliche Meldung statt 'Unvollständig'",
+      "Keine numerische Lösung für z (Zeile 2)" in app.info_label.cget("text"), app.info_label.cget("text"))
+
+print("\n=== Settings, Plot-Dialoge, Fluidliste ===")
+solve("T = 20 °C\ndT = 10 K\nT_2 = T + dT\np = 2 bar")
+check("Anzeige vorher: T_2 = 30 °C", shown("T_2") == (30.0, "°C"), str(shown("T_2")))
+app.temp_display_unit.set("K")
+app.pressure_display_unit.set("Pa")
+app.update()
+check("Settings-Wechsel aktualisiert sofort: T_2 = 303.15 K", shown("T_2") == (303.15, "K"), str(shown("T_2")))
+check("Settings-Wechsel aktualisiert sofort: p = 200000 Pa", shown("p") == (200000.0, "Pa"), str(shown("p")))
+app.temp_display_unit.set("degC")
+app.pressure_display_unit.set("bar")
+app.update()
+check("Zurück auf °C", shown("T_2") == (30.0, "°C"), str(shown("T_2")))
+
+FIGS = []
+class _RecordingFigure(main.Figure):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        FIGS.append(self)
+main.Figure = _RecordingFigure
+solve("T = 20:20:100 °C\np_s = pressure(water, T=T, x=0)\nh = enthalpy(water, T=T, x=0)")
+app.deiconify()
+app.update()
+dialog = open_dialog(app.show_plot_dialog)
+combos = [w for w in all_children(dialog) if isinstance(w, ctk.CTkComboBox)]
+boxes = {w.cget("text"): w for w in all_children(dialog) if isinstance(w, ctk.CTkCheckBox)}
+combos[0].set("T")
+for name, box in boxes.items():
+    if name in ("p_s", "h") and not box.get():
+        box.toggle()
+    elif name not in ("p_s", "h", "Grid", "Legend") and box.get():
+        box.toggle()
+dialog_button(dialog, "Plot").invoke()
+app.update()
+ax = FIGS[-1].axes[0] if FIGS else None
+check("New Plot Window: zwei Kurven (p_s, h) über T in °C",
+      ax is not None and len(ax.lines) == 2 and np.allclose(ax.lines[0].get_xdata(), [20, 40, 60, 80, 100])
+      and ax.get_xlabel() == "T [°C]", str(ax and [l.get_label() for l in ax.lines]))
+check("New Plot Window: Legende mit Einheiten",
+      ax is not None and ax.get_legend() is not None
+      and {t.get_text() for t in ax.get_legend().get_texts()} == {"h [kJ/kg]", "p_s [bar]"},
+      str(ax and ax.get_legend() and [t.get_text() for t in ax.get_legend().get_texts()]))
+dialog = open_dialog(app.show_quick_plot_dialog)
+combos = [w for w in all_children(dialog) if isinstance(w, ctk.CTkComboBox)]
+combos[0].set("T")
+combos[1].set("p_s")
+dialog_button(dialog, "Plot").invoke()
+app.update()
+ax = FIGS[-1].axes[0]
+check("Quick Plot: eine Kurve p_s [bar] über T [°C]",
+      len(ax.lines) == 1 and ax.get_xlabel() == "T [°C]" and ax.get_ylabel() == "p_s [bar]",
+      f"{ax.get_xlabel()} / {ax.get_ylabel()}")
+for window in app.winfo_children():
+    if isinstance(window, ctk.CTkToplevel):
+        window.destroy()
+app.withdraw()
+app.update()
+
+fluids_text = main.fluid_help_text()
+import CoolProp.CoolProp as _CP
+all_fluids = _CP.get_global_param_string("fluids_list").split(",")
+check("Fluidliste enthält alle CoolProp-Fluide", all(f in fluids_text for f in all_fluids),
+      str([f for f in all_fluids if f not in fluids_text][:5]))
+check("Fluidliste enthält alle Kurznamen", all(a in fluids_text for a in __import__("thermodynamics").FLUID_ALIASES))
+
+solve("e_1 = 0.94:-0.35:0.24\nT = 300 + 10*e_1")
+check("Sweep-Anzeige: erster -> letzter Punkt (fallend)",
+      app.value_labels["e_1"].cget("text") == "[3× 0.94→0.24]", app.value_labels["e_1"].cget("text"))
+solve("C_r = 0.5:0.5:1.5\neps = (1-exp(-2*(1-C_r)))/(1-C_r*exp(-2*(1-C_r)))")
+check("Sweep mit gescheitertem Punkt: Status PARTIAL + Grund",
+      "PARTIAL" in app.result_status_label.cget("text") and "Punkt 2" in app.info_label.cget("text"),
+      app.result_status_label.cget("text") + " | " + app.info_label.cget("text"))
+
+solve("A = 20 qcm\nQ = A*2")
+check("Unbekannte Einheit -> Fehlermeldung statt falscher Wert",
+      "Unbekannte Einheit 'qcm'" in app.info_label.cget("text") and app.last_solution is None,
+      app.info_label.cget("text"))
 
 solve("T_1 = 20 °C\np = 1 bar\nh_1 = enthalpy(water, T=T_1, p=p)\nexp(z) = -1")
 v, u = shown("h_1")
