@@ -69,171 +69,169 @@ HUMID_AIR_UNITS = {
     'p_w': 'Pa',              # SI: Pa
 }
 
-# Einheiten für Strahlungs-Funktionen
+# Einheiten für Strahlungs-Funktionen (ANZEIGE-Einheiten; die Funktionen
+# liefern intern SI: Eb in W/m³, Wien in m - gleiche Dimension wie das Label)
 RADIATION_UNITS = {
-    'eb': 'W/(m^2*um)',              # Spektrale Emissionsleistung [W/(m²·µm)]
+    'eb': 'W/(m^2*um)',              # Spektrale Emissionsleistung, intern W/m³
     'blackbody': '',                  # Anteil (dimensionslos, 0-1)
     'blackbody_cumulative': '',       # Kumulativer Anteil (dimensionslos, 0-1)
-    'wien': 'um',                     # Wellenlänge maximaler Emission [µm]
+    'wien': 'um',                     # Wellenlänge maximaler Emission, intern m
     'stefan_boltzmann': 'W/m^2',      # Gesamtemission [W/m²]
 }
 
-# Typische Startwerte basierend auf Einheiten (SI-Einheiten)
-# Diese werden für die automatische Initialisierung von Variablen verwendet
+# Kohärente SI-Einheiten für interne Berechnungen: (pint-Einheit, Label).
+# Die Auswahl erfolgt über die DIMENSION; bei gleicher Dimension gewinnt der
+# erste Eintrag (z.B. J/kg vor m²/s², Pa vor J/m³, W/m³ als SI-Form von Eb).
+# Alle Größen in SI, damit Einheiten-Arithmetik korrekt funktioniert:
+#   p*v = R*T  →  Pa * m³/kg = J/(kg·K) * K  →  konsistent!
+STANDARD_UNITS = [
+    ('kelvin', 'K'),                     # Temperatur
+    ('kg/s', 'kg/s'),                    # Massenstrom
+    ('m^3/s', 'm^3/s'),                  # Volumenstrom
+    ('kg/m^3', 'kg/m^3'),                # Dichte
+    ('Pa', 'Pa'),                        # Druck
+    ('J/kg', 'J/kg'),                    # Spez. Energie / Enthalpie
+    ('J/(kg*K)', 'J/(kg*K)'),            # Spez. Wärme / Entropie
+    ('W', 'W'),                          # Leistung
+    ('J', 'J'),                          # Energie
+    ('N', 'N'),                          # Kraft
+    ('m/s^2', 'm/s^2'),                  # Beschleunigung
+    ('kg', 'kg'),                        # Masse
+    ('m', 'm'),                          # Länge (auch µm, nm, mm -> m)
+    ('m^2', 'm^2'),                      # Fläche
+    ('m^3', 'm^3'),                      # Volumen
+    ('s', 's'),                          # Zeit
+    ('1/s', '1/s'),                      # Frequenz
+    ('m/s', 'm/s'),                      # Geschwindigkeit
+    ('m^3/kg', 'm^3/kg'),                # Spez. Volumen
+    ('Pa*s', 'Pa*s'),                    # Dynamische Viskosität
+    ('m^2/s', 'm^2/s'),                  # Kinematische Viskosität, Temperaturleitfähigkeit
+    ('W/m^2', 'W/m^2'),                  # Wärmestromdichte
+    ('W/m^3', 'W/m^3'),                  # Spektrale Emission Eb (SI), Leistungsdichte
+    ('W/(m^2*K)', 'W/(m^2*K)'),          # Wärmeübergangskoeffizient, U-Wert
+    ('W/(m*K)', 'W/(m*K)'),              # Wärmeleitfähigkeit
+    ('W/(m^2*K^4)', 'W/(m^2*K^4)'),      # Stefan-Boltzmann
+    ('m^2*K/W', 'm^2*K/W'),              # Wärmedurchlasswiderstand
+    ('K/W', 'K/W'),                      # Thermischer Widerstand
+    ('W/K', 'W/K'),                      # Wärmedurchgangsfähigkeit UA
+    ('J/K', 'J/K'),                      # Wärmekapazität, Entropie
+    ('1/K', '1/K'),                      # Ausdehnungskoeffizient
+    ('kg/(m^2*s)', 'kg/(m^2*s)'),        # Massenstromdichte
+    ('1/m', '1/m'),                      # Rippenparameter m
+]
+
+# Typische Startwerte (in SI!) für die automatische Initialisierung,
+# exakte Treffer auf das Einheiten-Label
 UNIT_TYPICAL_VALUES = {
-    # Temperatur
     'K': 350.0,                  # ~77°C - typische HVAC-Temperatur
-
-    # Druck
+    'delta_K': 10.0,             # Temperaturdifferenz
     'Pa': 500000.0,              # 5 bar - typischer HVAC-Druck
-
-    # Spezifische Größen (Enthalpie, innere Energie)
     'J/kg': 1000000.0,           # 1000 kJ/kg - typische Enthalpie
     'J/(kg*K)': 3000.0,          # 3 kJ/(kg·K) - typische spez. Wärmekapazität
-
-    # Massenströme
-    'kg/s': 1.0,                 # 1 kg/s Massenstrom
-    'kg/h': 3600.0,              # 3600 kg/h = 1 kg/s
-
-    # Leistung/Energie
-    'W': 100000.0,               # 100 kW
-    'J': 100000.0,               # 100 kJ
-
-    # Volumenströme
-    'm^3/s': 0.1,                # 0.1 m³/s
-    'm^3/h': 360.0,              # 360 m³/h = 0.1 m³/s
-
-    # Stoffeigenschaften
-    'kg/m^3': 1.0,               # 1 kg/m³ (Luft-Dichte)
-    'm^3/kg': 0.5,               # 0.5 m³/kg spez. Volumen
-    'Pa*s': 0.001,               # 0.001 Pa·s dynamische Viskosität
-    'W/(m*K)': 0.5,              # 0.5 W/(m·K) Wärmeleitfähigkeit
-    'm/s': 300.0,                # 300 m/s Schallgeschwindigkeit
-
-    # Geometrie
-    'm': 1.0,                    # 1 m Länge
-    'm^2': 1.0,                  # 1 m² Fläche
-    'm^3': 1.0,                  # 1 m³ Volumen
-
-    # Mechanik
-    'N': 100.0,                  # 100 N Kraft
-    'm/s^2': 9.81,               # 9.81 m/s² Beschleunigung (Erdbeschleunigung)
-
-    # Wärmeübertragung
-    'W/m^2': 1000.0,             # 1000 W/m² Wärmestromdichte
-    'W/(m^2*K)': 10.0,           # 10 W/(m²·K) Wärmeübergangskoeffizient
-
-    # Strahlung
-    'um': 5.0,                   # 5 µm Wellenlänge
-    'W/(m^2*um)': 1000.0,        # Spektrale Emissionsleistung
-
-    # Zeit
-    's': 1.0,                    # 1 Sekunde
-    'h': 1.0,                    # 1 Stunde
+    'kg/kg': 0.01,               # Feuchtebeladung
+    'um': 5e-6,                  # Wellenlänge 5 µm (intern in m)
+    'W/(m^2*um)': 1e9,           # Spektrale Emission, intern W/m³ (= 1000 W/(m²·µm))
 }
+
+# Typische Startwerte (in SI) nach Dimension, für alle anderen Labels
+# (z.B. 'kW', 'kJ/kg', 'kilogram / second', 'W/m^2K')
+_TYPICAL_BY_DIMENSION = [
+    ('kelvin', 350.0),           # Temperatur
+    ('Pa', 500000.0),            # Druck
+    ('J/kg', 1000000.0),         # Spezifische Energie
+    ('J/(kg*K)', 3000.0),        # Spezifische Wärme
+    ('kg/s', 1.0),               # Massenstrom
+    ('W', 100000.0),             # Leistung (100 kW)
+    ('J', 100000.0),             # Energie (100 kJ)
+    ('m^3/s', 0.1),              # Volumenstrom
+    ('kg/m^3', 1.0),             # Dichte (Luft)
+    ('m^3/kg', 0.5),             # Spez. Volumen
+    ('Pa*s', 0.001),             # Dynamische Viskosität
+    ('m^2/s', 1e-5),             # Kinematische Viskosität (Luft ~1.5e-5)
+    ('W/(m*K)', 0.5),            # Wärmeleitfähigkeit
+    ('m/s', 300.0),              # Schallgeschwindigkeit
+    ('m', 1.0),                  # Länge
+    ('m^2', 1.0),                # Fläche
+    ('m^3', 1.0),                # Volumen
+    ('N', 100.0),                # Kraft
+    ('m/s^2', 9.81),             # Beschleunigung
+    ('W/m^2', 1000.0),           # Wärmestromdichte
+    ('W/m^3', 1e9),              # Spektrale Emission (SI)
+    ('W/(m^2*K)', 10.0),         # Wärmeübergangskoeffizient
+    ('W/(m^2*K^4)', 5.67e-8),    # Stefan-Boltzmann
+    ('m^2*K/W', 0.1),            # Wärmedurchlasswiderstand
+    ('K/W', 0.1),                # Thermischer Widerstand
+    ('W/K', 100.0),              # UA-Wert
+    ('J/K', 1000.0),             # Wärmekapazität
+    ('1/K', 3.4e-3),             # Ausdehnungskoeffizient (ideales Gas ~1/T)
+    ('s', 1.0),                  # Zeit
+    ('1/s', 1.0),                # Frequenz
+    ('kg', 1.0),                 # Masse
+]
+
+_DIMENSIONALITY_CACHE = {}
+
+
+def _dimensionality(pint_unit: str):
+    """Dimension einer pint-Einheit (gecacht)."""
+    if pint_unit not in _DIMENSIONALITY_CACHE:
+        _DIMENSIONALITY_CACHE[pint_unit] = ureg.Quantity(1.0, pint_unit).dimensionality
+    return _DIMENSIONALITY_CACHE[pint_unit]
 
 
 def get_initial_from_unit(unit_str: str) -> float:
     """
-    Liefert einen typischen Startwert basierend auf der Einheit.
+    Liefert einen typischen Startwert (in SI) basierend auf der Einheit.
 
     Diese Funktion ist generisch und hängt NICHT von Variablennamen ab.
-    Stattdessen wird die physikalische Größe aus der Einheit abgeleitet.
+    Stattdessen wird die physikalische Größe aus der Einheit abgeleitet -
+    über die DIMENSION, nicht über Teilstrings (sonst würde z.B. 'kg/s' oder
+    '1/kelvin' wegen des enthaltenen 'k' den Temperatur-Startwert 350 bekommen).
 
     Args:
-        unit_str: Einheit als String (z.B. 'K', 'Pa', 'J/kg')
+        unit_str: Einheit als String (z.B. 'K', 'Pa', 'J/kg', 'kW')
 
     Returns:
-        Typischer Startwert für diese Einheit
+        Typischer Startwert für diese Einheit in SI
 
     Examples:
         >>> get_initial_from_unit('K')
         350.0
-        >>> get_initial_from_unit('Pa')
-        500000.0
-        >>> get_initial_from_unit('J/kg')
-        1000000.0
+        >>> get_initial_from_unit('kW')
+        100000.0
         >>> get_initial_from_unit('')  # dimensionslos
         0.5
     """
-    if not unit_str or unit_str in ('', 'dimensionless', '???'):
+    if not unit_str or unit_str in ('dimensionless', '???'):
         # Dimensionslose Größen: Wirkungsgrad, Qualität, relative Feuchte
         return 0.5
 
-    # Normalisiere Einheit für Vergleich
     unit_normalized = unit_str.strip()
 
-    # Exakter Match
+    # Exakter Treffer
     if unit_normalized in UNIT_TYPICAL_VALUES:
         return UNIT_TYPICAL_VALUES[unit_normalized]
 
-    # Versuche partielle Matches (für Varianten wie 'J/(kg*K)' vs 'J/(kg·K)')
-    unit_lower = unit_normalized.lower().replace(' ', '').replace('·', '*')
+    # Temperaturdifferenz (delta_K, delta_degC, ...): Größenordnung 10 K, nicht 350 K
+    if 'delta' in unit_normalized.lower():
+        return 10.0
 
-    for pattern, value in UNIT_TYPICAL_VALUES.items():
-        pattern_normalized = pattern.lower().replace(' ', '').replace('·', '*')
-        if pattern_normalized in unit_lower or unit_lower in pattern_normalized:
-            return value
-
-    # Versuche dimensionale Analyse mit pint
+    # Dimensionsanalyse mit pint
     try:
-        quantity = ureg.Quantity(1.0, normalize_unit(unit_str))
-        dim = quantity.dimensionality
-
-        # Prüfe bekannte Dimensionen
-        if dim == ureg.kelvin.dimensionality:
-            return 350.0  # Temperatur
-        if dim == ureg.pascal.dimensionality:
-            return 500000.0  # Druck
-        if dim == ureg('J/kg').dimensionality:
-            return 1000000.0  # Spezifische Energie
-        if dim == ureg('J/(kg*K)').dimensionality:
-            return 3000.0  # Spezifische Wärme
-        if dim == ureg('kg/s').dimensionality:
-            return 1.0  # Massenstrom
-        if dim == ureg.watt.dimensionality:
-            return 100000.0  # Leistung
-        if dim == ureg('kg/m^3').dimensionality:
-            return 1.0  # Dichte
-        if dim == ureg('m^3/kg').dimensionality:
-            return 0.5  # Spez. Volumen
-        if dim == ureg.meter.dimensionality:
-            return 1.0  # Länge
-        if dim == ureg('m^2').dimensionality:
-            return 1.0  # Fläche
-        if dim == ureg('m^3').dimensionality:
-            return 1.0  # Volumen
-        if quantity.dimensionless:
-            return 0.5  # Dimensionslos
-
+        quantity = ureg.Quantity(1.0, normalize_unit(unit_normalized))
     except Exception:
-        pass
+        return 1.0
+
+    if quantity.dimensionless:
+        # Feuchtebeladung (kg/kg, g/kg) ~ 0.01, sonst Wirkungsgrad/Qualität/rel. Feuchte
+        return 0.01 if 'gram' in str(quantity.units) else 0.5
+
+    for pint_unit, value in _TYPICAL_BY_DIMENSION:
+        if quantity.dimensionality == _dimensionality(pint_unit):
+            return value
 
     # Fallback: 1.0 ist ein neutraler Startwert
     return 1.0
-
-# Standard-Einheiten für HVAC-Berechnungen
-# Diese Einheiten werden für interne Berechnungen verwendet
-# Alle Größen in SI-Basiseinheiten, damit Einheiten-Arithmetik korrekt funktioniert:
-#   p*v = R*T  →  Pa * m³/kg = J/(kg·K) * K  →  konsistent!
-STANDARD_UNITS = {
-    # Dimension -> (Ziel-Einheit, pint-kompatibel)
-    '[temperature]': ('K', 'kelvin'),            # Temperatur in K
-    '[mass] / [time]': ('kg/s', 'kg/s'),         # Massenstrom in kg/s
-    '[length] ** 3 / [time]': ('m^3/s', 'm^3/s'), # Volumenstrom in m³/s
-    '[mass] / [length] ** 3': ('kg/m^3', 'kg/m^3'), # Dichte in kg/m³
-    '[mass] / [length] / [time] ** 2': ('Pa', 'Pa'),  # Druck in Pa (SI!)
-    '[length] ** 2 / [time] ** 2': ('J/kg', 'J/kg'),  # Spez. Energie in J/kg (SI!)
-    '[length] ** 2 / [time] ** 2 / [temperature]': ('J/(kg*K)', 'J/(kg*K)'),  # Spez. Wärme (SI!)
-    '[mass] * [length] ** 2 / [time] ** 3': ('W', 'W'),  # Leistung in W (SI!)
-    '[mass] * [length] ** 2 / [time] ** 2': ('J', 'J'),  # Energie in J (SI!)
-    '[mass] * [length] / [time] ** 2': ('N', 'N'),  # Kraft in N (SI!)
-    '[length] / [time] ** 2': ('m/s^2', 'm/s^2'),  # Beschleunigung in m/s² (SI!)
-    '[mass]': ('kg', 'kg'),                      # Masse in kg
-    '[length]': ('m', 'm'),                      # Länge in m
-    '[time]': ('s', 's'),                        # Zeit in s
-    '[time] ** -1': ('1/s', '1/s'),              # Frequenz
-}
 
 
 # Kompatible Einheiten für Dropdown-Menüs
@@ -263,9 +261,12 @@ COMPATIBLE_UNITS = {
     'lb': ['lb', 'kg', 'g'],
 
     # Länge
-    'm': ['m', 'cm', 'mm', 'km', 'inch', 'ft'],
+    'm': ['m', 'cm', 'mm', 'um', 'nm', 'km', 'inch', 'ft'],
     'cm': ['cm', 'm', 'mm', 'inch'],
-    'mm': ['mm', 'cm', 'm', 'inch'],
+    'mm': ['mm', 'cm', 'm', 'um', 'inch'],
+    'um': ['um', 'nm', 'mm', 'm'],
+    'micrometer': ['um', 'nm', 'mm', 'm'],
+    'nm': ['nm', 'um', 'mm', 'm'],
     'km': ['km', 'm', 'mile'],
     'inch': ['inch', 'cm', 'mm', 'm', 'ft'],
     'ft': ['ft', 'm', 'inch'],
@@ -345,33 +346,38 @@ VALUE_WITH_UNIT_PATTERN = re.compile(
 
 def _convert_to_standard(quantity) -> Tuple[float, str]:
     """
-    Konvertiert eine pint Quantity zur Standard-Einheit für HVAC-Berechnungen.
+    Konvertiert eine pint Quantity in die kohärente SI-Einheit für Berechnungen.
+
+    Jede Einheit wird nach SI umgerechnet - auch solche ohne benannte
+    Standard-Einheit (dann in pint-Basiseinheiten). Früher wurde bei unbekannter
+    Dimension der Original-Zahlenwert behalten (50 cm² -> 50, 2 L -> 2,
+    1 kW/m² -> 1), was Rechenergebnisse um Zehnerpotenzen verfälschte.
 
     Args:
         quantity: pint Quantity
 
     Returns:
-        (wert, einheit) in Standard-Einheit
+        (wert, einheit) in SI; einheit ist ein Label wie 'K', 'W/(m^2*K)', 'delta_K'
     """
     try:
-        # Spezialfall: µm für Strahlungsfunktionen nicht konvertieren
-        # Die Blackbody/Eb/Wien-Funktionen erwarten Wellenlängen in µm
-        unit_str = str(quantity.units)
-        if unit_str in ('micrometer', 'um', 'µm', 'micron'):
-            return (float(quantity.magnitude), 'µm')
+        units_str = str(quantity.units)
 
-        # K ist jetzt Standard für Temperatur - kein Spezialfall mehr nötig
+        # Temperaturdifferenz: bleibt Differenz (kein Offset), Label delta_K
+        if 'delta_' in units_str:
+            return (float(quantity.to('delta_degC').magnitude), 'delta_K')
 
-        dim_str = str(quantity.dimensionality)
+        # Dimensionslos (inkl. kg/kg, g/kg): Zahlenwert ohne Einheiten-Präfix
+        if quantity.dimensionless:
+            label = 'kg/kg' if 'gram' in units_str else ''
+            return (float(quantity.to('dimensionless').magnitude), label)
 
-        # Suche passende Standard-Einheit
-        for dim_pattern, (target_unit, pint_unit) in STANDARD_UNITS.items():
-            if dim_str == dim_pattern:
-                converted = quantity.to(pint_unit)
-                return (float(converted.magnitude), target_unit)
+        for pint_unit, label in STANDARD_UNITS:
+            if quantity.dimensionality == _dimensionality(pint_unit):
+                return (float(quantity.to(pint_unit).magnitude), label)
 
-        # Fallback: Behalte Original wenn keine Standard-Einheit definiert
-        return (float(quantity.magnitude), str(quantity.units))
+        # Keine benannte Standard-Einheit: trotzdem nach SI (Basiseinheiten)
+        base = quantity.to_base_units()
+        return (float(base.magnitude), str(base.units))
 
     except Exception:
         return (float(quantity.magnitude), str(quantity.units))
@@ -906,13 +912,41 @@ def get_unit_for_humidair_property(prop_name: str) -> str:
     return HUMID_AIR_UNITS.get(prop_lower, '')
 
 
+def _single_call_on_rhs(equation: str):
+    """
+    Liefert (funktionsname, argumente) wenn die RECHTE Seite der Gleichung
+    genau EIN Funktionsaufruf ist (z.B. "h = enthalpy(water, T=T, p=p)"),
+    sonst None. Klammern werden balanciert gezählt.
+    """
+    import re
+
+    if '=' not in equation:
+        return None
+    rhs = equation.split('=', 1)[1].strip()
+    match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', rhs)
+    if not match:
+        return None
+    depth = 0
+    for i in range(match.end() - 1, len(rhs)):
+        if rhs[i] == '(':
+            depth += 1
+        elif rhs[i] == ')':
+            depth -= 1
+            if depth == 0:
+                if rhs[i + 1:].strip():
+                    return None  # Nach dem Aufruf folgt noch etwas (z.B. "- 273.15")
+                return match.group(1), rhs[match.end():i]
+    return None
+
+
 def detect_unit_from_equation(equation: str, unit_values: dict = None) -> str:
     """
     Erkennt die Einheit einer Variable basierend auf der Gleichung.
 
-    Prüft ob die Gleichung eine Thermodynamik-Funktion enthält und
-    gibt die entsprechende Einheit zurück. Falls nicht, versucht
-    Einheiten durch die Berechnung zu propagieren.
+    Die Einheit einer Stoffwert-/Strahlungsfunktion wird NUR übernommen, wenn
+    die rechte Seite genau dieser eine Aufruf ist. Steht die Funktion in einem
+    größeren Ausdruck (z.B. "Q = m*(enthalpy(...) - h_1)" oder
+    "T_C = temperature(...) - 273.15"), wird stattdessen propagiert.
 
     Args:
         equation: Original-Gleichung (z.B. "h = enthalpy(water, T=T, p=p)")
@@ -923,26 +957,17 @@ def detect_unit_from_equation(equation: str, unit_values: dict = None) -> str:
     """
     import re
 
-    eq_lower = equation.lower()
-
-    # Prüfe CoolProp-Funktionen
-    for func_name, unit in COOLPROP_UNITS.items():
-        # Suche nach func_name( Pattern
-        if re.search(rf'\b{func_name}\s*\(', eq_lower):
-            return unit
-
-    # Prüfe HumidAir-Funktionen
-    if 'humidair' in eq_lower:
-        # Extrahiere die Output-Property (erstes Argument)
-        match = re.search(r'humidair\s*\(\s*([a-z_]+)', eq_lower)
-        if match:
-            prop = match.group(1)
-            return HUMID_AIR_UNITS.get(prop, '')
-
-    # Prüfe Strahlungs-Funktionen
-    for func_name, unit in RADIATION_UNITS.items():
-        if re.search(rf'\b{func_name}\s*\(', eq_lower):
-            return unit
+    call = _single_call_on_rhs(equation)
+    if call is not None:
+        func_lower = call[0].lower()
+        if func_lower in COOLPROP_UNITS:
+            return COOLPROP_UNITS[func_lower]
+        if func_lower == 'humidair':
+            match = re.match(r'\s*([a-zA-Z_]+)', call[1])
+            if match:
+                return HUMID_AIR_UNITS.get(match.group(1).lower(), '')
+        if func_lower in RADIATION_UNITS:
+            return RADIATION_UNITS[func_lower]
 
     # Versuche Einheiten-Propagation durch Berechnung
     if unit_values:
@@ -1158,10 +1183,9 @@ def _simplify_unit(unit_str: str, quantity) -> str:
             return 's'
 
         # Wenn keine bekannte Einheit, versuche in Standard-Einheit zu konvertieren
-        dim_str = str(dim)
-        for dim_pattern, (target_unit, pint_unit) in STANDARD_UNITS.items():
-            if dim_str == dim_pattern:
-                return target_unit
+        for pint_unit, label in STANDARD_UNITS:
+            if dim == _dimensionality(pint_unit):
+                return label
 
     except Exception:
         pass

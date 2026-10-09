@@ -62,7 +62,10 @@ HVAC-Equation-Solver/
 ├── radiation.py         # Blackbody radiation functions
 ├── units.py             # Unit handling and conversion (v3.0)
 ├── unit_constraints.py  # Unit propagation and consistency checking (v3.0)
-├── test_regressions.py  # Regression test suite (python3 test_regressions.py)
+├── test_regressions.py  # Regression tests: parser, solver, units
+├── test_unit_constraints.py  # Unit propagation / dimension checks
+├── test_berechnungen.py # Thermodynamics & heat transfer problems vs. reference values
+├── test_gui.py          # Headless GUI tests
 ├── CLAUDE.md            # Technical documentation
 └── README.md            # This file
 ```
@@ -244,6 +247,12 @@ Input: `T`, `p_tot`, `rh`, `w`, `p_w`, `h`
 ### Radiation
 `Eb`, `Blackbody`, `Blackbody_cumulative`, `Wien`, `Stefan_Boltzmann`
 
+Like everything else, radiation quantities are SI internally: wavelengths in m
+(`L = 5 µm` → 5e-6 m), `Eb` in W/m³ (displayed as W/(m²·µm)), `Wien` in m
+(displayed in µm). Plain numbers as wavelengths are still accepted: values < 0.01
+are taken as metres, larger ones as µm (`Eb(1000, 5)` = `Eb(1000, 5e-6)`).
+Units may also be written directly in the arguments: `Eb(500 °C, 5 µm)`.
+
 ## Unit System
 
 The solver supports automatic unit handling and propagation:
@@ -255,7 +264,13 @@ T_s = 90 °C
 p = 1 bar
 sigma = 5.67e-8 W/m^2K^4
 L = 4 µm
+A = 50 cm^2
+V = 200 L
 ```
+
+Every unit is converted to SI for the calculation (also cm², L, kW/m², kW/(m²K),
+mPa·s, mm²/s, µm). Python keywords may be used as variable names, e.g.
+`lambda = 0.04 W/mK` for a thermal conductivity.
 
 ### Automatic Unit Propagation
 
@@ -303,12 +318,18 @@ In the Settings dialog you can configure:
 ## Tests
 
 ```bash
-python3 test_regressions.py
+python3 test_regressions.py       # parser, solver, unit system
+python3 test_unit_constraints.py  # unit propagation and dimension checks
+python3 test_berechnungen.py      # 59 problems, with and without units
+python3 test_gui.py               # headless GUI (briefly takes focus - don't type)
 ```
 
-Runs 46 regression tests covering the parser (assignment detection, vectors,
-unit sweeps), solver (root selection, contradiction detection, parameter
-studies) and the unit system (propagation, delta_K, offset conversions).
+`test_regressions.py` covers the parser (assignment detection, vectors, unit sweeps,
+keywords, comments), the solver (root selection, contradiction detection, parameter
+studies, tearing, determinism) and the unit system (SI conversion, start values,
+delta_K, offset conversions, radiation). `test_berechnungen.py` solves thermodynamics
+and heat-transfer problems both with and without units and compares them with
+independently computed reference values (CoolProp, analytical solutions).
 Each module also has a self-test: `python3 <module>.py`.
 
 ## License

@@ -183,6 +183,22 @@ except ImportError:
     HUMID_AIR_AVAILABLE = False
 
 
+def _as_real(value):
+    """
+    Wertet komplexe Zwischenergebnisse als ungültig (NaN).
+
+    Python liefert für negative Basis mit gebrochenem Exponenten komplexe
+    Zahlen ((-8)**(1/3) -> 1+1.73j), z.B. Ra^(1/6) bei negativem Ra während
+    der Iteration. Ohne diese Umwandlung bricht der Vorzeichenvergleich der
+    Bracket-Suche mit TypeError ab.
+    """
+    if isinstance(value, complex) or np.iscomplexobj(value):
+        if np.all(np.imag(value) == 0):
+            return np.real(value)
+        return float('nan')
+    return value
+
+
 def create_equation_function(equations: List[str], variables: List[str],
                              constants: Optional[Dict[str, float]] = None):
     """
@@ -314,6 +330,10 @@ def solve_system(
     max_iterations = len(equations) * 3 + 1
     iteration = 0
     violated_constraints = []  # Widersprüchliche Constraint-Gleichungen
+    # Gescheiterte Blöcke merken: Blöcke sind Zusammenhangskomponenten der
+    # Unbekannten, neue Werte aus anderen Blöcken ändern sie nicht - ein
+    # erneuter (teurer) Versuch nach jedem anderen gelösten Block wäre sinnlos.
+    failed_blocks = set()
 
     while remaining_equations and iteration < max_iterations:
         iteration += 1
@@ -398,11 +418,14 @@ def solve_system(
             # Versuche ALLE Blöcke (kleinster zuerst) - ein nicht-quadratischer
             # oder nicht konvergierender Block darf lösbare Blöcke nicht blockieren
             for block_eqs, block_vars in blocks:
+                block_key = frozenset(block_eqs)
                 # Prüfe ob Block quadratisch ist
-                if len(block_eqs) == len(block_vars):
+                if len(block_eqs) == len(block_vars) and block_key not in failed_blocks:
                     success, block_solution, block_msg, block_analysis = _solve_equation_block(
                         block_eqs, block_vars, known_values, context, initial_values, original_equations, inferred_units
                     )
+                    if not success:
+                        failed_blocks.add(block_key)
 
                     if success:
                         # Aktualisiere bekannte Werte
@@ -497,7 +520,7 @@ def _calculate_residual(equation: str, known_values: Dict[str, float], context: 
     try:
         local_ctx = context.copy()
         local_ctx.update(known_values)
-        result = eval(equation, {"__builtins__": {}}, local_ctx)
+        result = _as_real(eval(equation, {"__builtins__": {}}, local_ctx))
         return float(result) if np.isfinite(result) else float('inf')
     except Exception:
         return float('inf')
@@ -554,7 +577,7 @@ def _relative_residual(equation: str, values: Dict[str, float], context: dict) -
     local_ctx = context.copy()
     local_ctx.update(values)
     try:
-        res = eval(equation, {"__builtins__": {}}, local_ctx)
+        res = _as_real(eval(equation, {"__builtins__": {}}, local_ctx))
     except Exception:
         return float('inf')
     if not np.isfinite(res):
@@ -768,7 +791,7 @@ def _find_minimal_coupled_core(
                 best_eq = None
                 best_new_vars = float('inf')
 
-                for var in block_vars:
+                for var in sorted(block_vars):
                     if var in known_vars:
                         continue
                     for eq in var_to_eqs.get(var, []):
@@ -868,19 +891,20 @@ def _find_equation_blocks(
     if not eq_to_vars:
         return []
 
-    # Union-Find Struktur für Gruppierung
-    # Gruppiere Gleichungen die gemeinsame Variablen haben
-    remaining_eqs = set(eq_to_vars.keys())
+    # Gruppiere Gleichungen die gemeinsame Variablen haben.
+    # WICHTIG: Reihenfolge = Eingabereihenfolge (Listen statt Sets). Mit
+    # Set-Iteration hing die Gleichungsreihenfolge im Block - und damit, ob
+    # least_squares konvergiert - vom zufälligen Hash-Seed des Prozesses ab:
+    # dasselbe Eingabeblatt wurde mal gelöst, mal nicht.
+    remaining_eqs = list(eq_to_vars.keys())
     blocks = []
 
     while remaining_eqs:
-        # Starte mit einer beliebigen Gleichung
         current_block_eqs = set()
         current_block_vars = set()
 
-        # Nimm erste verfügbare Gleichung
-        start_eq = next(iter(remaining_eqs))
-        to_process = [start_eq]
+        # Nimm erste verfügbare Gleichung (in Eingabereihenfolge)
+        to_process = [remaining_eqs[0]]
 
         while to_process:
             eq = to_process.pop()
@@ -894,19 +918,153 @@ def _find_equation_blocks(
 
             # Finde alle anderen Gleichungen die diese Variablen verwenden
             if new_vars:
-                for other_eq in remaining_eqs - current_block_eqs:
-                    other_vars = eq_to_vars.get(other_eq, set())
-                    if other_vars & new_vars:  # Gemeinsame Variablen
+                for other_eq in remaining_eqs:
+                    if other_eq not in current_block_eqs and eq_to_vars[other_eq] & new_vars:
                         to_process.append(other_eq)
 
-        # Block gefunden
-        remaining_eqs -= current_block_eqs
-        blocks.append((list(current_block_eqs), current_block_vars))
+        # Block gefunden (Gleichungen in Eingabereihenfolge)
+        block_list = [eq for eq in remaining_eqs if eq in current_block_eqs]
+        remaining_eqs = [eq for eq in remaining_eqs if eq not in current_block_eqs]
+        blocks.append((block_list, current_block_vars))
 
-    # Sortiere nach Blockgröße (kleinste zuerst für bessere Konvergenz)
+    # Sortiere nach Blockgröße (kleinste zuerst für bessere Konvergenz; stabil)
     blocks.sort(key=lambda b: len(b[1]))
 
     return blocks
+
+
+def _direct_assignment(equation: str) -> Optional[Tuple[str, str]]:
+    """
+    Zerlegt eine Gleichung der Form "(var) - (ausdruck)" in (var, ausdruck),
+    sonst None. Der Parser erzeugt Gleichungen immer als "({links}) - ({rechts})".
+    """
+    import re
+    match = re.match(r'^\(([A-Za-z_][A-Za-z0-9_]*)\) - \(', equation)
+    if not match or not equation.endswith(')'):
+        return None
+    var = match.group(1)
+    return var, equation[len(f"({var}) - ("):-1]
+
+
+def _find_tear_candidates(
+    equations: List[str],
+    variables: Set[str],
+    known_vars: Set[str]
+) -> List[Tuple[str, List[Tuple[str, str]], str]]:
+    """
+    Sucht Tearing-Variablen für einen gekoppelten Block.
+
+    Eine Tearing-Variable v erfüllt: Wird v als bekannt angenommen, lassen sich
+    alle übrigen Blockvariablen der Reihe nach DIREKT berechnen ("var = ausdruck"),
+    und genau eine Gleichung bleibt als Residuum übrig. Der Block reduziert sich
+    damit auf EINE Gleichung in v, die mit der robusten Bracket-Suche gelöst wird.
+
+    Typisch für Wärmeübertragung: Filmtemperatur-Iteration (T_s schätzen ->
+    T_f -> Stoffwerte -> Ra -> Nu -> Wärmestrom = Vorgabe).
+
+    Returns:
+        Liste von (tear_var, [(var, ausdruck), ...], residuum_gleichung),
+        bevorzugt Variablen, die in vielen Gleichungen vorkommen.
+    """
+    variables = set(variables)
+    eq_unknowns = {eq: _get_equation_unknowns(eq, known_vars, variables) for eq in equations}
+    direct = {}
+    for eq in equations:
+        parts = _direct_assignment(eq)
+        if parts and parts[0] in variables:
+            expr_unknowns = _get_equation_unknowns(parts[1], known_vars, variables)
+            if parts[0] not in expr_unknowns:
+                direct[eq] = (parts[0], parts[1], expr_unknowns)
+
+    counts = {v: sum(1 for eq in equations if v in eq_unknowns[eq]) for v in variables}
+    candidates = []
+    for tear in sorted(variables, key=lambda v: (-counts[v], v)):
+        determined = {tear}
+        sequence = []
+        unused = list(equations)
+        progress = True
+        while progress:
+            progress = False
+            for eq in unused:
+                if eq not in direct:
+                    continue
+                var, expr, deps = direct[eq]
+                if var not in determined and deps <= determined:
+                    sequence.append((var, expr))
+                    determined.add(var)
+                    unused.remove(eq)
+                    progress = True
+                    break
+        if determined == variables and len(unused) == 1:
+            candidates.append((tear, sequence, unused[0]))
+    return candidates
+
+
+def _solve_block_by_tearing(
+    equations: List[str],
+    variables: Set[str],
+    known_values: Dict[str, float],
+    context: dict,
+    manual_initial: Optional[Dict[str, float]] = None,
+    inferred_units: Optional[Dict[str, str]] = None,
+    max_candidates: int = 3
+) -> Tuple[bool, Dict[str, float], str]:
+    """Löst einen Block über eine Tearing-Variable (siehe _find_tear_candidates)."""
+    candidates = _find_tear_candidates(equations, variables, set(known_values.keys()))
+    for tear, sequence, residual_eq in candidates[:max_candidates]:
+        def chain(x, tear=tear, sequence=sequence):
+            values = dict(known_values)
+            values[tear] = x
+            local_ctx = context.copy()
+            local_ctx.update(values)
+            for var, expr in sequence:
+                value = eval(expr, {"__builtins__": {}}, local_ctx)
+                values[var] = value
+                local_ctx[var] = value
+            return values
+
+        success, x = _solve_single_unknown(
+            residual_eq, tear, known_values, context, manual_initial, inferred_units, chain=chain
+        )
+        if not success:
+            continue
+        try:
+            values = chain(x)
+            solution = {var: float(values[var]) for var in variables}
+        except Exception:
+            continue
+        check_values = dict(known_values)
+        check_values.update(solution)
+        if all(_relative_residual(eq, check_values, context) < 1e-6 for eq in equations):
+            return True, solution, f"Block per Tearing gelöst ({tear})"
+    return False, {}, "Tearing nicht möglich"
+
+
+def _solve_core(
+    equations: List[str],
+    variables: Set[str],
+    known_values: Dict[str, float],
+    context: dict,
+    manual_initial: Optional[Dict[str, float]] = None,
+    inferred_units: Optional[Dict[str, str]] = None,
+    attempted: Optional[Set[frozenset]] = None
+) -> Tuple[bool, Dict[str, float], str]:
+    """
+    Löst einen gekoppelten Kern: zuerst per Tearing (robust gegen schlechte
+    Startwerte, z.B. bei Stoffwert-Aufrufen mit unphysikalischen Werten),
+    sonst simultan mit least_squares/fsolve.
+    """
+    if attempted is not None:
+        attempted.add(frozenset(equations))
+    if len(variables) >= 2:
+        success, solution, msg = _solve_block_by_tearing(
+            equations, variables, known_values, context, manual_initial, inferred_units
+        )
+        if success:
+            return success, solution, msg
+    return _solve_block_simultaneously(
+        equations, variables, known_values, context, manual_initial, inferred_units
+    )
 
 
 def _solve_equation_block(
@@ -941,16 +1099,21 @@ def _solve_equation_block(
     if n_eqs != n_vars:
         return False, {}, f"Block nicht quadratisch: {n_eqs} Gleichungen, {n_vars} Unbekannte", None
 
+    attempted = set()  # bereits versuchte Kerne (kein teurer Doppelversuch)
+
     # Bei größeren Blöcken: Versuche iterative Zerlegung
     if n_vars > 3:
         success, solution, msg, block_analysis = _solve_block_iteratively(
-            equations, variables, known_values, context, manual_initial, original_equations, inferred_units
+            equations, variables, known_values, context, manual_initial, original_equations,
+            inferred_units, attempted
         )
         if success:
             return success, solution, msg, block_analysis
+        if frozenset(equations) in attempted:
+            return False, {}, msg, None  # Gesamtblock wurde bereits als Kern versucht
 
-    # Fallback: Löse den gesamten Block simultan (keine interne Zerlegung)
-    success, solution, msg = _solve_block_simultaneously(
+    # Fallback: Löse den gesamten Block (Tearing, sonst simultan)
+    success, solution, msg = _solve_core(
         equations, variables, known_values, context, manual_initial, inferred_units
     )
     return success, solution, msg, None  # Keine BlockAnalysis für simultane Lösung
@@ -963,7 +1126,8 @@ def _solve_block_iteratively(
     context: dict,
     manual_initial: Optional[Dict[str, float]] = None,
     original_equations: Optional[Dict[str, str]] = None,
-    inferred_units: Optional[Dict[str, str]] = None
+    inferred_units: Optional[Dict[str, str]] = None,
+    attempted: Optional[Set[frozenset]] = None
 ) -> Tuple[bool, Dict[str, float], str, Optional[BlockAnalysis]]:
     """
     Versucht einen Block iterativ zu lösen, indem nach jeder gelösten
@@ -1075,8 +1239,9 @@ def _solve_block_iteratively(
             )
 
             if core_vars and len(core_eqs) == len(core_vars):
-                success, sub_solution, _ = _solve_block_simultaneously(
-                    core_eqs, core_vars, local_known, context, manual_initial, inferred_units
+                success, sub_solution, _ = _solve_core(
+                    core_eqs, core_vars, local_known, context, manual_initial, inferred_units,
+                    attempted
                 )
 
                 if success:
@@ -1148,7 +1313,12 @@ def _solve_block_simultaneously(
         manual_initial: Manuell vorgegebene Startwerte
         inferred_units: Aus Funktionsargumenten abgeleitete Einheiten {var: unit}
     """
+    import time
     from scipy.optimize import least_squares
+
+    # Zeitbudget: ein nicht konvergierender Block darf die GUI nicht minutenlang
+    # einfrieren (bis zu 16 Startvarianten mit Stoffwert-Aufrufen)
+    deadline = time.monotonic() + 20.0
 
     if not equations or not variables:
         return True, {}, "Leerer Block"
@@ -1176,7 +1346,7 @@ def _solve_block_simultaneously(
         results = []
         for eq in equations:
             try:
-                result = eval(eq, {"__builtins__": {}}, local_ctx)
+                result = _as_real(eval(eq, {"__builtins__": {}}, local_ctx))
                 if not np.isfinite(result):
                     result = 1e10
                 results.append(result)
@@ -1231,6 +1401,8 @@ def _solve_block_simultaneously(
 
     import warnings
     for x_start in start_variations[:15]:  # Maximal 15 Versuche
+        if time.monotonic() > deadline:
+            break
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -1265,6 +1437,8 @@ def _solve_block_simultaneously(
 
     # Fallback: Versuche fsolve mit verschiedenen Startwerten
     for x_start_norm in start_variations[:5]:
+        if time.monotonic() > deadline:
+            break
         try:
             x_start = x_start_norm * scales
             with warnings.catch_warnings():
@@ -1381,7 +1555,8 @@ def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = No
 
 def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, float],
                            context: dict, manual_initial: Optional[Dict[str, float]] = None,
-                           inferred_units: Optional[Dict[str, str]] = None) -> Tuple[bool, float]:
+                           inferred_units: Optional[Dict[str, str]] = None,
+                           chain=None) -> Tuple[bool, float]:
     """
     Löst eine Gleichung mit einer einzelnen Unbekannten.
 
@@ -1396,6 +1571,9 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
         context: Evaluierungskontext mit Funktionen
         manual_initial: Manuell vorgegebene Startwerte
         inferred_units: Aus Funktionsargumenten abgeleitete Einheiten {var: unit}
+        chain: Optional (Tearing): Funktion x -> Dict aller Werte (bekannte Werte,
+               unknown=x und daraus direkt berechnete Blockvariablen). Die
+               Gleichung wird dann mit diesen Werten ausgewertet.
 
     Returns:
         (success, value)
@@ -1406,19 +1584,27 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
     # Zeitbudget: unlösbare Gleichungen dürfen die GUI nicht minutenlang einfrieren
     deadline = time.monotonic() + 10.0
 
+    def values_at(x):
+        if chain is not None:
+            return chain(x)
+        values = dict(known_values)
+        values[unknown] = x
+        return values
+
     def func(x):
-        local_ctx = context.copy()
-        local_ctx.update(known_values)
-        local_ctx[unknown] = x
         try:
-            return eval(equation, {"__builtins__": {}}, local_ctx)
+            local_ctx = context.copy()
+            local_ctx.update(values_at(x))
+            return _as_real(eval(equation, {"__builtins__": {}}, local_ctx))
         except Exception:
             return float('inf')
 
     def rel_residual_at(x):
         """Residuum relativ zur Termgröße der Gleichung (skalenunabhängig)."""
-        values = dict(known_values)
-        values[unknown] = x
+        try:
+            values = values_at(x)
+        except Exception:
+            return float('inf')
         return _relative_residual(equation, values, context)
 
     def is_acceptable_root(x, tol=1e-9):

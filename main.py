@@ -18,7 +18,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from parser import parse_equations, validate_system
+from parser import parse_equations, validate_system, display_name, unmangle
 from solver import solve_system, solve_parametric, format_solution, SolveAnalysis
 import numpy as np
 
@@ -86,6 +86,152 @@ COLORS = {
     "border": "#2d3748",
 }
 
+# Schriftgröße des Gleichungs-Editors (pt)
+FONT_SIZE_MIN = 6
+FONT_SIZE_MAX = 36
+FONT_SIZE_DEFAULT = 16
+
+# Text der Funktionsreferenz (Help -> Function Reference).
+# Alle Werte intern in SI - Zahlen OHNE Einheit werden als SI interpretiert.
+FUNCTION_HELP_TEXT = """=== HVAC EQUATION SOLVER - FUNCTION REFERENCE ===
+
+INTERNAL UNITS (SI):
+--------------------
+All calculations use SI base units internally:
+  Temperature  K           Pressure       Pa
+  Enthalpy     J/kg        Entropy, cp    J/(kg K)
+  Energy       J           Power          W
+Inputs with units are converted automatically:
+  T = 25 °C    p = 1 bar    h = 100 kJ/kg    Q = 5 kW
+Plain numbers WITHOUT unit are SI values (p=1 means 1 Pa!).
+Results are displayed in °C, bar, kJ/kg, kW (see Settings).
+
+MATHEMATICAL FUNCTIONS:
+-----------------------
+sin(x), cos(x), tan(x)     Trigonometric (x in degrees)
+asin(x), acos(x), atan(x)  Inverse trig functions (result in degrees)
+sinh(x), cosh(x), tanh(x)  Hyperbolic functions (radians)
+exp(x)                      e^x
+ln(x)                       Natural logarithm
+log10(x)                    Base 10 logarithm
+sqrt(x)                     Square root
+abs(x)                      Absolute value
+pi                          Pi constant
+
+THERMODYNAMIC FUNCTIONS (CoolProp):
+-----------------------------------
+Syntax: function(fluid, param1=value1, param2=value2)
+
+Properties (results in SI):
+  enthalpy(...)      Specific enthalpy [J/kg]
+  entropy(...)       Specific entropy [J/(kg K)]
+  intenergy(...)     Specific internal energy [J/kg]
+  density(...)       Density [kg/m3]
+  volume(...)        Specific volume [m3/kg]
+  temperature(...)   Temperature [K]
+  pressure(...)      Pressure [Pa]
+  quality(...)       Vapor quality [-]
+  cp(...), cv(...)   Specific heat capacity [J/(kg K)]
+  viscosity(...)     Dynamic viscosity [Pa s]
+  conductivity(...)  Thermal conductivity [W/(m K)]
+  prandtl(...)       Prandtl number [-]
+  soundspeed(...)    Speed of sound [m/s]
+
+State properties (2 required; SI or with unit):
+  T = Temperature [K]        e.g. T=373.15 K or T=100 °C
+  p = Pressure [Pa]          e.g. p=1 bar or p=100000
+  h = Enthalpy [J/kg]        e.g. h=2500 kJ/kg
+  s = Entropy [J/(kg K)]     e.g. s=7 kJ/(kg*K)
+  x = Vapor quality [-]
+  rho (or d) [kg/m3], u [J/kg], v [m3/kg]
+
+Examples:
+  h = enthalpy(water, T=373.15 K, p=1 bar)   {100°C, 1 bar}
+  h = enthalpy(water, T=100 °C, p=1 bar)     {also valid}
+  rho = density(R134a, T=298.15 K, x=1)      {25°C, sat. vapor}
+
+HUMID AIR FUNCTIONS:
+--------------------
+Syntax: HumidAir(property, T=..., rh=..., p_tot=...)  (3 inputs)
+Outputs: T, T_dp, T_wb [K], h [J/kg dry air], w [kg/kg],
+         rh [-], p_w [Pa], rho_tot, rho_a, rho_w [kg/m3]
+Inputs:  T [K], p_tot [Pa], rh [-], w [kg/kg], p_w [Pa], h [J/kg]
+
+  h = HumidAir(h, T=298.15 K, rh=0.5, p_tot=1 bar)   {25°C}
+  h = HumidAir(h, T=25 °C, rh=0.5, p_tot=1 bar)      {also valid}
+  w = HumidAir(w, T=30 °C, rh=0.6, p_tot=1 bar)
+  T_dp = HumidAir(T_dp, T=25 °C, w=0.01, p_tot=1 bar)
+
+RADIATION FUNCTIONS (Blackbody):
+--------------------------------
+Temperature T in K. Wavelengths may be given with unit (µm, nm, m)
+or as plain numbers: plain values < 0.01 are taken as metres,
+otherwise as µm. Put units on variables (T_s = 500 °C,
+L = 5 µm) and pass the variables; inside the call use plain numbers.
+
+  Eb(T, lambda)              Spectral emissive power
+                             [W/m3 internally, shown as W/(m2 µm)]
+  Blackbody(T, l1, l2)       Fraction of energy in range l1..l2 [-]
+  Blackbody_cumulative(T, l) Cumulative fraction from 0 to l [-]
+  Wien(T)                    Wavelength of maximum emission
+                             [m internally, shown in µm]
+  Stefan_Boltzmann(T)        Total emissive power [W/m2]
+
+Examples:
+  T_s = 500 °C
+  L = 5 µm
+  E = Eb(T_s, L)                       {spectral power at 5 µm}
+  lambda_max = Wien(T_s)               {peak wavelength}
+  E_1 = Eb(573.15, 5)                  {300°C; plain 5 -> 5 µm}
+  f = Blackbody(1273.15, 0.4, 0.7)     {visible fraction, 1000°C}
+  E_total = Stefan_Boltzmann(373.15)   {total emission at 100°C}
+
+RESERVED VARIABLE NAMES (DO NOT USE):
+-------------------------------------
+Python keywords (cause syntax errors):
+  lambda, if, else, for, while, class, def, return,
+  import, from, as, try, except, with, pass, break,
+  continue, and, or, not, in, is, True, False, None
+
+Mathematical constants/functions (will be overwritten):
+  pi, e, sin, cos, tan, exp, ln, sqrt, abs, max, min
+
+Thermodynamic functions (case-insensitive):
+  enthalpy, entropy, density, temperature, pressure, etc.
+
+TIPS:
+  - Use descriptive names: lambda_1 instead of lambda
+  - Use subscripts: T_1, p_2, h_in, h_out
+  - For wavelength: use 'L', 'wl', or 'lambda_1'
+  - Euler's number: use exp(1) instead of e
+
+TEMPERATURE DIFFERENCES:
+------------------------
+Variables starting with "dT" or "delta" are recognized as
+temperature differences and use the unit "delta_K"
+(also for input in °C: dT_1 = 10 °C -> 10 K, no offset).
+
+Examples:
+  dT_N = 49.83 K        {Recognized as delta_K}
+  delta_T = 10 K        {Recognized as delta_K}
+  dT_log = (T1-T2)/ln((T1-T0)/(T2-T0))  {Inferred as delta_K}
+
+This avoids incorrect offset conversions (K -> °C).
+Regular temperatures (T_1, T_VL, etc.) remain in K.
+
+PARAMETRIC STUDIES (Sweeps):
+----------------------------
+Syntax: variable = start:step:end [unit]
+
+Examples:
+  x = 0:0.25:1          {0, 0.25, 0.5, 0.75, 1}
+  T = 20:5:40 °C        {20, 25, 30, 35, 40 °C}
+  p = 1:0.5:3 bar       {1, 1.5, 2, 2.5, 3 bar}
+Without unit, values are SI (T = 20:5:40 would be 20..40 K).
+
+After solving: Use Plot menu for visualization
+"""
+
 
 def _suppress_macos_warning(func):
     """Wrapper um macOS Cocoa-Warnungen bei Dateidialogen zu unterdrücken."""
@@ -119,12 +265,17 @@ class EquationSolverApp(ctk.CTk):
         # Aktueller Dateipfad
         self.current_file = None
 
-        # Schriftgröße (Standard: 14)
-        self.font_size = 14
+        # Schriftgröße (Standard: 16, Bereich FONT_SIZE_MIN..FONT_SIZE_MAX)
+        self.font_size = FONT_SIZE_DEFAULT
+
+        # Re-Entrancy-Schutz: solve() ruft self.update() auf (Fortschritt),
+        # dabei dürfen F5/Solve/New/Open/Clear keinen zweiten Lauf starten
+        self._solving = False
 
         # Gespeicherte Variablen und manuelle Startwerte
         self.known_variables = set()
         self.manual_initial_values = {}
+        self.inferred_units = {}
 
         # Letzte Lösung (für Plots und Analysis)
         self.last_solution = None
@@ -538,7 +689,8 @@ class EquationSolverApp(ctk.CTk):
         else:
             res_color = COLORS["error"]
 
-        # Equation (truncated if too long)
+        # Equation (truncated if too long; _kw_lambda -> lambda)
+        equation = unmangle(equation)
         eq_display = equation if len(equation) < 50 else equation[:47] + "..."
         eq_label = ctk.CTkLabel(
             row_frame, text=eq_display,
@@ -572,7 +724,7 @@ class EquationSolverApp(ctk.CTk):
         var_frame.pack(fill="x", padx=8, pady=(5, 2))
 
         ctk.CTkLabel(
-            var_frame, text=f"Variable: {warning.variable}",
+            var_frame, text=f"Variable: {display_name(warning.variable)}",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLORS["warning"],
             anchor="w"
@@ -701,7 +853,7 @@ class EquationSolverApp(ctk.CTk):
             max_res_frame = ctk.CTkFrame(content, fg_color="transparent")
             max_res_frame.grid(row=0, column=0, sticky="ew", pady=(0, 3))
 
-            vars_text = ", ".join(block.variables)
+            vars_text = ", ".join(display_name(v) for v in block.variables)
             if len(vars_text) > 40:
                 vars_text = vars_text[:37] + "..."
 
@@ -816,13 +968,33 @@ class EquationSolverApp(ctk.CTk):
 
     def _setup_bindings(self):
         """Richtet Keyboard-Shortcuts ein."""
-        self.bind("<Control-n>", lambda e: self.new_file())
-        self.bind("<Control-o>", lambda e: self.open_file())
-        self.bind("<Control-s>", lambda e: self.save_file())
-        self.bind("<F5>", lambda e: self.solve())
-        self.bind("<Control-plus>", lambda e: self.increase_font_size())
-        self.bind("<Control-minus>", lambda e: self.decrease_font_size())
-        self.bind("<Control-equal>", lambda e: self.increase_font_size())
+        shortcuts = {
+            "<Control-n>": self.new_file,
+            "<Control-o>": self.open_file,
+            "<Control-s>": self.save_file,
+            "<F5>": self.solve,
+            "<Control-plus>": self.increase_font_size,
+            "<Control-minus>": self.decrease_font_size,
+            "<Control-equal>": self.increase_font_size,
+        }
+
+        def make_handler(func):
+            def handler(event=None):
+                func()
+                # "break" verhindert, dass weitere Bindings (Text-Klasse,
+                # Toplevel) dasselbe Event noch einmal verarbeiten
+                return "break"
+            return handler
+
+        for sequence, func in shortcuts.items():
+            handler = make_handler(func)
+            # Fenster-weit (Fokus außerhalb des Editors)
+            self.bind(sequence, handler)
+            # Direkt am Editor: Instanz-Bindings laufen VOR den Tk-Text-
+            # Klassenbindings. Ohne "break" hier würde z.B. <Control-o> der
+            # Text-Klasse (Emacs "open line") einen Zeilenumbruch an der
+            # Cursorposition einfügen und so eine Gleichung zerteilen.
+            self.equations_text.bind(sequence, handler)
 
         # Undo/Redo bindings (works on both Windows/Linux and macOS)
         self.equations_text.bind("<Control-z>", self._undo)
@@ -834,7 +1006,7 @@ class EquationSolverApp(ctk.CTk):
 
     def set_font_size(self, size: int):
         """Setzt die Schriftgröße."""
-        self.font_size = max(8, min(24, size))
+        self.font_size = max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, int(size)))
         self.equations_text.configure(font=ctk.CTkFont(family="Courier", size=self.font_size))
         self.status_label.configure(text=f"Font size: {self.font_size}pt")
 
@@ -864,32 +1036,65 @@ class EquationSolverApp(ctk.CTk):
 
     # === Datei-Operationen ===
 
+    def _reset_document_state(self):
+        """Setzt alle dokumentbezogenen Zustände zurück (New/Open).
+
+        Ohne Reset würden Undo-Stack, manuelle Startwerte und die letzte
+        Lösung des VORHERIGEN Dokuments ins neue Dokument übernommen
+        (z.B. Ctrl+Z nach Open -> alter Inhalt -> Ctrl+S überschreibt Datei).
+        """
+        self.equations_text._textbox.edit_reset()
+        self.equations_text._textbox.edit_modified(False)
+        self.manual_initial_values = {}
+        self.known_variables = set()
+        self.inferred_units = {}
+        self.last_solution = None
+        self.last_sweep_vars = {}
+        self.last_analysis = None
+
     def new_file(self):
         """Erstellt eine neue leere Datei."""
+        if self._solving:
+            return
         self.equations_text.delete("1.0", "end")
         self.clear_results()
+        self._reset_document_state()
         self.current_file = None
         self._update_file_label()
         self.status_label.configure(text="New file")
 
+    @staticmethod
+    def _read_text_file(filepath: str) -> str:
+        """Liest eine Textdatei: UTF-8 (mit/ohne BOM), Fallback Latin-1."""
+        try:
+            with open(filepath, 'r', encoding='utf-8-sig') as f:
+                return f.read()
+        except UnicodeDecodeError:
+            # Ältere Dateien (z.B. Windows-Editor) mit '°' als Byte 0xB0
+            with open(filepath, 'r', encoding='latin-1') as f:
+                return f.read()
+
     def open_file(self):
         """Öffnet eine Datei."""
+        if self._solving:
+            return
         filetypes = [("HES Files", "*.hes"), ("Text Files", "*.txt"), ("All Files", "*.*")]
         filepath = _suppress_macos_warning(lambda: filedialog.askopenfilename(
             title="Open File", filetypes=filetypes, defaultextension=".hes"
         ))
         if filepath:
             try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                self.equations_text.delete("1.0", "end")
-                self.equations_text.insert("1.0", content)
-                self.clear_results()
-                self.current_file = filepath
-                self._update_file_label()
-                self.status_label.configure(text=f"Opened: {os.path.basename(filepath)}")
+                content = self._read_text_file(filepath)
             except Exception as e:
                 messagebox.showerror("Error", f"Could not open file:\n{e}")
+                return
+            self.equations_text.delete("1.0", "end")
+            self.equations_text.insert("1.0", content)
+            self.clear_results()
+            self._reset_document_state()
+            self.current_file = filepath
+            self._update_file_label()
+            self.status_label.configure(text=f"Opened: {os.path.basename(filepath)}")
 
     def save_file(self):
         """Speichert die aktuelle Datei."""
@@ -904,20 +1109,24 @@ class EquationSolverApp(ctk.CTk):
         filepath = _suppress_macos_warning(lambda: filedialog.asksaveasfilename(
             title="Save File", filetypes=filetypes, defaultextension=".hes"
         ))
-        if filepath:
-            self._save_to_file(filepath)
+        # Nur bei erfolgreichem Speichern den neuen Pfad übernehmen -
+        # sonst zeigt die Statusleiste "✓ Saved" für eine nie geschriebene Datei
+        if filepath and self._save_to_file(filepath):
             self.current_file = filepath
             self._update_file_label()
 
-    def _save_to_file(self, filepath: str):
-        """Speichert den Inhalt in eine Datei."""
+    def _save_to_file(self, filepath: str) -> bool:
+        """Speichert den Inhalt in eine Datei. Liefert True bei Erfolg."""
         try:
             content = self.equations_text.get("1.0", "end-1c")
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(content)
             self.status_label.configure(text=f"Saved: {os.path.basename(filepath)}")
+            return True
         except Exception as e:
             messagebox.showerror("Error", f"Could not save file:\n{e}")
+            self.status_label.configure(text="Save failed")
+            return False
 
     def _update_file_label(self):
         """Aktualisiert das Datei-Label in der Statusbar."""
@@ -929,6 +1138,30 @@ class EquationSolverApp(ctk.CTk):
     # === Lösen ===
 
     def solve(self):
+        """Löst das Gleichungssystem (mit Schutz gegen Re-Entrancy).
+
+        _solve_impl() ruft self.update() auf (Statusanzeige, Fortschritt bei
+        Parameterstudien). Dabei verarbeitete Events (F5, Solve-Button) würden
+        sonst einen zweiten, verschachtelten Lauf starten -> doppelte Zeilen
+        bzw. vermischte Ergebnisse. Solche Aufrufe werden ignoriert.
+        """
+        if self._solving:
+            return
+        self._solving = True
+        try:
+            self.solve_btn.configure(state="disabled")
+        except tk.TclError:
+            pass
+        try:
+            self._solve_impl()
+        finally:
+            self._solving = False
+            try:
+                self.solve_btn.configure(state="normal")
+            except tk.TclError:
+                pass  # Fenster wurde während des Lösens geschlossen
+
+    def _solve_impl(self):
         """Löst das Gleichungssystem."""
         self.clear_results()
         self.status_label.configure(text="Solving...")
@@ -954,21 +1187,19 @@ class EquationSolverApp(ctk.CTk):
             n_equations = len(equations)
             n_variables = len(variables)
 
-            # Spezialfall: Keine Gleichungen, aber Konstanten
-            if not valid and n_equations == 0 and initial_values:
-                self._show_results(initial_values, "Constants only", n_equations, n_variables, "OK")
-                self.last_solution = initial_values.copy()
-                self.status_label.configure(text="Constants calculated")
-                return
-
-            # Spezialfall: Keine Gleichungen, aber Sweep-Variablen
-            if not valid and n_equations == 0 and sweep_vars:
-                # Zeige nur die Sweep-Variablen als Ergebnis
-                sweep_result = {name: arr for name, arr in sweep_vars.items()}
-                n_points = len(list(sweep_vars.values())[0])
-                self._show_results(sweep_result, f"Parametric: {n_points} points", 0, 0, "OK")
-                self.last_solution = sweep_result
-                self.status_label.configure(text=f"Parametric study: {n_points} points")
+            # Spezialfall: Keine Gleichungen, nur Konstanten und/oder Sweep-Variablen
+            # (beide zusammen anzeigen - der Sweep darf nicht verloren gehen)
+            if not valid and n_equations == 0 and (initial_values or sweep_vars):
+                result = dict(initial_values)
+                result.update(sweep_vars)
+                if sweep_vars:
+                    n_points = len(next(iter(sweep_vars.values())))
+                    self._show_results(result, f"Parametric: {n_points} points", 0, 0, "OK")
+                    self.status_label.configure(text=f"Parametric study: {n_points} points")
+                else:
+                    self._show_results(result, "Constants only", 0, 0, "OK")
+                    self.status_label.configure(text="Constants calculated")
+                self.last_solution = result
                 return
 
             if not valid:
@@ -1025,88 +1256,13 @@ class EquationSolverApp(ctk.CTk):
                 success, solution, solve_msg, analysis = result
                 self.last_analysis = analysis
 
-            # Automatische Einheiten für Thermodynamik-Funktionen erkennen
-            # Zwei-Phasen-Ansatz:
-            # Phase 1: Direkte Erkennung von CoolProp/HumidAir (keine Propagation)
-            # Phase 2: Propagation für Berechnungen (mehrere Durchläufe)
-            if UNITS_AVAILABLE and success:
-                # Phase 1: Nur Thermodynamik-Funktionen (ohne Propagation)
-                for var in solution.keys():
-                    if var not in self.current_unit_values:
-                        for parsed_eq, orig_eq in original_equations.items():
-                            if parsed_eq.startswith(f"({var}) - "):
-                                # Erste Phase: nur direkte Erkennung (None = keine Propagation)
-                                detected_unit = detect_unit_from_equation(orig_eq, None)
-                                if detected_unit:
-                                    val = solution[var]
-                                    # Für Arrays: Verwende ersten Wert für UnitValue (nur für Anzeige)
-                                    # Verwende from_si_base() da der Wert in SI-Basiseinheit vorliegt
-                                    if isinstance(val, np.ndarray):
-                                        self.current_unit_values[var] = UnitValue.from_si_base(float(val[0]), detected_unit)
-                                    else:
-                                        self.current_unit_values[var] = UnitValue.from_si_base(val, detected_unit)
-                                break
+            # Einheiten der berechneten Variablen (auch bei Teillösung, damit
+            # keine rohen SI-Zahlen ohne Einheit erscheinen)
+            if UNITS_AVAILABLE and solution:
+                self._assign_result_units(solution, original_equations, unit_values, constants)
 
-                # Phase 2: Propagation für Berechnungen (max 5 Durchläufe)
-                for pass_num in range(5):
-                    found_new = False
-                    for var in solution.keys():
-                        if var not in self.current_unit_values:
-                            for parsed_eq, orig_eq in original_equations.items():
-                                if parsed_eq.startswith(f"({var}) - "):
-                                    # Versuche Propagation mit bekannten Einheiten
-                                    detected_unit = detect_unit_from_equation(orig_eq, self.current_unit_values)
-                                    if detected_unit:
-                                        val = solution[var]
-                                        # Für Arrays: Verwende ersten Wert für UnitValue
-                                        # Verwende from_si_base() da der Wert in SI-Basiseinheit vorliegt
-                                        if isinstance(val, np.ndarray):
-                                            self.current_unit_values[var] = UnitValue.from_si_base(float(val[0]), detected_unit)
-                                        else:
-                                            self.current_unit_values[var] = UnitValue.from_si_base(val, detected_unit)
-                                        found_new = True
-                                    break
-                    if not found_new:
-                        break
-
-                # Phase 2.5: Constraint-Propagation für implizite Gleichungen
-                # Mehrere Durchläufe, da neue Einheiten weitere Ableitungen ermöglichen
-                if CONSTRAINT_PROPAGATION_AVAILABLE:
-                    for propagation_pass in range(5):  # Max 5 Durchläufe
-                        # Verwende calc_unit (interne Einheit, z.B. K) für konsistente Propagation
-                        known_units = {var: uv.calc_unit for var, uv in self.current_unit_values.items()
-                                       if uv.calc_unit}
-                        # Füge Konstanten ohne Einheit als dimensionslos hinzu
-                        for var in constants:
-                            if var not in known_units:
-                                known_units[var] = ''  # dimensionslos
-
-                        inferred = propagate_all_units_complete(original_equations, known_units)
-
-                        if not inferred:
-                            break  # Keine neuen Einheiten gefunden
-
-                        found_new = False
-                        for var, unit in inferred.items():
-                            if var in solution and unit is not None:  # Auch leere Einheit (dimensionslos) akzeptieren
-                                # Aktualisiere auch wenn schon vorhanden aber ohne Einheit
-                                existing = self.current_unit_values.get(var)
-                                if existing is None or not existing.original_unit:
-                                    val = solution[var]
-                                    # Für Arrays: Verwende ersten Wert für UnitValue
-                                    # Verwende from_si_base() da der Wert in SI-Basiseinheit vorliegt
-                                    if isinstance(val, np.ndarray):
-                                        self.current_unit_values[var] = UnitValue.from_si_base(float(val[0]), unit)
-                                    else:
-                                        self.current_unit_values[var] = UnitValue.from_si_base(val, unit)
-                                    found_new = True
-
-                        if not found_new:
-                            break  # Keine neuen Einheiten hinzugefügt
-
-                # Phase 3: Einheiten-Konsistenzprüfung
+                # Einheiten-Konsistenzprüfung
                 if CONSTRAINT_PROPAGATION_AVAILABLE and analysis:
-                    # Verwende calc_unit für konsistente Prüfung
                     # WICHTIG: Auch leere Einheiten ('') bedeuten "dimensionslos" und müssen enthalten sein!
                     known_units = {var: uv.calc_unit for var, uv in self.current_unit_values.items()
                                    if uv.calc_unit is not None}
@@ -1137,10 +1293,18 @@ class EquationSolverApp(ctk.CTk):
                         else:
                             self.unit_warning_label.configure(text="")
             else:
-                self._show_error(solve_msg)
+                # Erst die Teillösung, DANACH die Meldung des Solvers anzeigen -
+                # _show_results überschreibt Status- und Info-Zeile, sonst wäre
+                # z.B. "Widersprüchliches System: ..." nie sichtbar
                 if solution:
                     self._show_results(solution, "Partial solution", n_equations, n_variables, "FAIL")
-                self.status_label.configure(text="Convergence problem")
+                    self._show_error(solve_msg, status_text="● PARTIAL SOLUTION",
+                                     status_color=COLORS["warning"])
+                else:
+                    self._show_error(solve_msg)
+                is_contradiction = "widersprüch" in (solve_msg or "").lower()
+                self.status_label.configure(
+                    text="Contradictory system" if is_contradiction else "Convergence problem")
                 # Auch bei Fehler Residuals anzeigen
                 if analysis:
                     self._update_residuals_tab(analysis)
@@ -1157,13 +1321,107 @@ class EquationSolverApp(ctk.CTk):
             self._show_error(str(e))
             self.status_label.configure(text=f"Error: {e}")
 
+    def _assign_result_units(self, solution: dict, original_equations: dict, unit_values: dict,
+                             constants: dict):
+        """
+        Bestimmt die Anzeige-Einheiten der berechneten Variablen.
+
+        Einzige Quelle ist die dimensionale Analyse (propagate_all_units_complete):
+        sie kennt die Ausgabe-Einheiten der Stoffwert-/Strahlungsfunktionen und
+        unterscheidet Temperaturdifferenzen (delta_K) von absoluten Temperaturen (K).
+        Interne Werte sind immer SI; die Einheit ist nur das Anzeige-Label.
+
+        Konstanten OHNE Einheit gelten als dimensionslos (epsilon, eta, kappa),
+        aber nur wenn das Blatt überhaupt Einheiten verwendet. In einem reinen
+        Zahlen-Blatt kann "m_dot = 2.78" genauso gut kg/s bedeuten - dort würde
+        "dimensionslos" falsche Labels erzeugen (W = m_dot*(h_1-h_2) als kJ/kg).
+        """
+        if not CONSTRAINT_PROPAGATION_AVAILABLE:
+            return
+        known_units = {var: uv.calc_unit for var, uv in unit_values.items() if uv.calc_unit}
+        if any(uv.original_unit for uv in unit_values.values()):
+            for var in constants:
+                known_units.setdefault(var, '')
+        try:
+            units = propagate_all_units_complete(original_equations, known_units)
+        except Exception:
+            return
+        for var, val in solution.items():
+            existing = self.current_unit_values.get(var)
+            if existing is not None and existing.original_unit:
+                continue  # Vom Benutzer angegebene Einheit hat Vorrang
+            unit = units.get(var)
+            if not unit or unit == 'dimensionless':
+                continue
+            try:
+                first = float(val[0]) if isinstance(val, np.ndarray) else float(val)
+                self.current_unit_values[var] = UnitValue.from_si_base(first, unit)
+            except Exception:
+                pass
+
+    # Einheiten, für die die Anzeige-Einstellungen (Settings) gelten
+    _TEMPERATURE_UNITS = {'K', 'degC', 'degF', 'kelvin', 'celsius', 'fahrenheit', '°C', '°F'}
+    _PRESSURE_UNITS = {'Pa', 'bar', 'kPa', 'MPa', 'mbar', 'atm', 'psi'}
+    _ENERGY_UNITS = {'J', 'kJ'}
+    _POWER_UNITS = {'W', 'kW'}
+    _SPECIFIC_ENERGY_UNITS = {'J/kg', 'kJ/kg'}
+    _SPECIFIC_HEAT_UNITS = {'J/(kg*K)', 'kJ/(kg*K)', 'J/kgK', 'kJ/kgK', 'J/kg/K', 'kJ/kg/K',
+                            'J/(kg·K)', 'kJ/(kg·K)', 'kJ/kgC'}
+
+    def _display_unit_for(self, unit_value) -> str:
+        """
+        Anzeige-Einheit einer Variable. Wert UND Label werden immer aus dieser
+        einen Einheit gebildet (früher: Wert in kW umgerechnet, Label "MW").
+
+        Die Settings (°C/K, bar/Pa, kJ/J, kW/W) gelten nur für die jeweilige
+        Standard-Familie; andere Einheiten (MW, kWh, W/(m^2*K), ...) bleiben wie
+        angegeben bzw. abgeleitet.
+        """
+        unit = unit_value.original_unit
+        if unit in self._TEMPERATURE_UNITS:
+            return self.temp_display_unit.get()
+        if unit in self._PRESSURE_UNITS:
+            return self.pressure_display_unit.get()
+        energy = self.energy_display_unit.get()
+        if unit in self._ENERGY_UNITS:
+            return energy
+        if unit in self._SPECIFIC_ENERGY_UNITS:
+            return f"{energy}/kg"
+        if unit in self._SPECIFIC_HEAT_UNITS:
+            return f"{energy}/(kg*K)"
+        if unit in self._POWER_UNITS:
+            return self.power_display_unit.get()
+        return unit
+
+    @staticmethod
+    def _si_to_unit(value_si: float, unit: str) -> float:
+        """Rechnet einen SI-Wert in die Anzeige-Einheit um (inkl. Offset °C/°F)."""
+        try:
+            return UnitValue.from_si_base(float(value_si), unit).original_value
+        except Exception:
+            return float(value_si)
+
+    def _display_values(self, var: str, val):
+        """
+        (Anzeige-Werte, Einheit) einer Variable - Skalar oder Array (Sweep).
+        Ohne bekannte Einheit: SI-Wert und Einheit ''.
+        """
+        unit_value = self.current_unit_values.get(var) if UNITS_AVAILABLE else None
+        if not (unit_value and unit_value.original_unit):
+            return val, ''
+        unit = self._display_unit_for(unit_value)
+        if isinstance(val, np.ndarray):
+            return np.array([self._si_to_unit(v, unit) if np.isfinite(v) else np.nan
+                             for v in val]), unit
+        return self._si_to_unit(val, unit), unit
+
     def clear_results(self):
         """Löscht die Ergebnisanzeige."""
         # Status zurücksetzen
         self.result_status_label.configure(text="", text_color=COLORS["text_dim"])
         self.unit_warning_label.configure(text="")  # Unit Warning zurücksetzen
         self.result_stats_label.configure(text="")
-        self.info_label.configure(text="")
+        self.info_label.configure(text="", text_color=COLORS["text_dim"])
 
         # Variablen-Zeilen löschen
         for widget in self.var_rows_container.winfo_children():
@@ -1215,108 +1473,31 @@ class EquationSolverApp(ctk.CTk):
             row = ctk.CTkFrame(self.var_rows_container, fg_color="transparent", height=28)
             row.pack(fill="x", pady=1)
 
-            # Variable Name
+            # Variable Name (intern umbenannte Schlüsselwörter: _kw_lambda -> lambda)
             var_label = ctk.CTkLabel(
-                row, text=var,
+                row, text=display_name(var),
                 font=ctk.CTkFont(size=12),
                 text_color=COLORS["text"],
                 anchor="w", width=150
             )
             var_label.pack(side="left", padx=5)
 
-            # Prüfe ob Variable eine Einheit hat
-            unit_value = self.current_unit_values.get(var)
-            has_unit = UNITS_AVAILABLE and unit_value and unit_value.original_unit
-
-            # Wert für Anzeige bestimmen
-            # Prüfe Einheiten-Typen für bevorzugte Anzeige
-            temp_units = {'K', 'degC', 'degF', 'kelvin', 'celsius', 'fahrenheit', '°C', '°F'}
-            pressure_units = {'Pa', 'bar', 'kPa', 'MPa', 'mbar', 'atm', 'psi'}
-            energy_units = {'J', 'kJ', 'J/kg', 'kJ/kg', 'J/(kg*K)', 'kJ/(kg*K)', 'J/kg/K', 'kJ/kg/K'}
-            power_units = {'W', 'kW', 'MW', 'W/m^2', 'kW/m^2', 'W/m²', 'kW/m²'}
-
-            is_temperature = has_unit and unit_value.original_unit in temp_units
-            is_pressure = has_unit and unit_value.original_unit in pressure_units
-            is_energy = has_unit and any(eu in unit_value.original_unit for eu in ['J/kg', 'J/(kg', 'J/m'])
-            is_power = has_unit and any(pu in unit_value.original_unit for pu in ['W/m', 'W/(m'])
-
-            # Spezifischere Prüfung für reine J und W Einheiten
-            if has_unit:
-                unit_str = unit_value.original_unit
-                if unit_str in {'J', 'kJ', 'MJ'} or unit_str.startswith('J/') or unit_str.startswith('kJ/'):
-                    is_energy = True
-                if unit_str in {'W', 'kW', 'MW'} or unit_str.startswith('W/') or unit_str.startswith('kW/'):
-                    is_power = True
-                if unit_str in {'Pa', 'bar', 'kPa', 'MPa'}:
-                    is_pressure = True
+            # Wert und Einheit für die Anzeige - beide aus DERSELBEN Einheit
+            display_val, display_unit = self._display_values(var, val)
+            has_unit = bool(display_unit)
 
             if isinstance(val, np.ndarray):
-                # Für Arrays: Zeige Bereich (min → max) für bessere Übersicht
-                min_val = np.nanmin(val)
-                max_val = np.nanmax(val)
-                if min_val == max_val:
-                    val_text = f"[{len(val)}× {min_val:.4g}]"
+                # Für Arrays: Zeige Bereich (min → max) in der Anzeige-Einheit
+                if np.all(np.isnan(display_val)):
+                    val_text = f"[{len(val)}× nan]"
                 else:
-                    val_text = f"[{len(val)}× {min_val:.4g}→{max_val:.4g}]"
-                display_val = val
-            else:
-                # Bei Einheiten: Bevorzugte Anzeige-Einheit verwenden
-                if has_unit:
-                    # Für Temperaturen: Setting-Einheit als Standard verwenden
-                    if is_temperature:
-                        preferred_unit = self.temp_display_unit.get()
-                        display_val = unit_value.to(preferred_unit)
-                    # Für Druck: bar oder Pa je nach Setting
-                    elif is_pressure:
-                        preferred_unit = self.pressure_display_unit.get()
-                        display_val = unit_value.to(preferred_unit)
-                    # Für Energie: kJ/kg oder J/kg je nach Setting
-                    elif is_energy:
-                        preferred_unit = self.energy_display_unit.get()
-                        # Bestimme Ziel-Einheit basierend auf Original-Einheit
-                        base_unit = unit_value.original_unit or unit_value.calc_unit
-                        # Spezialfall: Spezifische Wärmekapazität (kJ/kgK, J/(kg*K), etc.)
-                        # Diese Einheiten enthalten /kg UND K (Kelvin)
-                        if 'kgK' in base_unit or 'kg*K' in base_unit or 'kg·K' in base_unit:
-                            # Behalte die vollständige Einheit, nur J<->kJ wechseln
-                            if preferred_unit == 'kJ':
-                                if base_unit.startswith('J'):
-                                    target_unit = 'k' + base_unit
-                                else:
-                                    target_unit = base_unit  # bereits kJ-basiert
-                            else:  # J
-                                if base_unit.startswith('kJ'):
-                                    target_unit = base_unit[1:]  # entferne 'k'
-                                else:
-                                    target_unit = base_unit  # bereits J-basiert
-                        elif '/(kg' in base_unit:
-                            # Format wie J/(kg*K) - ersetze J durch kJ oder umgekehrt
-                            if preferred_unit == 'kJ':
-                                target_unit = base_unit.replace('J/', 'kJ/')
-                            else:
-                                target_unit = base_unit.replace('kJ/', 'J/')
-                        elif '/kg' in base_unit or '/kilogram' in base_unit.lower():
-                            # Einfache spezifische Energie (J/kg, kJ/kg)
-                            target_unit = f'{preferred_unit}/kg'
-                        else:
-                            target_unit = preferred_unit
-                        display_val = unit_value.to(target_unit)
-                    # Für Leistung: kW oder W je nach Setting
-                    elif is_power:
-                        preferred_unit = self.power_display_unit.get()
-                        base_unit = unit_value.original_unit or unit_value.calc_unit
-                        if '/m' in base_unit or '/meter' in base_unit.lower():
-                            # Einheiten wie W/m², kW/m²
-                            target_unit = base_unit.replace('W/', f'{preferred_unit}/')
-                            target_unit = target_unit.replace('kW/', f'{preferred_unit}/')
-                        else:
-                            target_unit = preferred_unit
-                        display_val = unit_value.to(target_unit)
+                    min_val = np.nanmin(display_val)
+                    max_val = np.nanmax(display_val)
+                    if min_val == max_val:
+                        val_text = f"[{len(val)}× {min_val:.4g}]"
                     else:
-                        display_val = unit_value.original_value
-                else:
-                    display_val = val
-
+                        val_text = f"[{len(val)}× {min_val:.4g}→{max_val:.4g}]"
+            else:
                 if abs(display_val) >= 1e6 or (abs(display_val) < 1e-4 and display_val != 0):
                     val_text = f"{display_val:.6e}"
                 else:
@@ -1324,33 +1505,9 @@ class EquationSolverApp(ctk.CTk):
 
             # Unit Dropdown oder Platzhalter (rechts außen, vor Value)
             if has_unit and not isinstance(val, np.ndarray):
-                compatible_units = get_compatible_units(unit_value.original_unit)
-
-                # Bevorzugte Einheit basierend auf Settings bestimmen
-                if is_temperature:
-                    default_unit = self.temp_display_unit.get()
-                elif is_pressure:
-                    default_unit = self.pressure_display_unit.get()
-                elif is_energy:
-                    # Konvertiere J/kg -> kJ/kg etc.
-                    base_unit = unit_value.original_unit
-                    if self.energy_display_unit.get() == "kJ" and base_unit.startswith('J'):
-                        default_unit = 'k' + base_unit
-                    elif self.energy_display_unit.get() == "J" and base_unit.startswith('kJ'):
-                        default_unit = base_unit[1:]  # Remove 'k'
-                    else:
-                        default_unit = base_unit
-                elif is_power:
-                    # Konvertiere W -> kW etc.
-                    base_unit = unit_value.original_unit
-                    if self.power_display_unit.get() == "kW" and base_unit.startswith('W'):
-                        default_unit = 'k' + base_unit
-                    elif self.power_display_unit.get() == "W" and base_unit.startswith('kW'):
-                        default_unit = base_unit[1:]  # Remove 'k'
-                    else:
-                        default_unit = base_unit
-                else:
-                    default_unit = unit_value.original_unit
+                compatible_units = get_compatible_units(display_unit)
+                if display_unit not in compatible_units:
+                    compatible_units = [display_unit] + list(compatible_units)
 
                 unit_dropdown = ctk.CTkOptionMenu(
                     row,
@@ -1365,14 +1522,13 @@ class EquationSolverApp(ctk.CTk):
                     dropdown_hover_color=COLORS["accent"],
                     command=lambda u, v=var: self._on_unit_changed(v, u)
                 )
-                unit_dropdown.set(default_unit)
+                unit_dropdown.set(display_unit)
                 unit_dropdown.pack(side="right", padx=2)
                 self.unit_dropdowns[var] = unit_dropdown
             elif isinstance(val, np.ndarray) and UNITS_AVAILABLE:
                 # Für Arrays: Zeige Einheit als Label (wenn bekannt), sonst "array"
-                array_unit_text = unit_value.original_unit if has_unit else "array"
                 unit_label = ctk.CTkLabel(
-                    row, text=array_unit_text,
+                    row, text=display_unit if has_unit else "array",
                     font=ctk.CTkFont(size=11),
                     text_color=COLORS["accent"] if has_unit else COLORS["text_dim"],
                     width=80, anchor="center"
@@ -1422,15 +1578,29 @@ class EquationSolverApp(ctk.CTk):
         except Exception as e:
             print(f"Unit conversion error for {var}: {e}")
 
-    def _show_error(self, message: str):
-        """Zeigt eine Fehlermeldung im Results Tab an."""
-        self.result_status_label.configure(text="● ERROR", text_color=COLORS["error"])
-        self.info_label.configure(text=message[:80] + "..." if len(message) > 80 else message)
+    def _show_error(self, message: str, status_text: str = "● ERROR",
+                    status_color: Optional[str] = None):
+        """Zeigt eine Fehlermeldung im Results Tab an (Info-Zeile, umbrechend)."""
+        message = message or ""
+        self.result_status_label.configure(text=status_text,
+                                           text_color=status_color or COLORS["error"])
+        if len(message) > 300:
+            message = message[:297] + "..."
+        self.info_label.configure(text=message, text_color=COLORS["error"], wraplength=420)
+
+    def _clear_last_solution(self):
+        """Verwirft die letzte Lösung (Plot darf keine alten Daten zeigen)."""
+        self.last_solution = None
+        self.last_sweep_vars = {}
+        self.last_analysis = None
 
     def clear_all(self):
-        """Löscht alle Eingaben und Ausgaben."""
+        """Löscht alle Eingaben und Ausgaben (rückgängig machbar per Undo)."""
+        if self._solving:
+            return
         self.equations_text.delete("1.0", "end")
         self.clear_results()
+        self._clear_last_solution()
         self.status_label.configure(text="Ready")
 
     # === Dialoge ===
@@ -1446,7 +1616,8 @@ class EquationSolverApp(ctk.CTk):
         # Font Size
         ctk.CTkLabel(dialog, text="Font Size:", font=ctk.CTkFont(size=13)).pack(pady=(15, 5))
 
-        font_slider = ctk.CTkSlider(dialog, from_=8, to=24, number_of_steps=8,
+        font_slider = ctk.CTkSlider(dialog, from_=FONT_SIZE_MIN, to=FONT_SIZE_MAX,
+                                     number_of_steps=(FONT_SIZE_MAX - FONT_SIZE_MIN) // 2,
                                      command=lambda v: self.set_font_size(int(v)))
         font_slider.set(self.font_size)
         font_slider.pack(pady=5, padx=20, fill="x")
@@ -1559,7 +1730,8 @@ class EquationSolverApp(ctk.CTk):
         # Info
         ctk.CTkLabel(
             dialog,
-            text="Set initial values for variables. Units are auto-detected from equations.\n(Leave empty for automatic based on unit, or enter manual value)",
+            text="Set initial values in SI units (K, Pa, J/kg, ...). Units are auto-detected.\n"
+                 "Grey values are automatic and are not stored; type a value to override.",
             font=ctk.CTkFont(size=12),
             text_color=COLORS["text_dim"]
         ).pack(pady=10)
@@ -1589,46 +1761,47 @@ class EquationSolverApp(ctk.CTk):
         # Hole gelöste Variablen
         solved_vars = set(self.last_solution.keys()) if self.last_solution else set()
 
-        # Liste der verfügbaren Einheiten für Dropdown
-        unit_options = ["", "K", "Pa", "J/kg", "J/(kg*K)", "kg/s", "W", "kg/m^3", "m^3/kg", "m/s", "m/s^2", "N", "kg", "m", "m^2", "m^3", "???"]
-
         entries = {}
-        unit_vars = {}  # Speichere StringVars für Einheiten
+        units_of = {}     # Einheit je Variable (None = unbekannt)
+        auto_texts = {}   # automatisch (grau) eingetragener Text je Variable
 
         for var in sorted(all_vars):
             row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
             row.pack(fill="x", pady=2)
 
             # Variable name
-            ctk.CTkLabel(row, text=f"{var}:", width=120, anchor="w").pack(side="left")
+            ctk.CTkLabel(row, text=f"{display_name(var)}:", width=120, anchor="w").pack(side="left")
 
             # Initial value entry
             entry = ctk.CTkEntry(row, width=100)
             entry.pack(side="left", padx=5)
 
+            # Einheit (SI-Recheneinheit, nur Anzeige)
+            unit = inferred_units.get(var)
+            if unit is None and var in self.current_unit_values:
+                unit = self.current_unit_values[var].calc_unit
+            units_of[var] = unit
+
             # Bestimme Standardwert
             if var in self.manual_initial_values:
-                entry.insert(0, str(self.manual_initial_values[var]))
-            elif var in inferred_units:
-                # Zeige automatischen Startwert basierend auf Einheit
-                auto_val = get_initial_from_unit(inferred_units[var])
-                entry.insert(0, f"{auto_val:.6g}")
-                entry.configure(text_color=COLORS["text_dim"])  # Grau für automatisch
+                entry.insert(0, f"{self.manual_initial_values[var]:.10g}")
+            elif unit is not None:
+                # Zeige automatischen Startwert basierend auf Einheit (grau).
+                # Wird beim OK NICHT als manueller Wert übernommen.
+                auto_texts[var] = f"{get_initial_from_unit(unit):.6g}"
+                entry.insert(0, auto_texts[var])
+                entry.configure(text_color=COLORS["text_dim"])
 
+            # Sobald der Benutzer tippt, normale Textfarbe
+            entry.bind("<Key>", lambda e, ent=entry: ent.configure(text_color=COLORS["text"]))
             entries[var] = entry
 
-            # Unit display/dropdown
-            unit = inferred_units.get(var, "???")
-            # Auch aus current_unit_values holen falls verfügbar
-            if unit == "???" and hasattr(self, 'current_unit_values') and var in self.current_unit_values:
-                unit = self.current_unit_values[var].calc_unit or "???"
-
-            unit_var = ctk.StringVar(value=unit if unit else "-")
-            unit_vars[var] = unit_var
-
-            # Einheit als Dropdown (editierbar)
-            unit_combo = ctk.CTkComboBox(row, variable=unit_var, values=unit_options, width=90)
-            unit_combo.pack(side="left", padx=5)
+            if unit is None:
+                unit_text = "???"
+            else:
+                unit_text = unit if unit else "-"
+            ctk.CTkLabel(row, text=unit_text, width=100, anchor="w",
+                         text_color=COLORS["accent"]).pack(side="left", padx=5)
 
             # Status indicator
             if var in solved_vars:
@@ -1646,30 +1819,27 @@ class EquationSolverApp(ctk.CTk):
         btn_frame.pack(fill="x", padx=10, pady=10)
 
         def apply_values():
-            self.manual_initial_values.clear()
-            # Aktualisiere auch die überschriebenen Einheiten
+            # Erst vollständig validieren, dann übernehmen (bei Fehler bleiben
+            # die bisherigen Startwerte erhalten)
+            new_values = {}
             for var, entry in entries.items():
                 val_str = entry.get().strip()
-                if val_str:
-                    try:
-                        self.manual_initial_values[var] = float(val_str)
-                    except ValueError:
-                        messagebox.showerror("Error", f"Invalid value for {var}: '{val_str}'")
-                        return
+                # Leere Felder und unveränderte automatische (graue) Werte sind
+                # KEINE manuellen Startwerte - sonst würden sie eingefroren
+                if not val_str or val_str == auto_texts.get(var):
+                    continue
+                try:
+                    new_values[var] = float(val_str)
+                except ValueError:
+                    messagebox.showerror("Error", f"Invalid value for {var}: '{val_str}'")
+                    return
 
-                # Speichere überschriebene Einheiten
-                if var in unit_vars:
-                    new_unit = unit_vars[var].get()
-                    if new_unit and new_unit not in ("-", "???"):
-                        # Aktualisiere inferred_units für nächsten Solve
-                        if not hasattr(self, 'manual_units'):
-                            self.manual_units = {}
-                        self.manual_units[var] = new_unit
-
+            self.manual_initial_values = new_values
             dialog.destroy()
             self.status_label.configure(text=f"{len(self.manual_initial_values)} initial values set")
 
         def clear_all():
+            auto_texts.clear()
             for e in entries.values():
                 e.delete(0, "end")
                 e.configure(text_color=COLORS["text"])
@@ -1677,13 +1847,10 @@ class EquationSolverApp(ctk.CTk):
         def auto_fill():
             """Füllt alle leeren Felder mit automatischen Werten basierend auf Einheiten."""
             for var, entry in entries.items():
-                if not entry.get().strip():
-                    unit = unit_vars[var].get() if var in unit_vars else ""
-                    if unit and unit not in ("-", "???"):
-                        auto_val = get_initial_from_unit(unit)
-                        entry.delete(0, "end")
-                        entry.insert(0, f"{auto_val:.6g}")
-                        entry.configure(text_color=COLORS["text_dim"])
+                if not entry.get().strip() and units_of.get(var) is not None:
+                    auto_texts[var] = f"{get_initial_from_unit(units_of[var]):.6g}"
+                    entry.insert(0, auto_texts[var])
+                    entry.configure(text_color=COLORS["text_dim"])
 
         ctk.CTkButton(btn_frame, text="Clear All", command=clear_all).pack(side="left")
         ctk.CTkButton(btn_frame, text="Auto-Fill", command=auto_fill,
@@ -1735,11 +1902,15 @@ class EquationSolverApp(ctk.CTk):
             if not x_name or not y_name:
                 return
 
-            x_data = self.last_solution[x_name]
-            y_data = self.last_solution[y_name]
+            # Daten in Anzeige-Einheiten (z.B. °C statt K), Achsen mit Einheit
+            x_data, x_unit = self._display_values(x_name, self.last_solution[x_name])
+            y_data, y_unit = self._display_values(y_name, self.last_solution[y_name])
+            x_label = display_name(x_name) + (f" [{x_unit}]" if x_unit else "")
+            y_label = display_name(y_name) + (f" [{y_unit}]" if y_unit else "")
 
-            self._create_plot_window(x_data, [(y_name, y_data)], x_name, y_name,
-                                      f"{y_name} vs {x_name}", grid_var.get(), False, False)
+            self._create_plot_window(x_data, [(display_name(y_name), y_data)], x_label, y_label,
+                                      f"{display_name(y_name)} vs {display_name(x_name)}",
+                                      grid_var.get(), False, False)
             dialog.destroy()
 
         ctk.CTkButton(dialog, text="Plot", command=create_plot).pack(pady=20)
@@ -1800,115 +1971,7 @@ class EquationSolverApp(ctk.CTk):
         text = ctk.CTkTextbox(dialog, font=ctk.CTkFont(family="Courier", size=11))
         text.pack(fill="both", expand=True, padx=10, pady=10)
 
-        help_text = """=== HVAC EQUATION SOLVER - FUNCTION REFERENCE ===
-
-MATHEMATICAL FUNCTIONS:
------------------------
-sin(x), cos(x), tan(x)     Trigonometric (x in degrees)
-asin(x), acos(x), atan(x)  Inverse trig functions
-sinh(x), cosh(x), tanh(x)  Hyperbolic functions
-exp(x)                      e^x
-ln(x)                       Natural logarithm
-log10(x)                    Base 10 logarithm
-sqrt(x)                     Square root
-abs(x)                      Absolute value
-pi                          Pi constant
-
-THERMODYNAMIC FUNCTIONS (CoolProp):
------------------------------------
-Syntax: function(fluid, param1=value1, param2=value2)
-
-Properties:
-  enthalpy(...)      Specific enthalpy [kJ/kg]
-  entropy(...)       Specific entropy [kJ/(kg K)]
-  density(...)       Density [kg/m3]
-  temperature(...)   Temperature [K]
-  pressure(...)      Pressure [bar]
-  quality(...)       Vapor quality [-]
-
-State properties (2 required):
-  T = Temperature [K] (internally, use 373.15K or 100°C)
-  p = Pressure [bar]
-  h = Enthalpy [kJ/kg]
-  s = Entropy [kJ/(kg K)]
-  x = Vapor quality [-]
-
-Examples:
-  h = enthalpy(water, T=373.15K, p=1)    {100°C}
-  h = enthalpy(water, T=100°C, p=1)      {also valid}
-  rho = density(R134a, T=298.15K, x=1)   {25°C}
-
-HUMID AIR FUNCTIONS:
---------------------
-Syntax: HumidAir(property, T=..., rh=..., p_tot=...)
-Temperature T in [K] (or use °C with unit)
-
-  h = HumidAir(h, T=298.15K, rh=0.5, p_tot=1)   {25°C}
-  h = HumidAir(h, T=25°C, rh=0.5, p_tot=1)      {also valid}
-  w = HumidAir(w, T=303.15K, rh=0.6, p_tot=1)   {30°C}
-  T_dp = HumidAir(T_dp, T=298.15K, w=0.01, p_tot=1)
-
-RADIATION FUNCTIONS (Blackbody):
---------------------------------
-All functions: T in [K], wavelength in [um]
-
-  Eb(T, lambda)              Spectral emissive power [W/(m2*um)]
-  Blackbody(T, l1, l2)       Fraction of energy in wavelength range [-]
-  Blackbody_cumulative(T, l) Cumulative fraction from 0 to l [-]
-  Wien(T)                    Wavelength of max emission [um]
-  Stefan_Boltzmann(T)        Total emissive power [W/m2]
-
-Examples:
-  E = Eb(573.15K, 5)                  {Spectral power at 300°C, 5um}
-  E = Eb(300°C, 5)                    {also valid}
-  f = Blackbody(1273.15K, 0.4, 0.7)   {Visible light fraction at 1000°C}
-  lambda_max = Wien(773.15K)          {Peak wavelength at 500°C}
-  E_total = Stefan_Boltzmann(373.15K) {Total emission at 100°C}
-
-RESERVED VARIABLE NAMES (DO NOT USE):
--------------------------------------
-Python keywords (cause syntax errors):
-  lambda, if, else, for, while, class, def, return,
-  import, from, as, try, except, with, pass, break,
-  continue, and, or, not, in, is, True, False, None
-
-Mathematical constants/functions (will be overwritten):
-  pi, e, sin, cos, tan, exp, ln, sqrt, abs, max, min
-
-Thermodynamic functions (case-insensitive):
-  enthalpy, entropy, density, temperature, pressure, etc.
-
-TIPS:
-  - Use descriptive names: lambda_1 instead of lambda
-  - Use subscripts: T_1, p_2, h_in, h_out
-  - For wavelength: use 'L', 'wl', or 'lambda_1'
-  - Euler's number: use exp(1) instead of e
-
-TEMPERATURE DIFFERENCES:
-------------------------
-Variables starting with "dT" or "delta" are recognized as
-temperature differences and use the unit "delta_K".
-
-Examples:
-  dT_N = 49.83K         {Recognized as delta_K}
-  delta_T = 10K         {Recognized as delta_K}
-  dT_log = (T1-T2)/ln((T1-T0)/(T2-T0))  {Inferred as delta_K}
-
-This avoids incorrect offset conversions (K → °C).
-Regular temperatures (T_1, T_VL, etc.) remain in K.
-
-PARAMETRIC STUDIES (Sweeps):
-----------------------------
-Syntax: variable = start:step:end [unit]
-
-Examples:
-  T = 20:5:40           {20, 25, 30, 35, 40}
-  T = 20:5:40 °C        {with unit}
-  p = 1:0.5:3 bar       {1, 1.5, 2, 2.5, 3 bar}
-
-After solving: Use Plot menu for visualization
-"""
-        text.insert("1.0", help_text)
+        text.insert("1.0", FUNCTION_HELP_TEXT)
         text.configure(state="disabled")
 
     def show_fluid_help(self):
@@ -1952,9 +2015,11 @@ GASES:
 
     def _insert_example(self):
         """Fügt ein Beispiel ein."""
+        if self._solving:
+            return
         if THERMO_AVAILABLE:
             example = '''"HVAC Equation Solver - Example"
-"Internal units: T[K], p[bar], h[kJ/kg]"
+"Internal units (SI): T[K], p[Pa], h[J/kg], s[J/(kg*K)]"
 
 {--- Example 1: Water/Steam ---}
 T_1 = 150 °C
@@ -2011,6 +2076,7 @@ alpha + beta = 90
         self.equations_text.delete("1.0", "end")
         self.equations_text.insert("1.0", example)
         self.clear_results()
+        self._clear_last_solution()
 
 
 def main():

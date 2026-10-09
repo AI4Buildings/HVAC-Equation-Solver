@@ -11,6 +11,7 @@ Unterstützte Syntax:
 - Kommentare: "..." oder {...}
 """
 
+import keyword
 import re
 import numpy as np
 from typing import List, Set, Tuple, Dict, Union, Optional
@@ -59,6 +60,31 @@ FUNCTION_MAP = {
 # Regex für Vektor-Syntax: start:step:end oder start:end
 VECTOR_PATTERN_3 = re.compile(r'^(-?\d+\.?\d*):(-?\d+\.?\d*):(-?\d+\.?\d*)$')  # start:step:end
 VECTOR_PATTERN_2 = re.compile(r'^(-?\d+\.?\d*):(-?\d+\.?\d*)$')  # start:end (step=1)
+
+# Python-Schlüsselwörter, die als Variablennamen vorkommen können (z.B. lambda
+# für die Wärmeleitfähigkeit λ). eval() kann sie nicht als Namen verwenden,
+# daher werden sie intern umbenannt: lambda -> _kw_lambda. Für die Anzeige
+# macht display_name()/unmangle() das rückgängig.
+# and/or/not bleiben Operatoren, True/False/None Konstanten.
+KEYWORD_PREFIX = '_kw_'
+_MANGLED_KEYWORDS = sorted(set(keyword.kwlist) - {'True', 'False', 'None', 'and', 'or', 'not'})
+_KEYWORD_PATTERN = re.compile(r'\b(' + '|'.join(_MANGLED_KEYWORDS) + r')\b')
+_MANGLED_PATTERN = re.compile(r'\b' + KEYWORD_PREFIX + r'(' + '|'.join(_MANGLED_KEYWORDS) + r')\b')
+
+
+def mangle_keywords(text: str) -> str:
+    """Benennt Python-Schlüsselwörter als Bezeichner um (lambda -> _kw_lambda)."""
+    return _KEYWORD_PATTERN.sub(lambda m: KEYWORD_PREFIX + m.group(1), text)
+
+
+def unmangle(text: str) -> str:
+    """Macht mangle_keywords() rückgängig (für Anzeige von Namen und Gleichungen)."""
+    return _MANGLED_PATTERN.sub(lambda m: m.group(1), text)
+
+
+def display_name(name: str) -> str:
+    """Anzeigename einer Variable (_kw_lambda -> lambda)."""
+    return unmangle(name)
 
 
 def parse_vector(value_str: str) -> Union[np.ndarray, None]:
@@ -171,27 +197,34 @@ def remove_comments(text: str) -> str:
     EES-Kommentare:
     - "..." (Anführungszeichen)
     - {...} (geschweifte Klammern)
+
+    Zeilenumbrüche INNERHALB von Kommentaren bleiben erhalten, damit die
+    Zeilennummern mit dem Originaltext übereinstimmen (sonst verrutscht nach
+    einem mehrzeiligen Kommentar die Zuordnung Gleichung -> Originalzeile).
     """
-    # Entferne "..." Kommentare
-    text = re.sub(r'"[^"]*"', '', text)
+    # Entferne "..." Kommentare (Zeilenumbrüche behalten)
+    text = re.sub(r'"[^"]*"', lambda m: '\n' * m.group(0).count('\n'), text)
     # Entferne {...} Kommentare (auch verschachtelt, per Klammer-Zählung)
     result = []
     depth = 0
     unmatched_start = None  # Position des ersten unbalancierten '{'
+    unmatched_result_len = 0  # Länge von result beim ersten unbalancierten '{'
     for i, char in enumerate(text):
         if char == '{':
             if depth == 0:
                 unmatched_start = i
+                unmatched_result_len = len(result)
             depth += 1
         elif char == '}':
             if depth > 0:
                 depth -= 1
                 if depth == 0:
                     unmatched_start = None
-        elif depth == 0:
+        elif depth == 0 or char == '\n':
             result.append(char)
     if depth > 0 and unmatched_start is not None:
         # Unbalancierter Kommentar: Text ab dem offenen '{' unverändert lassen
+        result = result[:unmatched_result_len]
         result.append(text[unmatched_start:])
     return ''.join(result)
 
@@ -312,11 +345,34 @@ def _iter_call_spans(text: str, func_names_lower: Set[str]):
         yield m.start(), open_idx, close_idx, m.group(1)
 
 
-def _replace_calls_balanced(text: str, func_names: Set[str], keep_case: bool = False) -> str:
+def _convert_positional_call(func_name: str, args_str: str, keep_case: bool = True) -> str:
     """
-    Ersetzt alle func(...)-Aufrufe (auch verschachtelte) via _convert_call_parts.
-    Verschachtelte Aufrufe in den Argumenten werden zuerst konvertiert.
+    Konvertiert Einheiten in POSITIONSargumenten zu SI (Strahlungsfunktionen):
+    Eb(500°C, 5µm) -> Eb(773.15, 5e-06). Argumente ohne Einheit bleiben unverändert.
     """
+    args = []
+    for arg in _split_call_args(args_str):
+        converted = arg
+        if UNITS_AVAILABLE and '=' not in arg:
+            try:
+                magnitude, unit_str = parse_value_with_unit(arg)
+                if unit_str:
+                    converted = repr(UnitValue.from_input(magnitude, unit_str).calc_value)
+            except ValueError:
+                pass
+        args.append(converted)
+    return f"{func_name}({', '.join(args)})"
+
+
+def _replace_calls_balanced(text: str, func_names: Set[str], keep_case: bool = False,
+                            converter=None) -> str:
+    """
+    Ersetzt alle func(...)-Aufrufe (auch verschachtelte) via _convert_call_parts
+    (bzw. den übergebenen converter). Verschachtelte Aufrufe in den Argumenten
+    werden zuerst konvertiert.
+    """
+    if converter is None:
+        converter = _convert_call_parts
     names_lower = {n.lower() for n in func_names}
 
     # Wiederhole bis stabil: pro Durchlauf wird der erste Aufruf konvertiert,
@@ -326,9 +382,9 @@ def _replace_calls_balanced(text: str, func_names: Set[str], keep_case: bool = F
         for start, open_idx, close_idx, name in _iter_call_spans(text, names_lower):
             args_str = text[open_idx + 1:close_idx]
             # Innere Aufrufe in den Argumenten zuerst konvertieren
-            args_converted = _replace_calls_balanced(args_str, func_names, keep_case) \
+            args_converted = _replace_calls_balanced(args_str, func_names, keep_case, converter) \
                 if any(f in args_str.lower() for f in names_lower) else args_str
-            converted = _convert_call_parts(name, args_converted, keep_case=keep_case)
+            converted = converter(name, args_converted, keep_case=keep_case)
             if converted != text[start:close_idx + 1]:
                 text = text[:start] + converted + text[close_idx + 1:]
                 changed = True
@@ -364,6 +420,10 @@ def tokenize_equation(equation: str) -> str:
 
     # Konvertiere FeuchteLuft-Funktionsaufrufe
     equation = _replace_calls_balanced(equation, HUMID_AIR_FUNCTIONS, keep_case=True)
+
+    # Strahlungsfunktionen: Einheiten in Positionsargumenten (Eb(500°C, 5µm))
+    equation = _replace_calls_balanced(equation, RADIATION_FUNCTIONS, keep_case=True,
+                                       converter=_convert_positional_call)
 
     return equation
 
@@ -528,6 +588,28 @@ def _split_expression_with_unit(right: str) -> Optional[Tuple[float, str]]:
     return value, unit_str
 
 
+def _mangle_line(line: str) -> str:
+    """
+    Wendet mangle_keywords() auf eine Eingabezeile an - aber nicht auf eine
+    Einheit auf der rechten Seite ("d = 2 in" bleibt, "in" ist dort Zoll).
+    """
+    if '=' not in line:
+        return mangle_keywords(line)
+    left, right = line.split('=', 1)
+    right_stripped = right.strip()
+    keep_right = False
+    if UNITS_AVAILABLE and right_stripped:
+        try:
+            _, unit_str = parse_value_with_unit(right_stripped)
+            keep_right = bool(unit_str)
+        except ValueError:
+            pass
+        if not keep_right:
+            keep_right = (_split_expression_with_unit(right_stripped) is not None or
+                          is_vector_assignment(line, parse_units=True)[0])
+    return mangle_keywords(left) + '=' + (right if keep_right else mangle_keywords(right))
+
+
 def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set[str], dict, dict, dict, dict]:
     """
     Parst den Eingabetext und extrahiert Gleichungen und Variablen.
@@ -549,12 +631,14 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
     # Speichere Original-Text vor Kommentar-Entfernung für Mapping
     original_text = text
 
-    # Entferne Kommentare
+    # Entferne Kommentare (Zeilenumbrüche bleiben erhalten -> Zeilen bleiben synchron)
     text = remove_comments(text)
 
-    # Teile in Zeilen auf
-    lines = text.split('\n')
-    original_lines = original_text.split('\n')
+    # Teile in Zeilen auf; Python-Schlüsselwörter als Variablennamen intern
+    # umbenennen (lambda -> _kw_lambda), auch in den Originalzeilen, damit die
+    # Einheiten-Analyse dieselben Namen sieht. Anzeige: display_name()/unmangle()
+    lines = [_mangle_line(line) for line in text.split('\n')]
+    original_lines = [mangle_keywords(line) for line in original_text.split('\n')]
 
     equations = []
     all_variables = set()

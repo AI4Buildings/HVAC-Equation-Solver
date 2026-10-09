@@ -38,25 +38,37 @@ equation_solver/
 ├── radiation.py         # Schwarzkörper-Strahlungsfunktionen (Planck, vektorisiert)
 ├── units.py             # Einheitenhandling und Konvertierung (v3.0)
 ├── unit_constraints.py  # Einheiten-Propagation und Konsistenzprüfung (v3.0)
-├── test_regressions.py  # Regressionstests (python3 test_regressions.py)
+├── test_regressions.py  # Regressionstests Parser/Solver/Einheiten
+├── test_unit_constraints.py  # Tests Einheiten-Propagation/Dimensionsprüfung
+├── test_berechnungen.py # Berechnungsaufgaben Thermodynamik/Wärmeübertragung
+├── test_gui.py          # GUI-Tests (headless)
 ```
 
 ### Tests
 
 ```bash
-python3 test_regressions.py
+python3 test_regressions.py       # Parser, Solver, Einheiten (~15 s)
+python3 test_unit_constraints.py  # Einheiten-Propagation, Dimensionsprüfung
+python3 test_berechnungen.py      # 59 Aufgaben mit/ohne Einheiten gegen Referenzwerte
+python3 test_gui.py               # GUI headless (holt kurz den Fokus - nicht tippen)
 ```
 
-Deckt Parser (Direktzuweisungs-Erkennung, Vektoren, Einheiten-Sweeps),
-Solver (Wurzelwahl, Widerspruchserkennung, Parameterstudien) und
-Einheiten-System (Propagation, delta_K, Offset-Konvertierungen) ab.
+`test_regressions.py` deckt Parser (Direktzuweisungs-Erkennung, Vektoren, Einheiten-Sweeps,
+Schlüsselwörter, Kommentare), Solver (Wurzelwahl, Widerspruchserkennung, Parameterstudien,
+Tearing, Determinismus) und Einheiten-System (SI-Umrechnung, Startwerte, delta_K,
+Offset-Konvertierungen, Strahlung) ab. `test_berechnungen.py` rechnet Aufgaben aus
+Thermodynamik und Wärmeübertragung jeweils MIT und OHNE Einheiten und vergleicht mit
+unabhängig berechneten Referenzwerten (CoolProp direkt, analytisch).
 Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 
 ## Kernfunktionen
 
 ### Parser (parser.py)
 - Converts equation syntax to Python: `^` → `**`, `ln` → `log`
-- Comments: `"..."` and `{...}`
+- Comments: `"..."` and `{...}` (auch verschachtelt und mehrzeilig)
+- **Python-Schlüsselwörter als Variablennamen** (`lambda` für λ, `in`, `is`, ...) sind
+  erlaubt: intern umbenannt (`lambda` → `_kw_lambda`), angezeigt wieder als `lambda`
+  (`parser.display_name()` / `parser.unmangle()`)
 - Thermodynamic function calls: `enthalpy(water, T=100, p=1)` → `enthalpy('water', T=100, p=1)`
 - Extracts variables from equations (filters function names and parameter keys)
 - Vector syntax: `T = 0:10:100` (start:step:end) or `T = 0:100` (start:end, step=1)
@@ -76,7 +88,14 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 1. **Konstanten zuweisen**: Explizite Definitionen wie `T_1 = 450`
 2. **Direkte Auswertung**: Gleichungen der Form `var = ausdruck` werden sequentiell berechnet
 3. **Einzelne Unbekannte**: Gleichungen mit nur einer Unbekannten werden mit Bracket-Suche + Brent's Methode gelöst
-4. **Blockweise Lösung**: Zusammenhängende Gleichungsblöcke werden mit `scipy.fsolve` gelöst
+4. **Blockweise Lösung**: Zusammenhängende Gleichungsblöcke (Reihenfolge = Eingabereihenfolge,
+   unabhängig vom Hash-Seed) werden gelöst:
+   - **Tearing** zuerst: Lässt sich der Block mit EINER geschätzten Variable der Reihe nach
+     direkt auswerten (z.B. Filmtemperatur-Iteration: T_s → T_f → Stoffwerte → Ra → Nu →
+     Wärmestrom), wird nur über diese Variable mit Bracket-Suche iteriert - robust auch
+     bei schlechten Startwerten
+   - sonst simultan mit `least_squares` (Levenberg-Marquardt) / `fsolve`, Zeitbudget ~20 s
+   - gescheiterte Blöcke werden nicht erneut versucht
 5. **Iteration**: Schritte 2-4 werden wiederholt bis alle Gleichungen gelöst sind
 
 #### Robuste Wurzelfindung für einzelne Gleichungen
@@ -90,6 +109,8 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - **Residuen-Bewertung**: relativ zur Größenordnung der Gleichungsterme - Divergenz
   zur Asymptote (z.B. `1/(x-2) = 0`) wird NICHT als Lösung akzeptiert
 - **Zeitbudget**: max. ~10 s pro Einzelgleichung (unlösbare Gleichungen frieren die GUI nicht ein)
+- **Komplexe Zwischenwerte** (z.B. `Ra^(1/6)` mit negativem `Ra`) gelten als ungültige
+  Auswertung, nicht als Absturz
 - **Konsistenzprüfung**: Constraint-Gleichungen (0 Unbekannte) mit großem Residuum
   führen zu "Widersprüchliches System" statt stillschweigendem Erfolg
 - **Parameterstudien**: Warm-Start - die Lösung des Vorpunkts ist Startwert des nächsten
@@ -153,12 +174,15 @@ rho = HumidAir(rho_tot, T=25°C, rh=0.5, p_tot=1bar)
 - Schwarzkörper-Funktionen basierend auf dem Planck'schen Strahlungsgesetz
 - **Alle Funktionen vektorisiert** (unterstützen numpy-Arrays)
 - Funktionen:
-  - `Eb(T, lambda)` - Spektrale Emissionsleistung [W/(m²·µm)]
+  - `Eb(T, lambda)` - Spektrale Emissionsleistung [W/m³] (Anzeige: W/(m²·µm))
   - `Blackbody(T, lambda1, lambda2)` - Anteil der Energie im Wellenlängenbereich [-]
   - `Blackbody_cumulative(T, lambda)` - Kumulativer Anteil von 0 bis λ [-]
-  - `Wien(T)` - Wellenlänge maximaler Emission [µm]
+  - `Wien(T)` - Wellenlänge maximaler Emission [m] (Anzeige: µm)
   - `Stefan_Boltzmann(T)` - Gesamtemission [W/m²]
-- Einheiten: T in K (intern), λ in µm
+- Einheiten intern SI wie überall: T in K, λ in m (`L = 5 µm` → 5e-6 m)
+- Reine Zahlen als Wellenlänge werden erkannt: Werte < 0.01 gelten als Meter, größere
+  als µm - `Eb(1000, 5)` und `Eb(1000, 5e-6)` sind gleich
+- Einheiten auch direkt in den Argumenten: `Eb(500 °C, 5 µm)`, `Wien(500 °C)`
 - Eingabe: `T = 500 °C` oder `T = 773.15 K`
 - Groß-/Kleinschreibung egal: `Eb` = `eb`, `Blackbody` = `blackbody`
 
@@ -181,8 +205,9 @@ Eingaben mit anderen Einheiten (°C, bar, kJ) werden automatisch konvertiert.
 | Energie | J | `1 kJ`, `1000 J` |
 | Leistung | W | `1 kW`, `1000 W` |
 | Dampfqualität x | - (0-1) | |
-| Wellenlänge λ | µm | `5 µm`, `5e-6 m` |
-| Spektrale Emission Eb | W/(m²·µm) | |
+| Länge, Wellenlänge λ | m | `5 µm`, `20 cm`, `5e-6 m` |
+| Fläche, Volumen | m², m³ | `50 cm^2`, `200 L` |
+| Spektrale Emission Eb | W/m³ (Anzeige W/(m²·µm)) | |
 | Gesamtemission E | W/m² | |
 | **Winkel (Trigonometrie)** | **Grad (°)** | |
 
@@ -219,7 +244,10 @@ Hyperbolische Funktionen (`sinh`, `cosh`, `tanh`) verwenden Radiant.
 ### Units Module (units.py)
 - Einheiten-Parsing und Konvertierung basierend auf `pint`
 - `UnitValue`-Klasse speichert SI-Wert und Original-Einheit
-- Automatische Konvertierung zu Standard-Einheiten für Berechnungen
+- Automatische Konvertierung zu SI für Berechnungen - für JEDE Einheit (auch cm², L,
+  kW/m², kW/(m²K), mPa·s, mm²/s, µm); die Einheiten-Strings sind nur Anzeige-Labels
+- Startwerte aus der Einheit über die Dimension (`get_initial_from_unit`), z.B.
+  K → 350, delta_K → 10, W/(m²K) → 10, 1/K → 0.0034
 - Unterstützte Einheiten: °C, K, bar, Pa, kJ, W, kg/s, m²/s, W/m²K, µm, etc.
 
 ### Unit Constraints Module (unit_constraints.py)
@@ -335,7 +363,13 @@ Zusätzlich erkennt die Einheiten-Propagation Differenzen zweier Temperaturen
 auch OHNE Namenskonvention: `theta = T_1 - T_2` wird als `delta_K` inferiert
 (Mittelwerte wie `(T_1 + T_2)/2` bleiben absolute Temperaturen in K).
 
+Absolute Temperatur ± Differenz bleibt absolut: `T_si = T_i - q*R_si` → K (Anzeige °C).
+
 Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahieren).
+
+**Grenze:** Eine Temperatur, die nur über ein Produkt bestimmt ist (`Q = m*c_p*theta`,
+`p*v = R*T`), wird als absolute Temperatur (K) angezeigt - für Differenzen daher
+`dT...`/`delta...` als Namen verwenden.
 
 ## Bekannte Einschränkungen / Design-Entscheidungen
 
@@ -353,11 +387,19 @@ Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahi
 
 4. **Manuelle Startwerte**: Bei sehr speziellen Gleichungssystemen kann der Dialog "Solve → Initial Values..." zur manuellen Anpassung verwendet werden.
 
+5. **Mehrdeutige Wurzeln**: Bei mehreren Lösungen wird die dem Startwert nächstgelegene
+   gewählt. Ein Startwert kann auch von ähnlich benannten bekannten Variablen kommen
+   (`r_2` startet nahe `r_1`) - bei Bedarf Startwert im Dialog setzen.
+
 ## GUI-Features
 
 - File: New, Open, Save, Save As (.hes, .txt)
 - View: Schriftgröße 6-36pt (Standard: 16pt)
 - Solve: F5 oder Button, Initial Values Dialog
+- Ergebnisanzeige: Wert und Einheit stammen immer aus derselben Einheit. Die Settings
+  (°C/K, bar/Pa, kJ/J, kW/W) gelten für Temperaturen, Drücke, J/kJ, J/kg, J/(kg·K), W/kW;
+  andere Einheiten (MW, kWh, W/(m²K), W/K, ...) bleiben wie eingegeben bzw. abgeleitet.
+  Parameterstudien und Plots werden ebenfalls in diesen Einheiten angezeigt.
 - Plot: Diagramme für Parameterstudien (erfordert matplotlib)
   - New Plot Window: Mehrere Y-Variablen, Labels, Titel, Optionen
   - Quick Plot X-Y: Schneller einfacher Plot
@@ -375,8 +417,8 @@ h = enthalpy(water, T=T, x=0)
 
 Direkte Funktionsauswertung (ohne Iteration):
 ```
-L = 0:0.1:10
-E = Eb(300, L)      {Spektrale Emission bei 300°C über Wellenlänge}
+L = 0.5:0.5:20 µm
+E = Eb(300 °C, L)   {Spektrale Emission bei 300 °C über der Wellenlänge}
 ```
 
 Nach dem Lösen: Plot → New Plot Window oder Quick Plot X-Y

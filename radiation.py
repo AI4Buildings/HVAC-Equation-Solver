@@ -4,13 +4,17 @@ Strahlungs-Modul für den HVAC Equation Solver
 Implementiert Schwarzkörper-Strahlungsfunktionen basierend auf dem Planckschen Strahlungsgesetz.
 
 Funktionen:
-- Eb(T, lambda): Spektrale Emissionsleistung [W/(m²·µm)]
+- Eb(T, lambda): Spektrale Emissionsleistung [W/m³] (SI; 1 W/(m²·µm) = 1e6 W/m³)
 - Blackbody(T, lambda1, lambda2): Anteil der Strahlungsenergie im Wellenlängenbereich [-]
+- Wien(T): Wellenlänge maximaler Emission [m]
 
-Einheiten:
-- Temperatur T: K (Kelvin, wird bereits in K erwartet)
-- Wellenlänge lambda: µm (Mikrometer)
-- Eb: W/(m²·µm)
+Einheiten (intern SI, wie im ganzen Solver):
+- Temperatur T: K
+- Wellenlänge lambda: m (Eingaben mit Einheit, z.B. "5 µm", werden vom Parser
+  nach m umgerechnet). Reine Zahlen werden automatisch erkannt: Werte < 0.01
+  gelten als Meter, größere als µm - "Eb(1000, 5)" und "Eb(1000, 5e-6)" sind gleich.
+- Eb: W/m³ (Anzeige in der GUI als W/(m²·µm))
+- Wien: m (Anzeige in der GUI als µm)
 - Blackbody: dimensionslos (0-1)
 
 Konstanten (CODATA, konsistent zu σ = 5.670374419e-8):
@@ -43,18 +47,19 @@ def _ensure_kelvin(T):
 
 def _normalize_wavelength(wavelength):
     """
-    Normalisiert Wellenlänge zu µm.
+    Normalisiert Wellenlänge zu µm (interne Rechengröße der Planck-Formeln).
 
-    Wenn der Wert sehr klein ist (< 0.0001), wird angenommen dass er in Metern
-    angegeben ist und zu µm konvertiert (Faktor 1e6).
+    Wellenlängen kommen im Solver in Metern an (SI, "5 µm" -> 5e-6). Reine
+    Zahlen in µm ("5") bleiben weiterhin möglich: Werte < 0.01 werden als Meter
+    interpretiert und mit 1e6 multipliziert, größere Werte als µm.
 
-    Typische Wellenlängen für Wärmestrahlung: 0.1-100 µm
+    Die Schwelle 0.01 deckt Wellenlängen in Metern bis 1 cm ab (weit über den
+    für Wärmestrahlung relevanten Bereich hinaus); als µm-Zahl wären Werte
+    < 0.01 µm (< 10 nm) für die Schwarzkörperstrahlung bedeutungslos.
     """
     wavelength = np.asarray(wavelength)
 
-    # Schwelle: 0.0001 µm = 0.1 nm (extrem kurz, unwahrscheinlich)
-    # Wenn wavelength < 0.0001, ist es wahrscheinlich in Metern
-    threshold = 0.0001
+    threshold = 0.01
 
     if wavelength.ndim == 0:
         # Skalar
@@ -79,13 +84,13 @@ def Eb(T, wavelength):
                    Werte < 0.0001 werden als Meter interpretiert
 
     Returns:
-        Spektrale Emissionsleistung in W/(m²·µm)
+        Spektrale Emissionsleistung in W/m³ (SI). Für W/(m²·µm) durch 1e6 teilen.
 
     Beispiel:
-        >>> Eb(1273.15, 3.0)  # Bei 1273.15 K (= 1000°C) und 3 µm
-        36446.4...
-        >>> Eb(1273.15, 3e-6)  # Bei 1273.15 K und 3e-6 m = 3 µm (gleich!)
-        36446.4...
+        >>> Eb(1273.15, 3e-6)  # Bei 1273.15 K (= 1000°C) und 3 µm
+        3.64...e10            # = 36446 W/(m²·µm)
+        >>> Eb(1273.15, 3.0)   # 3 als µm-Zahl erkannt (gleiches Ergebnis)
+        3.64...e10
     """
     wavelength = _normalize_wavelength(wavelength)  # Auto-Konvertierung m -> µm
     T_kelvin = _ensure_kelvin(T)
@@ -107,6 +112,9 @@ def Eb(T, wavelength):
             0.0,
             C1 / (wavelength**5 * (np.exp(exponent) - 1))
         )
+
+    # W/(m²·µm) -> W/m³ (SI, passend zu Wellenlängen in m)
+    eb = eb * 1e6
 
     # Rückgabe als Skalar wenn Eingabe skalar war
     if eb.ndim == 0:
@@ -292,13 +300,13 @@ def Wien_displacement(T):
     """
     Berechnet die Wellenlänge maximaler Emission nach dem Wienschen Verschiebungsgesetz.
 
-    λ_max = 2898 µm·K / T
+    λ_max = b / T  mit b = 2.897771955e-3 m·K (CODATA)
 
     Args:
         T: Temperatur in K (Skalar oder Array)
 
     Returns:
-        Wellenlänge maximaler Emission in µm
+        Wellenlänge maximaler Emission in m (SI)
     """
     T_kelvin = _ensure_kelvin(T)
 
@@ -306,8 +314,8 @@ def Wien_displacement(T):
     if np.any(T_kelvin <= 0):
         raise ValueError(f"Temperatur muss > 0 K sein")
 
-    # Wiensche Verschiebungskonstante
-    b = 2897.8  # µm·K
+    # Wiensche Verschiebungskonstante (CODATA)
+    b = 2.897771955e-3  # m·K
 
     result = b / T_kelvin
 
@@ -366,15 +374,15 @@ if __name__ == "__main__":
     # Test 1: Spektrale Emissionsleistung
     print("Test 1: Eb bei T=1273.15 K (= 1000°C)")
     for lam in [1, 2, 3, 5, 10]:
-        eb = Eb(1273.15, lam)
-        print(f"  Eb(1273.15 K, {lam} µm) = {eb:.2f} W/(m²·µm)")
+        eb = Eb(1273.15, lam * 1e-6)
+        print(f"  Eb(1273.15 K, {lam} µm) = {eb:.4e} W/m³ = {eb / 1e6:.2f} W/(m²·µm)")
     print()
 
     # Test 2: Wien'sche Verschiebung
     print("Test 2: Wien'sche Verschiebung")
     for T in [273.15, 373.15, 773.15, 1273.15, 5773.15]:
         lam_max = Wien_displacement(T)
-        print(f"  λ_max({T} K) = {lam_max:.3f} µm")
+        print(f"  λ_max({T} K) = {lam_max:.4e} m = {lam_max * 1e6:.3f} µm")
     print()
 
     # Test 3: Stefan-Boltzmann
