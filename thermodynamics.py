@@ -242,9 +242,14 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
         if key_lower in INPUT_MAP:
             cp_key = INPUT_MAP[key_lower]
 
-            # Begrenze Werte auf gültige Bereiche (wichtig für iterative Löser)
-            if cp_key == 'Q':  # Dampfqualität muss zwischen 0 und 1 sein
-                value = max(0.0, min(1.0, float(value)))
+            # Dampfgehalt: nur Rundungsfehler werden auf 0 ... 1 begrenzt; ein Wert deutlich
+            # außerhalb (x = 2) ist ein Eingabefehler bzw. ein ungültiger Iterationspunkt
+            if cp_key == 'Q':
+                value = float(value)
+                if not -1e-6 <= value <= 1 + 1e-6:
+                    raise ValueError(f"Dampfgehalt x = {value:.6g} liegt außerhalb von 0 ... 1 "
+                                     f"(x gilt nur im Nassdampfgebiet)")
+                value = max(0.0, min(1.0, value))
 
             # Spezialfall: Volumen -> Dichte umrechnen
             if cp_key == 'V_input':

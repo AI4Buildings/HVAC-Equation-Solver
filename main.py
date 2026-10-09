@@ -44,7 +44,7 @@ except ImportError:
 try:
     from unit_constraints import (propagate_all_units, check_all_unit_consistency, propagate_all_units_complete,
                                   temperature_sum_conflicts, scale_dependent_sums, scale_origin,
-                                  missing_unit_annotations)
+                                  missing_unit_annotations, scale_offset_literals)
     CONSTRAINT_PROPAGATION_AVAILABLE = True
 except ImportError:
     CONSTRAINT_PROPAGATION_AVAILABLE = False
@@ -273,7 +273,8 @@ Properties (results in SI):
   volume(...)        Specific volume [m3/kg]
   temperature(...)   Temperature [K]
   pressure(...)      Pressure [Pa]
-  quality(...)       Vapor quality [-]
+  quality(...)       Vapor quality [-] (-1 outside the two-phase
+                     region: subcooled, superheated, supercritical)
   cp(...), cv(...)   Specific heat capacity [J/(kg K)]
   viscosity(...)     Dynamic viscosity [Pa s]
   conductivity(...)  Thermal conductivity [W/(m K)]
@@ -285,7 +286,7 @@ State properties (2 required; SI or with unit):
   p = Pressure [Pa]          e.g. p=1 bar or p=100000
   h = Enthalpy [J/kg]        e.g. h=2500 kJ/kg
   s = Entropy [J/(kg K)]     e.g. s=7 kJ/(kg*K)
-  x = Vapor quality [-]
+  x = Vapor quality [-]      0 ... 1 (x = 2 is reported)
   rho (or d) [kg/m3], u [J/kg], v [m3/kg]
 A unit that does not fit the property (e.g. p=1 kg) is reported.
 
@@ -301,12 +302,16 @@ Outputs: T, T_dp, T_wb [K], h [J/kg dry air], w [kg/kg],
          rh [-], p_w [Pa], rho_tot, rho_a, rho_w [kg/m3],
          cp [J/(kg K), per kg dry air], cp_ha [per kg humid air]
 Inputs:  T [K], p_tot [Pa], rh (or rF) [-], w [kg/kg], p_w [Pa],
-         h [J/kg]
+         h [J/kg], T_dp [K] (dew point), T_wb [K] (wet bulb)
 
   h = HumidAir(h, T=298.15 K, rh=0.5, p_tot=1 bar)   {25°C}
   h = HumidAir(h, T=25 °C, rh=0.5, p_tot=1 bar)      {also valid}
   w = HumidAir(w, T=30 °C, rh=0.6, p_tot=1 bar)
   T_dp = HumidAir(T_dp, T=25 °C, w=0.01, p_tot=1 bar)
+  w = HumidAir(w, T=12 °C, T_dp=8 °C, p_tot=1 bar)
+A state with more water than saturated air can hold (w > w_s at
+T, p - fog) is reported as "Zustand übersättigt": the condensate
+has to be part of the balance. Saturated air gives rh = 1.
 
 RADIATION FUNCTIONS (Blackbody):
 --------------------------------
@@ -1702,6 +1707,12 @@ class EquationSolverApp(ctk.CTk):
                     temperature_hints += self._missing_unit_hints(
                         original_equations, {**known_units, **{c: '' for c in self._dimensionless_constants(
                             constants, sweep_vars) if c not in known_units}}, open_k)
+                for source, number, scale in scale_offset_literals(original_equations, all_units):
+                    temperature_hints.append(
+                        f"'{unmangle(source)}': {number:g} ist der Nullpunkt der {scale}-Skala. "
+                        f"Temperaturen werden hier in Kelvin gerechnet - die Umrechnung "
+                        f"verschiebt den Nullpunkt ein zweites Mal. Formeln, die für Zahlenwerte "
+                        f"in {scale} gelten, mit value()/quantity() schreiben (siehe Hilfe)")
                 handled = {h_source for h_source, _ in scale_hints}
                 temperature_hints += [text for _, text in scale_hints] + [
                     h for h in self._celsius_difference_hints(
@@ -1778,7 +1789,8 @@ class EquationSolverApp(ctk.CTk):
                         equations, variables, {**constants, **optimized}, original_equations,
                         equations_text, solution if not success else None)
                     if analysis is not None:
-                        analysis.hints = temperature_hints + hints
+                        analysis.hints = (temperature_hints + hints
+                                          + self._single_phase_quality_hints(original_equations, solution))
                 except Exception:
                     diagnosis_errors = []
 
@@ -1821,6 +1833,12 @@ class EquationSolverApp(ctk.CTk):
                 if not is_contradiction and diagnosis_errors and not goals:
                     timed_out = (solve_msg or "").startswith("Zeitlimit")
                     solve_msg = " ".join(diagnosis_errors)
+                    # Die konkrete Ursache zuerst: Fehlermeldung der Auswertung (Stoffwert-
+                    # funktion außerhalb des Gültigkeitsbereichs, 0/0) mit Originalzeile
+                    evaluation_errors = getattr(analysis, 'evaluation_errors', None) or []
+                    if evaluation_errors:
+                        solve_msg = ("Auswertungsfehler: " + "; ".join(evaluation_errors[:3])
+                                     + ". " + solve_msg)
                     if timed_out:
                         solve_msg = (f"Abbruch nach Zeitlimit ({solver_module.SOLVE_TIME_LIMIT:.0f} s). "
                                      + solve_msg)
@@ -1908,6 +1926,39 @@ class EquationSolverApp(ctk.CTk):
         equations = [replaced.get(eq, eq) for eq in equations]
         original_equations = {replaced.get(eq, eq): text for eq, text in original_equations.items()}
         return equations, original_equations, points, hints
+
+    @staticmethod
+    def _single_phase_quality_hints(original_equations, solution) -> List[str]:
+        """
+        quality(...) liefert außerhalb des Nassdampfgebiets -1 (CoolProp: unterkühlt, überhitzt,
+        überkritisch) - jeder Aufruf wird mit der Lösung ausgewertet; bei -1 ein Hinweis.
+        """
+        if not solution:
+            return []
+        try:
+            from parser import _iter_call_spans
+            from solver import _get_eval_context
+            context = _get_eval_context()
+        except Exception:
+            return []
+        values = {}
+        for name, value in solution.items():
+            try:
+                values[name] = float(value[0]) if isinstance(value, np.ndarray) else float(value)
+            except (TypeError, ValueError, IndexError):
+                continue
+        hints = []
+        for parsed, original in original_equations.items():
+            for start, _, close, _ in _iter_call_spans(parsed, {'quality'}):
+                try:
+                    x = float(eval(parsed[start:close + 1], {"__builtins__": {}}, {**context, **values}))
+                except Exception:
+                    continue
+                if x == -1.0:
+                    hints.append(f"'{unmangle(original or parsed)}': quality(...) = -1 - der Zustand liegt "
+                                 f"nicht im Nassdampfgebiet (unterkühlt, überhitzt oder überkritisch)")
+                    break
+        return hints
 
     @staticmethod
     def _zero_point_evaluator(solution: dict):
@@ -2168,7 +2219,7 @@ class EquationSolverApp(ctk.CTk):
             self.result_status_label.configure(text="● PARTIAL SOLUTION", text_color=COLORS["warning"])
 
         # Stats aus solve_msg extrahieren (falls vorhanden)
-        self.result_stats_label.configure(text=solve_msg if len(solve_msg) < 40 else "")
+        self.result_stats_label.configure(text=solve_msg if len(solve_msg) < 80 else "")
 
         # Info-Zeile
         status_color = COLORS["success"] if status == "OK" else COLORS["error"]

@@ -354,8 +354,10 @@ ok1, sol1, msg1 = opt(KVS_UNITS)
 ok2, sol2, msg2 = opt(KVS_SI)
 check("KVS mit Messdaten (Optimum je Punkt) mit Einheiten = unabhängiges Modell",
       ok1 and np.allclose(sol1['m_dot_gly'], refs, rtol=1e-5), f"{sol1.get('m_dot_gly')} {refs}")
+# Zielgröße exakt gleich; die Stelle eines flachen Optimums ist nur auf ~sqrt(eps) bestimmt
 check("KVS mit Messdaten ohne Einheiten: gleiches Ergebnis",
-      ok2 and same(sol1, sol2, ['m_dot_gly', 'Q_dot_AF', 'eta', 'T_gly_AZ'], 1e-8), msg2)
+      ok2 and same(sol1, sol2, ['eta'], 1e-8)
+      and same(sol1, sol2, ['m_dot_gly', 'Q_dot_AF', 'T_gly_AZ'], 1e-5), msg2)
 
 # IF und Startwerte-Block mit und ohne Einheiten
 ok1, sol1, msg1 = opt("T_1 = 20 °C\nT_2 = 30 °C\nq = 5 W/m^2\nq_2 = IF(T_1, T_2, q, 0, 2*q)\n"

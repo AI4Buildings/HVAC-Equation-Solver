@@ -309,6 +309,7 @@ ARG_EXPECTED_UNITS = {
     'h': 'J/kg', 'u': 'J/kg', 's': 'J/(kg*K)',
     'rho': 'kg/m^3', 'd': 'kg/m^3', 'v': 'm^3/kg',
     'x': 'dimensionless', 'rh': 'dimensionless', 'rf': 'dimensionless', 'w': 'dimensionless',
+    't_dp': 'K', 't_wb': 'K',
 }
 
 # Erwartete Einheiten der Positionsargumente der Strahlungsfunktionen (nach T)
@@ -835,15 +836,15 @@ def _check_call_signature(node, func_name: str, text: str, offset: int) -> None:
         return
 
     if lower == 'humidair':
-        from humid_air import OUTPUT_MAP as HA_OUTPUTS, INPUT_MAP as HA_INPUTS
+        from humid_air import OUTPUT_MAP as HA_OUTPUTS, INPUT_MAP as HA_INPUTS, display_names
         if n_args != 1 or first_text is None or first_text.lower() not in HA_OUTPUTS:
             raise EquationSyntaxError(
                 f"HumidAir: unbekannte Eigenschaft '{first_text}' (gültig: "
-                f"{', '.join(HA_OUTPUTS)}), {where}")
+                f"{display_names(HA_OUTPUTS)}), {where}")
         bad = [k for k in keywords if k is None or k.lower() not in HA_INPUTS]
         if bad:
             raise EquationSyntaxError(
-                f"HumidAir(): unbekannter Parameter '{bad[0]}' (gültig: {', '.join(HA_INPUTS)}), {where}")
+                f"HumidAir(): unbekannter Parameter '{bad[0]}' (gültig: {display_names(HA_INPUTS)}), {where}")
         if len(keywords) != 3:
             raise EquationSyntaxError(
                 f"HumidAir() braucht genau 3 Zustandsgrößen (z.B. T=..., rh=..., p_tot=...), "
@@ -1511,30 +1512,17 @@ def validate_system(equations: List[str], variables: Set[str], constants: Option
         return False, "Keine Gleichungen gefunden."
 
     if n_var == 0:
-        return False, "Keine Variablen gefunden."
+        # Nur Vorgaben und Kontrollgleichungen: der Solver prüft die Gleichungen
+        return True, f"System: {n_eq} Prüfgleichungen ohne Unbekannte."
 
     if n_eq < n_var:
         return False, f"Unterbestimmtes System: {n_eq} Gleichungen, aber {n_var} Unbekannte.\nVariablen: {', '.join(sorted(variables))}"
 
-    # Zähle Constraint-Gleichungen (LHS ist Konstante)
-    n_constraints = 0
-    if constants:
-        for eq in equations:
-            # Gleichungen haben die Form "(var) - (expr)"
-            match = re.match(r'^\(([a-zA-Z_][a-zA-Z0-9_]*)\)\s*-\s*\(', eq)
-            if match:
-                lhs_var = match.group(1)
-                if lhs_var in constants:
-                    n_constraints += 1
-
-    # Effektive Gleichungsanzahl = Gleichungen - Constraints
-    n_effective_eq = n_eq - n_constraints
-
-    if n_effective_eq > n_var:
-        return False, f"Überbestimmtes System: {n_eq} Gleichungen ({n_constraints} Constraints), aber nur {n_var} Unbekannte.\nVariablen: {', '.join(sorted(variables))}"
-
-    if n_constraints > 0:
-        return True, f"System: {n_eq} Gleichungen ({n_constraints} Constraints), {n_var} Unbekannte."
+    # Mehr Gleichungen als Unbekannte ist erlaubt: der Solver löst ein quadratisches
+    # Teilsystem und prüft die übrigen Gleichungen (widerspruchsfrei -> Lösung, sonst
+    # "Widersprüchliches System"). Unabhängig von der Schreibweise der Gleichungen.
+    if n_eq > n_var:
+        return True, f"System: {n_eq} Gleichungen, {n_var} Unbekannte (überbestimmt, wird geprüft)."
 
     return True, f"System OK: {n_eq} Gleichungen, {n_var} Unbekannte."
 

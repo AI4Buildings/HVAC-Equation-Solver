@@ -632,6 +632,24 @@ for text, name, expected in (
     value, unit = shown(name)
     check(f"Nullpunkt-Test: {text.splitlines()[-1][:40]} -> {expected[0]} {expected[1]}",
           unit == expected[1] and abs(value - expected[0]) < 1e-3, f"{value} {unit}")
+# Auswertungsfehler (Stoffwert außerhalb des Gültigkeitsbereichs, 0/0) erscheinen in der Meldung
+for text, expected in (("p_2 = 90 bar\nh_3 = enthalpy(CO2, p=p_2, x=0)", "critical point"),
+                       ("C_r = 1\nNTU = 2\neps = (1-exp(-NTU*(1-C_r)))/(1-C_r*exp(-NTU*(1-C_r)))",
+                        "nicht definiert"),
+                       ("T = 20 °C\np = 10 bar\nw = 0.01\nphi = HumidAir(rh, T=T, w=w, p_tot=p)",
+                        "Zustand übersättigt")):
+    solve(text)
+    info = app.info_label.cget("text")
+    check(f"GUI nennt Auswertungsfehler: {expected}", info.startswith("Auswertungsfehler:") and expected in info,
+          info[:160])
+solve("a = 2\nx + y = a\nx + 3*y = 4\nx + 2*y = 3")
+check("GUI: überbestimmt, widerspruchsfrei -> Lösung", "SOLUTION FOUND" in app.result_status_label.cget("text")
+      and shown("x")[0] == 1.0, app.info_label.cget("text"))
+solve("p = 0.05 bar\nh = 2567 kJ/kg\nx = quality(water, p=p, h=h)")
+check("quality() = -1 (überhitzt) -> Hinweis 'nicht im Nassdampfgebiet'",
+      any("nicht im Nassdampfgebiet" in h for h in app.last_analysis.hints), str(app.last_analysis.hints))
+solve("p = 1 bar\nh = 1500 kJ/kg\nx = quality(water, p=p, h=h)")
+check("quality() im Nassdampfgebiet -> kein Hinweis", app.hints_label.cget("text") == "")
 app._on_unit_changed("T2", "K")
 solve("T1=10°C\nT2=20°C\nT1=T2+x")
 app._on_unit_changed("x", "°C")

@@ -422,6 +422,16 @@ except Exception as exc:
 # Tearing: Block aus direkten Zuweisungen + einer Residuengleichung
 cands = _find_tear_candidates(["(y) - (exp(x))", "(10) - (y**2 + x)"], {'x', 'y'}, set())
 check("Tearing-Kandidat gefunden", bool(cands) and cands[0][2] == "(10) - (y**2 + x)", str(cands))
+# Tearing mit linear impliziten Gleichungen (natürliche Schreibweise), exakt aufgelöst
+from solver import _is_linear_in, _LinearStep
+check("Linear in h_2: eta = (h_1 - h_2)/(h_1 - h_2s)", _is_linear_in("(eta) - ((h_1 - h_2)/(h_1 - h_2s))", "h_2")
+      and not _is_linear_in("(eta) - ((h_1 - h_2)/(h_1 - h_2s))", "h_2s")
+      and not _is_linear_in("(y) - (exp(x))", "x") and _is_linear_in("(Q) - (m*(h_2 - h_10))", "m"))
+cands = _find_tear_candidates(["(eta) - ((h_1 - h_2)/(h_1 - h_2s))", "(h_2s) - (h_1 - 0.5*p)",
+                               "(m) - (Q/(h_2 - 1))", "(p*m) - (3)"], {'h_2', 'h_2s', 'm', 'p'},
+                              {'eta', 'h_1', 'Q'}, allow_linear=True)
+check("Tearing-Kette mit linearem Schritt", any(isinstance(step, _LinearStep) for c in cands for _, step in c[1]),
+      str(cands))
 FILMTEMP = """T_inf = 293.15
 H = 0.5
 q = 100
@@ -476,7 +486,8 @@ def parse_error(text):
 # Gleichung mit (numerisch) nur Null-Termen darf den Block nicht verwerfen
 eqs, variables, consts, _, orig, _ = parse_equations("eps = 0\nq_x = eps*y\nx^2 + y = 10\nx*y + q_x = 6")
 s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
-check("Null-Term (eps = 0) im Block: gelöst", s_ and abs(sol['x'] ** 2 + sol['y'] - 10) < 1e-9, msg)
+check("Null-Term (eps = 0) im Block: gelöst", s_ and abs(sol['x'] ** 2 + sol['y'] - 10) < 1e-7
+      and abs(sol['x'] * sol['y'] - 6) < 1e-7, msg)
 
 # Fehlermeldungen aus Funktionen / undefinierte Ausdrücke werden genannt
 eqs, variables, consts, _, orig, _ = parse_equations(
@@ -1022,6 +1033,62 @@ eqs, _, _, _, _, _ = parse_equations("a = 5\nb = a % 3")
 check("% zwischen Variablen bleibt der Modulo-Operator", eqs == ['(b) - (a % 3)'], str(eqs))
 eqs, _, _, _, _, _ = parse_equations("w = HumidAir(w, T=25 °C, rh=50 %, p_tot=1 bar)")
 check("Prozent in Funktionsargumenten (rh=50 %)", "rh=0.5" in eqs[0], str(eqs))
+
+# Überbestimmte, widerspruchsfreie Blöcke: quadratisches Teilsystem lösen, Rest prüfen -
+# unabhängig von der Schreibweise (a = x + y bzw. x + y = a)
+from parser import validate_system
+for text in ("a = 2\na = x + y\nx + 3*y = 4\nx + 2*y = 3", "a = 2\nx + y = a\nx + 3*y = 4\nx + 2*y = 3",
+             "x + y = 2\nx + 3*y = 4\nx + 2*y = 3", "x + y = 2\n2*x + 2*y = 4\nx - y = 0",
+             "x - y = 1\nx^2 + y^2 = 5\nx*y = 2"):
+    eqs, variables, consts, _, orig, _ = parse_equations(text)
+    valid, _ = validate_system(eqs, variables, consts)
+    s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    expected = (2, 1) if text.startswith("x - y") else (1, 1)
+    check(f"Überbestimmt, widerspruchsfrei: {text.splitlines()[1]} ...", valid and s_
+          and abs(sol['x'] - expected[0]) < 1e-6 and abs(sol['y'] - expected[1]) < 1e-6, msg)
+eqs, variables, consts, _, orig, _ = parse_equations("a = 2\na = x + y\nx + 3*y = 4\nx + 2*y = 5")
+s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Überbestimmt, widersprüchlich -> Meldung mit verletzter Gleichung",
+      not s_ and "Widerspr" in msg and "x + 2*y = 5" in msg, msg)
+
+# Feuchte Luft: Sättigung (rh = 1 trotz Rundungsfehler), Übersättigung mit klarer Meldung
+from humid_air import HumidAir
+fails = 0
+for P in (0.8e5, 1e5, 2e5, 5e5, 10e5):
+    for Tc in (0.5, 10, 20, 35, 60):
+        w_s = HumidAir('w', T=Tc + 273.15, rh=1, p_tot=P)
+        fails += abs(HumidAir('rh', T=Tc + 273.15, w=w_s, p_tot=P) - 1) > 1e-9
+check("HumidAir(rh) bei gesättigter Luft = 1 (25 Zustände)", fails == 0, str(fails))
+for out in ('h', 'T_dp', 'rh', 'rho_tot'):
+    try:
+        HumidAir(out, T=293.15, w=0.00889, p_tot=1e6)
+        check(f"HumidAir({out}) übersättigt -> Meldung", False)
+    except ValueError as exc:
+        check(f"HumidAir({out}) übersättigt -> Meldung", "übersättigt" in str(exc) and "w_s" in str(exc), str(exc))
+check("HumidAir mit Taupunkt als Eingabe (T_dp=)",
+      abs(HumidAir('w', T=285.15, T_dp=281.15, p_tot=1e5) - 0.0067733) < 1e-6)
+check("HumidAir mit Feuchtkugeltemperatur als Eingabe (T_wb=)",
+      abs(HumidAir('w', T=303.15, T_wb=293.15, p_tot=1e5) - 0.0107726) < 1e-6)
+check("HumidAir: Meldung nennt T, rF, T_dp wie dokumentiert",
+      "T, p_tot, w, rh, rF" in parse_error("x = HumidAir(w, T=12 °C, phi=0.5, p_tot=1 bar)"))
+
+# Dampfgehalt außerhalb 0 ... 1: Meldung statt stillschweigender Begrenzung
+from thermodynamics import enthalpy
+try:
+    enthalpy('CO2', T=293.15, x=2)
+    check("enthalpy(x=2) -> Meldung", False)
+except ValueError as exc:
+    check("enthalpy(x=2) -> Meldung", "außerhalb von 0 ... 1" in str(exc), str(exc))
+check("enthalpy(x=1+1e-12) (Rundungsfehler) wird begrenzt",
+      abs(enthalpy('water', T=373.15, x=1 + 1e-12) - enthalpy('water', T=373.15, x=1)) < 1e-6)
+
+# Blatt nur aus Vorgaben und Kontrollgleichungen: wird geprüft statt "Keine Variablen"
+for text, ok_expected in (("x = 2\ny = x + 1\ny = 3", True), ("x = 2\ny = x + 1\ny = 4", False)):
+    eqs, variables, consts, _, orig, _ = parse_equations(text)
+    valid, _ = validate_system(eqs, variables, consts)
+    s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    check(f"Nur Prüfgleichungen: {text.splitlines()[-1]} -> {'erfüllt' if ok_expected else 'Widerspruch'}",
+          valid and s_ == ok_expected and (ok_expected or "Widerspr" in msg), msg)
 
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")

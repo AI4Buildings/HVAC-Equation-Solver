@@ -19,7 +19,7 @@ Syntax:
 """
 
 import CoolProp.CoolProp as CP
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from scipy.optimize import brentq
 
 
@@ -52,7 +52,17 @@ INPUT_MAP = {
     'rf': ('R', lambda x: x),                       # rF = relative Feuchte (German alias for rh)
     'p_w': ('psi_w', None),                         # Special handling
     'h': ('Hda', lambda x: x),                      # J/kg -> J/kg (bereits SI)
+    't_dp': ('Tdp', lambda x: x),                   # Taupunkt K (EES: D=)
+    't_wb': ('Twb', lambda x: x),                   # Feuchtkugeltemperatur K (EES: B=)
 }
+
+# Schreibweise in Meldungen und Hilfe (die Schlüssel oben sind klein geschrieben)
+DISPLAY_NAMES = {'t': 'T', 't_dp': 'T_dp', 't_wb': 'T_wb', 'rf': 'rF'}
+
+
+def display_names(keys) -> str:
+    """'T, h, rh, ...' - Namen wie dokumentiert (Groß-/Kleinschreibung ist beliebig)."""
+    return ', '.join(DISPLAY_NAMES.get(k, k) for k in keys)
 
 
 def _resolve_dual_humidity(inputs: dict, humidity_keys: set) -> dict:
@@ -136,6 +146,28 @@ def _resolve_dual_humidity(inputs: dict, humidity_keys: set) -> dict:
                      f"({key1}={val1}, {key2}={val2})")
 
 
+# Relative Toleranz für "gesättigt": Rundungsfehler aus den Iterationen und CoolProp
+SATURATION_TOLERANCE = 1e-6
+
+
+def _saturation(inputs: dict) -> Optional[Tuple[float, float, float, float]]:
+    """
+    (T, w, w_s, p) des Zustands für die Sättigungsprüfung - unabhängig davon, welche drei
+    Größen gegeben sind. None, wenn eine relative Feuchte eingegeben ist (CoolProp lässt nur
+    rh <= 1 zu) oder der Zustand nicht bestimmbar ist.
+    """
+    if 'R' in inputs or 'P' not in inputs:
+        return None
+    args = [x for item in inputs.items() for x in item]
+    try:
+        T = inputs['T'] if 'T' in inputs else CP.HAPropsSI('T', *args)
+        w = inputs['W'] if 'W' in inputs else CP.HAPropsSI('W', *args)
+        w_s = CP.HAPropsSI('W', 'T', T, 'P', inputs['P'], 'R', 1.0)
+    except Exception:
+        return None
+    return T, w, w_s, inputs['P']
+
+
 def HumidAir(output_prop: str, **kwargs) -> float:
     """
     Calculates properties of humid air.
@@ -176,7 +208,7 @@ def HumidAir(output_prop: str, **kwargs) -> float:
     output_key = output_prop.lower()
 
     if output_key not in OUTPUT_MAP:
-        valid_outputs = ', '.join(OUTPUT_MAP.keys())
+        valid_outputs = display_names(OUTPUT_MAP)
         raise ValueError(f"Unknown property '{output_prop}'. Valid values: {valid_outputs}")
 
     # Collect and convert input parameters
@@ -187,7 +219,7 @@ def HumidAir(output_prop: str, **kwargs) -> float:
         key_lower = key.lower()
 
         if key_lower not in INPUT_MAP:
-            valid_inputs = ', '.join(INPUT_MAP.keys())
+            valid_inputs = display_names(INPUT_MAP)
             raise ValueError(f"Unknown parameter '{key}'. Valid parameters: {valid_inputs}")
 
         cp_key, converter = INPUT_MAP[key_lower]
@@ -222,7 +254,7 @@ def HumidAir(output_prop: str, **kwargs) -> float:
 
     # Check for dual humidity inputs (CoolProp doesn't support these directly)
     # Humidity properties: W (w), R (rh), psi_w (p_w)
-    humidity_keys = {'W', 'R', 'psi_w'}
+    humidity_keys = {'W', 'R', 'psi_w', 'Tdp', 'Twb'}
     input_humidity = set(inputs.keys()) & humidity_keys
 
     if len(input_humidity) == 2 and 'P' in inputs:
@@ -233,6 +265,17 @@ def HumidAir(output_prop: str, **kwargs) -> float:
     if output_key == 'p_w' and p_tot_pa is None:
         raise ValueError("Output 'p_w' benötigt p_tot als Input-Parameter "
                          "(p_w = psi_w * p_tot)")
+
+    # Sättigung: ein übersättigter Zustand (w > w_s bei T, p) ist mit Wasserdampf allein nicht
+    # möglich - CoolProp liefert dafür je nach Ausgabe Werte oder eine unverständliche Meldung
+    saturation = _saturation(inputs)
+    if saturation is not None:
+        T_s, w_state, w_sat, p_state = saturation
+        if w_state > w_sat * (1 + SATURATION_TOLERANCE):
+            raise ValueError(
+                f"Zustand übersättigt: w = {w_state * 1000:.4g} g/kg > w_s = {w_sat * 1000:.4g} g/kg "
+                f"bei T = {T_s - 273.15:.4g} °C, p = {p_state / 1e5:.4g} bar - so viel Wasserdampf "
+                f"kann die Luft nicht aufnehmen (Kondensat in der Bilanz berücksichtigen)")
 
     # Create CoolProp call
     keys = list(inputs.keys())
@@ -263,6 +306,9 @@ def HumidAir(output_prop: str, **kwargs) -> float:
             return result_si
 
     except Exception as e:
+        # Gesättigte Luft: CoolProp rechnet rh = 1 + Rundungsfehler und lehnt das ab
+        if output_key == 'rh' and saturation is not None:
+            return 1.0
         raise ValueError(f"CoolProp HumidAirProp Error: {e}")
 
 

@@ -285,7 +285,12 @@ The solver uses robust block decomposition:
   (divergence to an asymptote is never accepted as a solution)
 - With multiple roots, the one closest to the initial value is chosen
   (`sin(alpha) = 0.5` yields 30, not 150)
-- Contradictory systems (e.g. `x+1=3` and `x+1=4`) are reported as errors
+- Contradictory systems (e.g. `x+1=3` and `x+1=4`) are reported as errors; redundant but
+  consistent equations (an extra balance) are allowed and checked, whichever way they are written
+- Linearly dependent equations (`x + y = 1`, `2*x + 2*y = 2`, a balance written twice) are
+  reported as "Lösung nicht eindeutig" instead of returning an arbitrary point
+- Errors of property functions (outside the valid range, supersaturated humid air) and 0/0
+  are reported with the original line
 - Parameter studies use warm starts (previous point's solution as initial value)
 - Initial values from the unit (unknown temperatures at the mean of the given ones) or,
   without units, from the structure: an unknown that stands as a summand next to known
@@ -354,7 +359,10 @@ unit has to be given (as a start value with unit) so that all others follow.
 
 ### Humid Air (HumidAir)
 Output: `T`, `h`, `rh`, `w`, `p_w`, `rho_tot`, `rho_a`, `rho_w`, `T_dp`, `T_wb`
-Input: `T`, `p_tot`, `rh`, `w`, `p_w`, `h`
+Input: `T`, `p_tot`, `rh`, `w`, `p_w`, `h`, `T_dp` (dew point), `T_wb` (wet bulb)
+
+A state with more water vapour than saturated air can hold (w > w_s at T, p) is reported
+("Zustand übersättigt") instead of returning values - the condensate belongs into the balance.
 
 ### Mathematics
 `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log10`, `lg`, `sqrt`, `abs`, `max`, `min`, `IF`, `value`, `quantity`, `pi`

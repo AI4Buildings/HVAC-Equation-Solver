@@ -599,6 +599,7 @@ def _solve_system_impl(
     max_iterations = len(equations) * 3 + 1
     iteration = 0
     violated_constraints = []  # Widersprüchliche Constraint-Gleichungen
+    non_unique = []            # (abhängige Gleichungen, unbestimmte Größen) gelöster Blöcke
     evaluation_errors = {}     # Gleichung -> Fehlermeldung der direkten Auswertung
     # Gescheiterte Blöcke merken: Blöcke sind Zusammenhangskomponenten der
     # Unbekannten, neue Werte aus anderen Blöcken ändern sie nicht - ein
@@ -701,11 +702,21 @@ def _solve_system_impl(
             # oder nicht konvergierender Block darf lösbare Blöcke nicht blockieren
             for block_eqs, block_vars in blocks:
                 block_key = frozenset(block_eqs)
-                # Prüfe ob Block quadratisch ist
-                if len(block_eqs) == len(block_vars) and block_key not in failed_blocks:
-                    success, block_solution, block_msg, block_analysis = _solve_equation_block(
-                        block_eqs, block_vars, known_values, context, initial_values, original_equations, inferred_units
-                    )
+                # Quadratischer Block: lösen; überbestimmter Block: quadratisches Teilsystem
+                # lösen, die übrigen Gleichungen bleiben als Prüfung (Constraints) offen
+                if len(block_eqs) >= len(block_vars) and block_key not in failed_blocks:
+                    if len(block_eqs) == len(block_vars):
+                        success, block_solution, block_msg, block_analysis = _solve_equation_block(
+                            block_eqs, block_vars, known_values, context, initial_values,
+                            original_equations, inferred_units
+                        )
+                    else:
+                        (success, block_solution, block_msg, block_analysis,
+                         solved_eqs) = _solve_overdetermined_block(
+                            block_eqs, block_vars, known_values, context, initial_values,
+                            original_equations, inferred_units)
+                        if success:
+                            block_eqs = solved_eqs
                     if not success:
                         failed_blocks.add(block_key)
                         if block_solution:
@@ -733,6 +744,15 @@ def _solve_system_impl(
                         # Aktualisiere bekannte Werte
                         known_values.update(block_solution)
                         remaining_vars -= block_vars
+                        # Eindeutig? (linear abhängige Gleichungen -> beliebiger Punkt)
+                        if len(block_vars) > 1:
+                            try:
+                                dependency = _non_unique_solution(
+                                    list(block_eqs), set(block_vars), known_values, context)
+                            except Exception:
+                                dependency = None
+                            if dependency is not None:
+                                non_unique.append(dependency)
 
                         # Entferne gelöste Gleichungen
                         for eq in block_eqs:
@@ -783,6 +803,19 @@ def _solve_system_impl(
 
     # Erstelle Statusmeldung
     if not remaining_equations:
+        # Linear abhängige Gleichungen: der Solver hat einen beliebigen Punkt gefunden
+        if non_unique:
+            dependent, free = non_unique[0]
+            lines = ", ".join(f"'{original_equations.get(eq, eq)}'" for eq in dependent)
+            msg = (f"Lösung nicht eindeutig: Die Gleichungen {lines} sind voneinander abhängig "
+                   f"(eine folgt aus den anderen) - {', '.join(free)} "
+                   f"{'ist' if len(free) == 1 else 'sind'} damit nicht bestimmt. Es fehlt eine "
+                   f"unabhängige Gleichung bzw. Vorgabe (z.B. eine Energie- statt einer zweiten "
+                   f"Massenbilanz).")
+            if return_analysis:
+                return False, result, msg, analysis
+            return False, result, msg
+
         # Widersprüchliche Constraints -> KEIN Erfolg melden
         if violated_constraints:
             details = '; '.join(violated_constraints[:3])
@@ -1333,10 +1366,84 @@ def _direct_assignment(equation: str) -> Optional[Tuple[str, str]]:
     return var, equation[len(f"({var}) - ("):-1]
 
 
+class _LinearStep:
+    """
+    Kettenschritt für eine Gleichung, in der die gesuchte Größe nur linear vorkommt
+    (eta = (h_1 - h_2)/(h_1 - h_2s) nach h_2, m_1 = m_7 + m_9 + m_3 nach m_3): aus zwei
+    Auswertungen r(0), r(1) folgt exakt var = -r(0)/(r(1) - r(0)).
+    """
+
+    def __init__(self, var: str, equation: str):
+        self.var = var
+        self.equation = equation
+
+    def value(self, local_ctx: dict) -> float:
+        ctx = dict(local_ctx)
+        ctx[self.var] = 0.0
+        r0 = _as_real(eval(self.equation, {"__builtins__": {}}, ctx))
+        ctx[self.var] = 1.0
+        r1 = _as_real(eval(self.equation, {"__builtins__": {}}, ctx))
+        if r1 == r0 or not (np.isfinite(r0) and np.isfinite(r1)):
+            raise ZeroDivisionError("Gleichung hängt hier nicht von der Größe ab")
+        return -r0 / (r1 - r0)
+
+
+def _chain_eval(step, local_ctx: dict):
+    """Wert eines Kettenschritts: Ausdruck (var = ausdruck) oder linear implizite Gleichung."""
+    if isinstance(step, _LinearStep):
+        return step.value(local_ctx)
+    return eval(step, {"__builtins__": {}}, local_ctx)
+
+
+def _linearity(node, var: str) -> str:
+    """'none' (var kommt nicht vor), 'linear' oder 'nonlinear' - strukturell am Syntaxbaum."""
+    import ast
+    if isinstance(node, ast.Name):
+        return 'linear' if node.id == var else 'none'
+    if isinstance(node, ast.Constant):
+        return 'none'
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        return _linearity(node.operand, var)
+    if isinstance(node, ast.BinOp):
+        left, right = _linearity(node.left, var), _linearity(node.right, var)
+        if 'nonlinear' in (left, right):
+            return 'nonlinear'
+        if isinstance(node.op, (ast.Add, ast.Sub)):
+            return 'linear' if 'linear' in (left, right) else 'none'
+        if isinstance(node.op, ast.Mult):
+            if left == 'linear' and right == 'linear':
+                return 'nonlinear'
+            return 'linear' if 'linear' in (left, right) else 'none'
+        if isinstance(node.op, ast.Div):
+            if right == 'linear':
+                return 'nonlinear'
+            return left
+        return 'nonlinear' if 'linear' in (left, right) else 'none'
+    return 'nonlinear' if any(isinstance(n, ast.Name) and n.id == var for n in ast.walk(node)) else 'none'
+
+
+_LINEAR_CACHE: Dict[Tuple[str, str], bool] = {}
+
+
+def _is_linear_in(equation: str, var: str) -> bool:
+    """Kommt var in der Gleichung (Residuum) nur linear vor?"""
+    key = (equation, var)
+    if key not in _LINEAR_CACHE:
+        import ast
+        try:
+            _LINEAR_CACHE[key] = _linearity(ast.parse(equation, mode='eval').body, var) == 'linear'
+        except Exception:
+            _LINEAR_CACHE[key] = False
+        if len(_LINEAR_CACHE) > 20000:
+            _LINEAR_CACHE.clear()
+    return _LINEAR_CACHE[key]
+
+
 def _find_tear_candidates(
     equations: List[str],
     variables: Set[str],
-    known_vars: Set[str]
+    known_vars: Set[str],
+    allow_linear: bool = False
 ) -> List[Tuple[str, List[Tuple[str, str]], str]]:
     """
     Sucht Tearing-Variablen für einen gekoppelten Block.
@@ -1383,6 +1490,18 @@ def _find_tear_candidates(
                     unused.remove(eq)
                     progress = True
                     break
+            if progress or not allow_linear or len(unused) <= 1:
+                continue
+            # sonst: Gleichung mit genau einer offenen Größe, die nur linear vorkommt
+            for eq in unused:
+                open_vars = eq_unknowns[eq] - determined
+                if len(open_vars) == 1 and _is_linear_in(eq, next(iter(open_vars))):
+                    var = next(iter(open_vars))
+                    sequence.append((var, _LinearStep(var, eq)))
+                    determined.add(var)
+                    unused.remove(eq)
+                    progress = True
+                    break
         if determined == variables and len(unused) == 1:
             candidates.append((tear, sequence, unused[0]))
     return candidates
@@ -1398,15 +1517,21 @@ def _solve_block_by_tearing(
     max_candidates: int = 3
 ) -> Tuple[bool, Dict[str, float], str]:
     """Löst einen Block über eine Tearing-Variable (siehe _find_tear_candidates)."""
-    candidates = _find_tear_candidates(equations, variables, set(known_values.keys()))
-    for tear, sequence, residual_eq in candidates[:max_candidates]:
+    known = set(known_values.keys())
+    # Zuerst nur explizite Zuweisungen (var = ausdruck); danach Ketten, in denen Gleichungen
+    # mit genau einer offenen, nur linear vorkommenden Größe exakt aufgelöst werden
+    # (natürliche implizite Schreibweise, z.B. eta = (h_1 - h_2)/(h_1 - h_2s))
+    explicit = _find_tear_candidates(equations, variables, known)[:max_candidates]
+    with_linear = [c for c in _find_tear_candidates(equations, variables, known, allow_linear=True)
+                   if any(isinstance(step, _LinearStep) for _, step in c[1])][:max_candidates]
+    for tear, sequence, residual_eq in explicit + with_linear:
         def chain(x, tear=tear, sequence=sequence):
             values = dict(known_values)
             values[tear] = x
             local_ctx = context.copy()
             local_ctx.update(values)
             for var, expr in sequence:
-                value = eval(expr, {"__builtins__": {}}, local_ctx)
+                value = _chain_eval(expr, local_ctx)
                 values[var] = value
                 local_ctx[var] = value
             return values
@@ -1516,7 +1641,7 @@ def _solve_block_by_multi_tearing(
         local_ctx = context.copy()
         local_ctx.update(values)
         for var, expr in sequence:
-            value = _as_real(eval(expr, {"__builtins__": {}}, local_ctx))
+            value = _as_real(_chain_eval(expr, local_ctx))
             values[var] = value
             local_ctx[var] = value
         return values
@@ -1642,6 +1767,170 @@ def _solve_core(
     return _solve_block_simultaneously(
         equations, variables, known_values, context, manual_initial, inferred_units
     )
+
+
+def _non_unique_solution(equations: List[str], variables: Set[str], values: Dict[str, float],
+                         context: dict) -> Optional[Tuple[List[str], List[str]]]:
+    """
+    Ist die Lösung eines gekoppelten Blocks eindeutig? Ist die Jacobi-Matrix am Lösungspunkt
+    singulär UND bleiben alle Gleichungen erfüllt, wenn man entlang der Nullraum-Richtung
+    weitergeht (eine Größe verschoben, die übrigen neu gelöst), gibt es unendlich viele
+    Lösungen: eine Gleichung folgt aus den anderen (x + y = 1, 2*x + 2*y = 2). Isolierte
+    Lösungen mit singulärer Matrix (Doppelwurzel) bestehen den Fortsetzungstest nicht.
+    Generisch, numerisch, ohne Namen.
+
+    Returns:
+        (abhängige Gleichungen, nicht bestimmte Größen) oder None
+    """
+    from scipy.optimize import least_squares
+    var_list = sorted(variables, key=lambda v: _appearance_order(equations, variables)[v])
+    n = len(var_list)
+    if n < 2 or len(equations) != n:
+        return None
+    x0 = np.array([float(values[v]) for v in var_list])
+    if not np.all(np.isfinite(x0)):
+        return None
+    row_scale = []
+    for eq in equations:
+        res, scale = _residual_and_scale(eq, values, context)
+        if not np.isfinite(res):
+            return None
+        row_scale.append(scale if scale > 0 else 1.0)
+    row_scale = np.array(row_scale)
+
+    def residuals(x):
+        trial = dict(values)
+        trial.update(zip(var_list, x))
+        return np.array([_calculate_residual(eq, trial, context) for eq in equations]) / row_scale
+
+    r0 = residuals(x0)
+    if not np.all(np.isfinite(r0)):
+        return None
+    # Jacobi-Matrix der auf die Termgröße bezogenen Residuen; Schrittweite je Größe so, dass
+    # sich die Residuen messbar ändern (Größen nahe null, z.B. eine Kontrollsumme, haben
+    # keinen eigenen Maßstab)
+    jac = np.empty((n, n))
+    for j in range(n):
+        step = 1e-7 * abs(x0[j]) if x0[j] != 0 else 1e-7
+        for _ in range(12):
+            x = x0.copy()
+            x[j] += step
+            column = (residuals(x) - r0) / step
+            if np.all(np.isfinite(column)) and np.max(np.abs(column)) * step > 1e-9:
+                break
+            step *= 100.0
+        else:
+            return None
+        jac[:, j] = column
+    # Nur die Richtungen zählen: Spalten und Zeilen auf Länge 1 (Beträge der Größen egal)
+    col_norm = np.linalg.norm(jac, axis=0)
+    if np.any(col_norm == 0):
+        return None
+    jac = jac / col_norm
+    row_norm = np.linalg.norm(jac, axis=1)
+    if np.any(row_norm == 0):
+        return None
+    jac = jac / row_norm[:, None]
+    u, sigma, vt = np.linalg.svd(jac)
+    if sigma[-1] > 1e-6 * sigma[0]:
+        return None
+    # Fortsetzung entlang der Nullraum-Richtung: eine Größe verschieben, die übrigen neu lösen
+    direction = vt[-1] / col_norm             # in den ursprünglichen Größen
+    k = int(np.argmax(np.abs(direction) * col_norm))
+    delta = 1e-3 / col_norm[k]
+    start = x0 + delta * direction / direction[k]
+    others = [j for j in range(n) if j != k]
+
+    def shifted(z):
+        x = start.copy()
+        x[others] = x0[others] + z / col_norm[others]
+        return residuals(x)
+
+    try:
+        fit = least_squares(shifted, (start[others] - x0[others]) * col_norm[others],
+                            method='lm', xtol=1e-14, ftol=1e-14, max_nfev=200 * n)
+    except Exception:
+        return None
+    if not np.all(np.isfinite(fit.fun)) or np.max(np.abs(fit.fun)) > 1e-9:
+        return None                       # isolierte Lösung - eindeutig
+    left = np.abs(u[:, -1])
+    weights = np.abs(vt[-1])
+    dependent = [eq for eq, weight in zip(equations, left) if weight > 0.1 * left.max()]
+    free = [v for v, weight in zip(var_list, weights) if weight > 0.1 * weights.max()]
+    return dependent, free
+
+
+def _square_subsets(equations: List[str], variables: Set[str], known: Set[str], limit: int = 8):
+    """
+    Quadratische Teilsysteme eines überbestimmten Blocks: Auswahlen von so vielen Gleichungen
+    wie Unbekannten, die strukturell lösbar sind (perfekte Zuordnung Gleichung <-> Unbekannte).
+    Reihenfolge: zuerst die Gleichungen in Blatt-Reihenfolge (spätere bleiben als Prüfung
+    übrig), dann Varianten, in denen je eine der gewählten Gleichungen ersetzt wird - falls die
+    erste Auswahl numerisch singulär ist (z.B. zwei gleichwertige Bilanzen). Generisch, ohne Namen.
+    """
+    unknowns = {eq: _get_equation_unknowns(eq, known, variables) for eq in equations}
+
+    def matching(candidates):
+        owner: Dict[str, str] = {}
+
+        def augment(eq, seen):
+            for var in sorted(unknowns[eq]):
+                if var in seen:
+                    continue
+                seen.add(var)
+                if var not in owner or augment(owner[var], seen):
+                    owner[var] = eq
+                    return True
+            return False
+
+        for eq in candidates:
+            augment(eq, set())
+        return set(owner.values()) if len(owner) == len(variables) else None
+
+    first = matching(equations)
+    if first is None:
+        return
+    seen_subsets = set()
+    chosen = [eq for eq in equations if eq in first]
+    seen_subsets.add(frozenset(chosen))
+    yield chosen
+    for left_out in reversed(chosen):
+        if len(seen_subsets) >= limit:
+            return
+        alternative = matching([eq for eq in equations if eq != left_out])
+        if alternative is None or frozenset(alternative) in seen_subsets:
+            continue
+        seen_subsets.add(frozenset(alternative))
+        yield [eq for eq in equations if eq in alternative]
+
+
+def _solve_overdetermined_block(equations, variables, known_values, context, manual_initial,
+                                original_equations, inferred_units):
+    """
+    Block mit mehr Gleichungen als Unbekannten (überbestimmt): ein quadratisches Teilsystem
+    lösen; die übrigen Gleichungen müssen mit dieser Lösung erfüllt sein. Widerspruchsfrei ->
+    Lösung; sonst bleiben die übrigen Gleichungen offen und werden als Constraints geprüft
+    (Meldung "Widersprüchliches System" mit vorgegebenem und berechnetem Wert).
+
+    Returns:
+        (success, solution, message, analysis, solved_equations)
+    """
+    fallback = None
+    for subset in _square_subsets(equations, variables, set(known_values)):
+        success, solution, msg, analysis = _solve_equation_block(
+            subset, variables, known_values, context, manual_initial, original_equations,
+            inferred_units)
+        if not success:
+            continue
+        values = {**known_values, **solution}
+        checks = [eq for eq in equations if eq not in subset]
+        if all(_relative_residual(eq, values, context) < 1e-6 for eq in checks):
+            return True, solution, msg, analysis, subset
+        if fallback is None:
+            fallback = (True, solution, msg, analysis, subset)
+    if fallback is not None:
+        return fallback
+    return False, {}, "Überbestimmter Block ohne lösbares Teilsystem", None, equations
 
 
 def _solve_equation_block(

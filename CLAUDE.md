@@ -157,7 +157,11 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
    - **Tearing** zuerst: Lässt sich der Block mit EINER geschätzten Variable der Reihe nach
      direkt auswerten (z.B. Filmtemperatur-Iteration: T_s → T_f → Stoffwerte → Ra → Nu →
      Wärmestrom), wird nur über diese Variable mit Bracket-Suche iteriert - robust auch
-     bei schlechten Startwerten
+     bei schlechten Startwerten. Zuerst nur explizite Zuweisungen; danach Ketten, in denen
+     eine Gleichung mit genau einer offenen Größe, die strukturell nur LINEAR vorkommt
+     (`eta = (h_1 - h_2)/(h_1 - h_2s)` nach h_2, Massenbilanz als Summe), exakt aufgelöst
+     wird (`_LinearStep`: zwei Auswertungen, `_is_linear_in` am Syntaxbaum) - die natürliche
+     implizite Schreibweise ist damit so schnell wie die explizite (Mehrfach-Tearing nur explizit)
    - **Mehrfach-Tearing**: sonst wenige Tearing-Variablen (z.B. Radiositäten + Oberflächen-
      temperaturen), alle übrigen der Reihe nach direkt; `least_squares` über k Variablen,
      Residuen fest gewichtet mit der Termgröße am Startpunkt (mitlaufende Normierung wäre
@@ -165,6 +169,19 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
    - sonst simultan mit `least_squares` (Levenberg-Marquardt) / `fsolve`, Zeitbudget ~20 s
    - gescheiterte Blöcke werden nicht erneut versucht; unabhängig gelöste Teilblöcke bleiben
      in der (Teil-)Lösung
+   - **Überbestimmter Block** (mehr Gleichungen als Unbekannte, z.B. eine redundante Bilanz):
+     ein strukturell lösbares quadratisches Teilsystem lösen (`_square_subsets`: perfekte
+     Zuordnung, Blatt-Reihenfolge; bei singulärer Auswahl Varianten), die übrigen Gleichungen
+     bleiben als Constraints offen und werden geprüft -> Lösung oder "Widersprüchliches System"
+     mit der verletzten Gleichung. Unabhängig von der Schreibweise (`a = x + y` / `x + y = a`);
+     `parser.validate_system` lehnt mehr Gleichungen als Unbekannte nicht mehr ab; ein Blatt nur
+     aus Vorgaben und Kontrollgleichungen (keine Unbekannte) wird ebenso geprüft
+   - **Eindeutigkeit** (`_non_unique_solution`): nach jedem gelösten Block mit >= 2 Größen
+     Jacobi-Matrix am Lösungspunkt (Zeilen/Spalten normiert); ist sie singulär UND lässt sich
+     die Lösung entlang der Nullraum-Richtung fortsetzen (Größe verschoben, Rest neu gelöst),
+     ist die Lösung nicht eindeutig -> Meldung "Lösung nicht eindeutig: Gleichungen ... sind
+     voneinander abhängig" statt eines beliebigen Punkts (`x + y = 1`, `2*x + 2*y = 2`;
+     vertauschte Bilanz). Doppelwurzeln (isoliert) bestehen den Fortsetzungstest nicht
 5. **Iteration**: Schritte 2-4 werden wiederholt bis alle Gleichungen gelöst sind
 
 #### Robuste Wurzelfindung für einzelne Gleichungen
@@ -206,7 +223,8 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - **Parameterstudien**: Warm-Start - die Lösung des Vorpunkts ist Startwert des nächsten
   Punkts (verhindert Sprünge zwischen Lösungsästen)
 - **Auswertungsfehler** (0/0, CoolProp-/HumidAir-Fehlermeldungen) werden in der Meldung
-  mit Originalzeile genannt statt "keine Lösung"
+  mit Originalzeile genannt statt "keine Lösung" - auch in der GUI vor der generischen
+  Diagnose (`analysis.evaluation_errors`)
 - Parameterstudien: gescheiterte Punkte werden gemeldet (Nummer + Grund), gelöste Größen
   dieser Punkte bleiben erhalten; sweep-unabhängige Größen erscheinen als Einzelwert.
   Scheitern zwei Punkte hintereinander am Zeitlimit, wird die Studie abgebrochen
@@ -293,7 +311,12 @@ zusätzlichen Gleichungen); bei Widerspruch nennt die Meldung beide Seiten.
   - `w` - Humidity ratio [kg/kg]
   - `p_w` - Partial pressure water vapor [Pa]
   - `h` - Enthalpy [J/kg]
-- Case-insensitive: `HumidAir` = `humidair`
+  - `T_dp` - Dew point [K] (EES: D=), `T_wb` - Wet bulb temperature [K] (EES: B=)
+- Case-insensitive: `HumidAir` = `humidair`; Meldungen nennen die Namen wie dokumentiert
+  (`humid_air.display_names`: T, rF, T_dp)
+- **Sättigung** (`humid_air._saturation`, für jede Eingabekombination): w > w_s(T, p)·(1 + 1e-6)
+  -> Meldung "Zustand übersättigt: w = … > w_s = … bei T, p" (Nebel/Kondensat in der Bilanz
+  vergessen) statt stiller Werte; gesättigte Luft ergibt rh = 1 (CoolProp lehnt rh = 1 + ε ab)
 
 **Examples:**
 ```
@@ -416,7 +439,9 @@ Hyperbolische Funktionen (`sinh`, `cosh`, `tanh`) verwenden Radiant.
 - **Einheiten-Propagation**: Leitet Einheiten für berechnete Variablen ab
 - **Dimensionsanalyse**: Verwendet AST-Parsing für algebraische Ausdrücke
 - **Rückwärts-Propagation**: Bei `q = h*dT` wird `h = q/dT` abgeleitet
-- **Konsistenzprüfung**: Warnt bei inkonsistenten Einheiten
+- **Konsistenzprüfung**: Warnt bei inkonsistenten Einheiten; bei einer Summe mit verschiedenen
+  Einheiten nennt die Warnung Terme und Einheiten und als Größe den Verdächtigen
+  (`_incompatible_sum`: "h_9 - h_11s: h_9 in J/kg, h_11s dimensionslos (ohne Einheit eingegeben?)")
 - **Additive Ketten**: Bei `A + B - C = 0` erhalten alle Terme die gleiche Dimension
 
 **Wichtige Funktionen:**
@@ -554,6 +579,9 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
 - nicht bestimmbar: berechnete Größen gelten als absolut (°C nach Settings; Startwerte wie
   absolut), in K eingegebene Größen werden wie eingegeben in K angezeigt
   (`main._kelvin_display`) - eine in K eingegebene Differenz erscheint nie als -263 °C
+- Umrechnung im EES-/Excel-Stil `T + 273.15` (`scale_offset_literals`): eine Zahl gleich dem
+  Nullpunkt einer Temperaturskala (273.15, 459.67 - aus pint) in einer Summe mit einer
+  Temperatur -> Hinweis "ⓘ": T ist bereits in K, die Zahl verschiebt den Nullpunkt erneut
 - Widerspruch (`temperature_sum_conflicts`): Werte in °C so addiert, dass weder Temperatur
   noch Differenz herauskommt (`T_2 = T_1 + x`, `x = 10 °C`) -> Hinweis "ⓘ HINWEISE"
 - Skalenabhängige Summen (`scale_dependent_sums`, `main._apply_input_scale`): eine Summe
@@ -579,7 +607,12 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
    Die Einheiten-Ableitung kennt beide Funktionen (Argument von value hat die Dimension der
    Einheit, quantity liefert sie; °C/°F -> absolute Temperatur; falsche Einheit -> Warnung).
 
-1. **Quality-Clamping**: Dampfqualität x wird auf [0, 1] begrenzt (thermodynamics.py), damit der iterative Solver nicht mit ungültigen Werten abstürzt.
+1. **Dampfgehalt x**: nur Rundungsfehler (±1e-6) werden auf [0, 1] begrenzt; x deutlich
+   außerhalb (x = 2, x = quality(...) = -1 eines einphasigen Zustands) ist eine Meldung
+   "Dampfgehalt x = … liegt außerhalb von 0 ... 1" (thermodynamics.py) - für den Solver ein
+   ungültiger Iterationspunkt. `quality()` liefert außerhalb des Nassdampfgebiets -1
+   (CoolProp; unterkühlt, überhitzt, überkritisch) - dann Hinweis "ⓘ" (`main._single_phase_quality_hints`:
+   jeder quality-Aufruf wird mit der Lösung ausgewertet).
 
 2. **Volumen als Input**: `v` wird intern zu Dichte umgerechnet (`rho = 1/v`), da CoolProp mit Dichte arbeitet.
 

@@ -1646,7 +1646,8 @@ def _weight_candidates(parsed, known, free: Set[str], out, products: bool = Fals
             fl = fname.lower()
             values = []
             if fl in _THERMO_FUNCS or fl == 'humidair':
-                values = [kw.value for kw in node.keywords if kw.arg and kw.arg.lower() == 't']
+                values = [kw.value for kw in node.keywords
+                          if kw.arg and kw.arg.lower() in ('t', 't_dp', 't_wb')]
             elif fl in _RADIATION_ARGS and node.args:
                 values = [node.args[0]]
             elif fl == 'value':
@@ -1973,6 +1974,55 @@ def missing_unit_annotations(equations: Dict[str, str], known_units: Dict[str, s
                     suggest.append(name)
         result.append((members, suggest or members[:1]))
     return result
+
+
+def scale_offset_literals(equations: Dict[str, str], units: Dict[str, str]) -> List[Tuple[str, float, str]]:
+    """
+    Zahlen gleich dem Nullpunkt einer Temperaturskala (273.15 °C -> K, 459.67 °F -> °R; aus pint)
+    in einer Summe mit einer Temperatur - die Umrechnung "T + 273.15" aus EES/Excel. Hier sind
+    Temperaturen bereits in Kelvin; die Zahl verschiebt den Nullpunkt ein zweites Mal, ohne
+    Einheitenfehler. Generisch über die Skalen von pint, unabhängig von Namen.
+
+    Returns:
+        [(Originalgleichung, Zahl, Skala), ...]
+    """
+    if not PINT_AVAILABLE:
+        return []
+    origins = {}
+    for scale, reference in (('°C', 'kelvin'), ('°F', 'degR')):
+        try:
+            unit = 'degC' if scale == '°C' else 'degF'
+            origins[float(ureg.Quantity(0.0, unit).to(reference).magnitude)] = scale
+        except Exception:
+            continue
+    kelvin = ureg.kelvin.dimensionality
+    found = []
+    for parsed_key, original_eq in equations.items():
+        source = original_eq if original_eq else parsed_key
+        parsed = _parse_equation(source)
+        if parsed is None:
+            continue
+        hit = None
+        for side in parsed:
+            for node in ast.walk(side):
+                if not (isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub))):
+                    continue
+                terms = _flatten_additive(node)
+                numbers = [n.value for _, n in terms
+                           if isinstance(n, ast.Constant) and isinstance(n.value, (int, float))]
+                matches = [(abs(float(v)), origins[o]) for v in numbers for o in origins
+                           if abs(abs(float(v)) - o) < 1e-9 * o]
+                if not matches:
+                    continue
+                if any(_expression_dimension(ast.unparse(n), units)[0] == kelvin
+                       for _, n in terms if not isinstance(n, ast.Constant)):
+                    hit = matches[0]
+                    break
+            if hit:
+                break
+        if hit:
+            found.append((source, hit[0], hit[1]))
+    return found
 
 
 def scale_origin(unit: str) -> Optional[float]:
@@ -2561,6 +2611,8 @@ FUNCTION_ARGUMENT_UNITS = {
     'rf': '',           # Relative Feuchte (German: rF = relative Feuchte, dimensionslos)
     'w': '',            # Feuchtebeladung (kg/kg, oft als dimensionslos behandelt)
     'p_w': 'Pa',        # Partialdruck Wasserdampf
+    't_dp': 'K',        # Taupunkt (Eingabe)
+    't_wb': 'K',        # Feuchtkugeltemperatur (Eingabe)
 
     # Strahlungsfunktionen - Argumente
     # Eb(T, wavelength), Blackbody(T, lambda1, lambda2), Wien(T), Stefan_Boltzmann(T)
@@ -3340,14 +3392,23 @@ def check_all_unit_consistency(solution: Dict[str, float],
                 left_unit = error.get('left_unit') or error['left_dim']
                 right_unit = error.get('right_unit') or error['right_dim']
                 dim_info = f"links: {left_unit} ≠ rechts: {right_unit}"
+                explanation = f"Dimensionsfehler: {left_unit} ≠ {right_unit}"
                 # Variable = linke Seite, wenn dort ein reiner Variablenname steht
                 lhs = _remove_comments(original_eq).split('=', 1)[0].strip()
                 variable = lhs if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', lhs) else 'Dimensionsfehler'
+                detail = error.get('detail')
+                if detail:
+                    # Summe mit verschiedenen Einheiten: Terme und ihre Einheiten nennen
+                    text, suspects = detail
+                    dim_info = f"Summe mit verschiedenen Einheiten - {text}"
+                    explanation = f"Dimensionsfehler: {text}"
+                    if suspects:
+                        variable = ', '.join(suspects)
                 warnings.append(UnitWarning(
                     variable=variable,
                     equations=[original_eq],
                     units={original_eq: dim_info},
-                    explanation=f"Dimensionsfehler: {left_unit} ≠ {right_unit}",
+                    explanation=explanation,
                     conversion_factor=0
                 ))
 
@@ -3437,6 +3498,43 @@ def compute_expression_dimension(expr: str, unit_map: Dict[str, str]) -> Tuple[A
     return dim, missing
 
 
+def _incompatible_sum(expr: str, unit_map: Dict[str, str]) -> Optional[Tuple[str, List[str]]]:
+    """
+    Erste Summe/Differenz im Ausdruck, deren Terme verschiedene Einheiten haben - als Text
+    mit der Einheit jedes Terms ("h_9 - h_11s: h_9 in J/kg, h_11s dimensionslos (ohne Einheit
+    eingegeben?)") und den verdächtigen Größen (dimensionslose Größen in der Summe).
+    """
+    try:
+        node = ast.parse(_remove_comments(expr).replace('^', '**'), mode='eval').body
+    except Exception:
+        return None
+    for sub in ast.walk(node):
+        if not (isinstance(sub, ast.BinOp) and isinstance(sub.op, (ast.Add, ast.Sub))):
+            continue
+        parts = []
+        for _, term in _flatten_additive(sub):
+            text = ast.unparse(term)
+            dim, _, literal = _expression_dimension(text, unit_map)
+            if literal or dim is None or dim == _DIMENSION_ERROR:
+                continue
+            parts.append((text, term, dim))
+        if len({str(d) for _, _, d in parts}) < 2:
+            continue
+        dimensionless = ureg.dimensionless.dimensionality
+        described, suspects = [], []
+        for text, term, dim in parts:
+            if dim == dimensionless:
+                hint = ''
+                if isinstance(term, ast.Name) and unit_map.get(term.id) == '':
+                    hint = ' (ohne Einheit eingegeben?)'
+                    suspects.append(term.id)
+                described.append(f"{text} dimensionslos{hint}")
+            else:
+                described.append(f"{text} in {si_label_from_dimensionality(dim)}")
+        return f"{ast.unparse(sub)}: " + ", ".join(described), suspects
+    return None
+
+
 def check_equation_dimensions(equation: str, unit_map: Dict[str, str]) -> Optional[Dict]:
     """
     Prüft ob eine Gleichung dimensional konsistent ist.
@@ -3476,6 +3574,7 @@ def check_equation_dimensions(equation: str, unit_map: Dict[str, str]) -> Option
             'type': 'dimension_mismatch',
             'left_dim': '(linke Seite)',
             'right_dim': 'Inkompatible Terme werden addiert/subtrahiert',
+            'detail': _incompatible_sum(right, unit_map),
             'equation': equation
         }
 
@@ -3503,6 +3602,7 @@ def check_equation_dimensions(equation: str, unit_map: Dict[str, str]) -> Option
             'type': 'dimension_mismatch',
             'left_dim': 'Inkompatible Terme werden addiert/subtrahiert',
             'right_dim': '(rechte Seite)',
+            'detail': _incompatible_sum(left, unit_map),
             'equation': equation
         }
 
