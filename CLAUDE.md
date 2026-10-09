@@ -66,7 +66,7 @@ equation_solver/
 ```bash
 python3 test_regressions.py       # Parser, Solver, Einheiten (~15 s)
 python3 test_unit_constraints.py  # Einheiten-Propagation, Dimensionsprüfung
-python3 test_berechnungen.py      # 59 Aufgaben mit/ohne Einheiten gegen Referenzwerte
+python3 test_berechnungen.py      # 63 Aufgaben mit/ohne Einheiten gegen Referenzwerte
 python3 test_optimierung.py       # Optimierung (MINIMIZE/MAXIMIZE), unabhängige Referenzen
 python3 test_gui.py               # GUI headless (holt kurz den Fokus - nicht tippen)
 ```
@@ -78,6 +78,21 @@ Offset-Konvertierungen, Strahlung) ab. `test_berechnungen.py` rechnet Aufgaben a
 Thermodynamik und Wärmeübertragung jeweils MIT und OHNE Einheiten und vergleicht mit
 unabhängig berechneten Referenzwerten (CoolProp direkt, analytisch).
 Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
+
+### Entwicklung: Arbeitsweise und Prüfablauf
+
+- **Alle Regeln generisch**: aus der Struktur des Gleichungssystems, nie für bestimmte
+  Gleichungsformen und nie abhängig von Variablennamen (bei Gleichstand: Reihenfolge im Blatt)
+- Neue Funktion: Tests in den Suiten, Hilfe (`FUNCTION_HELP_TEXT`, Zeilen ≤ 70 Zeichen - getestet),
+  README.md, CLAUDE.md; das Beispielblatt (`main._insert_example`, Werte in `test_gui.py` geprüft)
+  soll die Funktionen zeigen
+- **Lokal, nicht im Repo** (`Testbeispiele/` in `.gitignore`, nie committen): 49 Lehrbeispiele mit
+  Lösungsblättern und Testbericht, `Testbeispiele/PROJEKTSTAND.md` (Stand, Festlegungen, offene
+  Punkte) und `Testbeispiele/Pruefskripte/alle_pruefungen.sh` - vor jedem Push: alle Suiten und
+  alle Lehrbeispiele mit Einheiten, ohne Einheiten (alles SI), mit neutral umbenannten Variablen
+  sowie Vergleich der Anzeige-Einheiten (ca. 20-30 min)
+- Git: Arbeitsbranch (derzeit `fix/review-2026-10`), `main` per Fast-Forward; Commit, Push und
+  Aktualisieren von `main` nur auf ausdrücklichen Wunsch
 
 ## Kernfunktionen
 
@@ -478,7 +493,7 @@ Dimensionslose Zahlen werden automatisch erkannt:
 | Kategorie | Einheiten |
 |-----------|-----------|
 | Temperatur | °C, K, °F |
-| Temperaturdifferenz | K (Eingabe), delta_K (Anzeige) - aus der Struktur, nicht aus dem Namen |
+| Temperaturdifferenz | K (Eingabe und Anzeige; intern delta_K) - aus der Struktur, nicht aus dem Namen |
 | Druck | bar, Pa, kPa, MPa, atm, psi |
 | Energie | kJ, J, kWh |
 | Leistung | kW, W |
