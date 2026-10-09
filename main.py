@@ -2829,7 +2829,42 @@ Q_rad = epsilon * sigma * A * T_surface^4
 {Peak wavelength (Wien's law)}
 lambda_max = Wien(T_surface)
 
-"Press F5 to solve"
+{--- Example 4: Heating curve and heat output ---}
+T_a = -10 °C
+{The heating curve holds for numbers in °C: value() and quantity()}
+T_VL = quantity(20 + 1.5*(20 - value(T_a, °C)), °C)
+sigma_w = 20 K              {temperature spread: differences always in K}
+T_RL = T_VL - sigma_w
+m_dot_w = 0.5 kg/s
+c_w = 4.19 kJ/(kg*K)
+Q_dot_H = m_dot_w*c_w*(T_VL - T_RL)
+
+{--- Example 5: Pipe flow, laminar or turbulent (IF) ---}
+v_m = 1.5 m/s
+d_i = 20 mm
+nu_w = 1.0E-6 m^2/s
+lambda_w = 0.6 W/(m*K)
+Pr_w = 7
+Re = v_m*d_i/nu_w
+Nu = IF(Re, 2300, 3.66, 3.66, 0.023*Re^0.8*Pr_w^0.4)   {laminar below 2300}
+alpha_i = Nu*lambda_w/d_i
+
+{--- Example 6: Economic insulation thickness (optimisation) ---}
+MINIMIZE K_tot VARY s_ins = 0.01 .. 0.4 m
+lambda_ins = 0.035 W/(m*K)
+R_wall = 0.5 m^2*K/W        {wall without insulation}
+dT_m = 15 K                 {mean temperature difference, heating season}
+t_H = 5000 h                {heating hours per year}
+k_E = 0.10                  {energy price per kWh}
+k_ins = 120                 {insulation price per m3}
+a_n = 0.08                  {annuity factor per year}
+U = 1/(R_wall + s_ins/lambda_ins)
+Q_a = U*dT_m*t_H            {heat loss per m2 and year}
+K_E = k_E*value(Q_a, kWh/m^2)
+K_ins = a_n*k_ins*value(s_ins, m)
+K_tot = K_E + K_ins         {annual cost per m2}
+
+"Press F5 to solve. Help > Function Reference describes all functions."
 '''
         else:
             example = '''"Example: Nonlinear equation system"

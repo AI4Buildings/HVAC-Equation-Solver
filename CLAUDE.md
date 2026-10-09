@@ -568,6 +568,9 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
 ## GUI-Features
 
 - File: New, Open, Save, Save As (.hes, .txt)
+- Beispielblatt ("☰ Examples" / Edit > Insert Example): Wasser/Dampf, feuchte Luft, Strahlung,
+  Heizkurve (value/quantity, Spreizung in K), Rohrströmung (IF), wirtschaftliche Dämmdicke
+  (MINIMIZE); `test_gui.py` prüft die Werte (Dämmdicke gegen die analytische Lösung)
 - View: Schriftgröße 6-36pt (Standard: 16pt)
 - Solve: F5 oder Button, Initial Values Dialog (Werte auch mit Einheit; schreibt den Block `{$Startwerte ... $}` ins Blatt)
 - Zwischenablage: Kopieren/Ausschneiden im Editor schreibt zusätzlich fest in die

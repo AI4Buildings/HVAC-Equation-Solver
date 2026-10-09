@@ -98,6 +98,10 @@ HVAC-Equation-Solver/
 
 ## Quick Start
 
+**☰ Examples** (or Edit → Insert Example) loads a sheet that shows the main features: water/steam,
+humid air, radiation, a heating curve in °C (`value`/`quantity`, temperature spread in K), pipe flow
+with `IF` and an economic insulation thickness with `MINIMIZE`. Press F5 to solve.
+
 ### Simple Example
 
 ```
@@ -350,7 +354,7 @@ Output: `T`, `h`, `rh`, `w`, `p_w`, `rho_tot`, `rho_a`, `rho_w`, `T_dp`, `T_wb`
 Input: `T`, `p_tot`, `rh`, `w`, `p_w`, `h`
 
 ### Mathematics
-`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log10`, `lg`, `sqrt`, `abs`, `max`, `min`, `IF`, `pi`
+`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log10`, `lg`, `sqrt`, `abs`, `max`, `min`, `IF`, `value`, `quantity`, `pi`
 
 ### Radiation
 `Eb`, `Blackbody`, `Blackbody_cumulative`, `Wien`, `Stefan_Boltzmann`

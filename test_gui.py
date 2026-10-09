@@ -483,10 +483,41 @@ check("enthalpy(water, 100 °C, 1 bar) ≈ 2675.8 kJ/kg", abs(h_water - 2675766)
 h_air = results.get("h = HumidAir(h, T=25 °C, rh=0.5, p_tot=1 bar)", (False, 0))[1] or 0
 check("HumidAir(h, 25 °C, 50 %, 1 bar) ≈ 50.77 kJ/kg", abs(h_air - 50766) < 50)
 
+def shown(var):
+    """(Wert als float, Einheiten-Label) der Ergebniszeile einer Variable."""
+    text = app.value_labels[var].cget("text")
+    dd = app.unit_dropdowns.get(var)
+    if dd is not None:
+        unit = dd.get()
+    else:
+        unit = next(row.winfo_children()[1].cget("text")
+                    for row in app.var_rows_container.winfo_children()
+                    if row.winfo_children()[0].cget("text") == display_name(var))
+    try:
+        value = float(text)
+    except ValueError:
+        value = text
+    return value, unit
+
+
 app._insert_example()
 check("Beispiel-Kopf nennt SI-Einheiten", "p[Pa], h[J/kg]" in get_text())
 app.solve()
 check("Eingebautes Beispiel löst", "SOLUTION FOUND" in app.result_status_label.cget("text"))
+check("Beispiel: Heizkurve mit value()/quantity() -> T_VL = 65 °C", shown("T_VL") == (65.0, "°C"), str(shown("T_VL")))
+check("Beispiel: Spreizung in K, T_RL = 45 °C, Q = 41.9 kW",
+      shown("sigma_w") == (20.0, "K") and shown("T_RL") == (45.0, "°C")
+      and abs(shown("Q_dot_H")[0] - 41.9) < 1e-9, f"{shown('sigma_w')} {shown('T_RL')} {shown('Q_dot_H')}")
+check("Beispiel: IF wählt turbulent (Re = 30000)", abs(app.last_solution["Nu"] - 0.023*30000**0.8*7**0.4) < 1e-9)
+# Wirtschaftliche Dämmdicke analytisch: (R + s/lambda)^2 = k_E*dT*t/(a*k_ins*lambda)
+s_opt = (np.sqrt(0.10*15*5000/1000/(0.08*120*0.035)) - 0.5)*0.035
+check("Beispiel: Optimierung der Dämmdicke = analytisch", abs(app.last_solution["s_ins"] - s_opt) < 1e-4,
+      f"{app.last_solution['s_ins']} / {s_opt}")
+check("Beispiel: Energie je Fläche in kWh/m²", shown("Q_a")[1] == "kWh/m^2" and abs(shown("Q_a")[0] - 15.874) < 0.01,
+      str(shown("Q_a")))
+check("Beispiel: keine Einheitenwarnung, kein Hinweis",
+      app.unit_warning_label.cget("text") == "" and app.hints_label.cget("text") == "",
+      app.unit_warning_label.cget("text") + app.hints_label.cget("text"))
 
 # ---------------------------------------------------------------------------
 print("\n=== #16 Diverses ===")
@@ -533,21 +564,6 @@ check("Nicht lesbare Datei: Fehler, Editor unverändert",
 print("=== Einheiten-Anzeige (Wert und Label aus derselben Einheit) ===")
 
 
-def shown(var):
-    """(Wert als float, Einheiten-Label) der Ergebniszeile einer Variable."""
-    text = app.value_labels[var].cget("text")
-    dd = app.unit_dropdowns.get(var)
-    if dd is not None:
-        unit = dd.get()
-    else:
-        unit = next(row.winfo_children()[1].cget("text")
-                    for row in app.var_rows_container.winfo_children()
-                    if row.winfo_children()[0].cget("text") == display_name(var))
-    try:
-        value = float(text)
-    except ValueError:
-        value = text
-    return value, unit
 
 
 def close(value, ref, rtol=1e-4):

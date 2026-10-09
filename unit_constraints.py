@@ -131,6 +131,7 @@ _LABEL_ENTRIES = [
     ('K/m', 'K/m'),
     ('m*K/W', 'm*K/W'),
     ('kg/(m^2*s)', 'kg/(m^2*s)'),
+    ('J/m^2', 'kWh/m^2'),           # Energie je Fläche (vor N/m, gleiche Dimension)
     ('N/m', 'N/m'),
     ('K^4', 'K^4'),
     ('m^2*K', 'm^2*K'),
