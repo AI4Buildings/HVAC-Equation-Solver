@@ -20,7 +20,8 @@ from typing import List, Optional
 import customtkinter as ctk
 
 from parser import (parse_equations, validate_system, display_name, unmangle,
-                    parse_start_values, parse_start_value, start_value_entries, start_values_edit)
+                    parse_start_values, parse_start_value, start_value_entries, start_values_edit,
+                    parse_optimization, start_value_units)
 from version import __version__
 from solver import solve_system, solve_parametric, format_solution, SolveAnalysis
 import solver as solver_module
@@ -41,10 +42,19 @@ except ImportError:
 
 # Versuche Constraint-Propagation zu laden
 try:
-    from unit_constraints import propagate_all_units, check_all_unit_consistency, propagate_all_units_complete
+    from unit_constraints import (propagate_all_units, check_all_unit_consistency, propagate_all_units_complete,
+                                  temperature_sum_conflicts, scale_dependent_sums, scale_origin,
+                                  missing_unit_annotations)
     CONSTRAINT_PROPAGATION_AVAILABLE = True
 except ImportError:
     CONSTRAINT_PROPAGATION_AVAILABLE = False
+
+# Optimierung (MINIMIZE/MAXIMIZE ... VARY ...)
+try:
+    from optimizer import optimize_system, optimize_parametric
+    OPTIMIZER_AVAILABLE = True
+except ImportError:
+    OPTIMIZER_AVAILABLE = False
 
 # Generische Fehleranalyse (Struktur, Numerik, Namens-Hinweise)
 try:
@@ -150,11 +160,12 @@ abs(x)                      Absolute value
 max(a, b), min(a, b)        Maximum / minimum
 IF(a, b, x, y, z)           Case distinction: x if a < b,
                             y if a = b, z if a > b (see below)
+value(x, unit)              Number of x in a unit (see below)
+quantity(z, unit)           Quantity from a number in a unit
 pi                          Pi constant
 Angles are in degrees. Formulas from the literature that use radians
 (e.g. view factors): atan(x)*pi/180 gives the angle in radians.
-Not available (unlike EES): own functions, optimisation (min/max
-search); use parametric studies instead.
+Not available (unlike EES): own functions.
 
 CASE DISTINCTION - IF:
 ----------------------
@@ -184,10 +195,50 @@ If a or b is itself unknown (iterated), the equation jumps at
 a = b; if the solver fails, set an initial value (see below).
 Comparisons (<, >, ==) and if/else are not available otherwise.
 
+OPTIMISATION - MINIMIZE / MAXIMIZE:
+-----------------------------------
+One line in the sheet:
+  MINIMIZE goal VARY x = a .. b unit
+  MAXIMIZE goal VARY x = a .. b unit, y = c .. d unit
+x (and y) are chosen within the bounds so that the goal - a
+variable that follows from the equations - becomes minimal or
+maximal. Varied quantities are not unknowns: the sheet has one
+equation less per varied quantity, and they must not have a
+fixed value. The unit at the end applies to both bounds (as in
+parametric studies); a bound may have its own unit. After a
+comma the line may continue on the next line.
+Examples:
+  y = (x - 2)^2 + 1
+  MINIMIZE y VARY x = 0 .. 5                   {x = 2, y = 1}
+  MAXIMIZE eps_tot VARY m_dot_gly = 0.1 .. 4 kg/s
+  MINIMIZE q VARY s = 11 .. 30 mm
+  MAXIMIZE e_tot VARY m_dot_2 = 0.5 .. 2 kg/s,
+                      m_dot_4 = 0.5 .. 2 kg/s
+Result: the varied quantities appear in the results in the unit
+of the bounds; the message says Minimum/Maximum and whether a
+quantity is at a bound (optimum at the edge of the range).
+Method: grid over the whole range (finds the best of several
+local optima), then exact local search. Ranges over more than
+two decades (lower bound > 0) are scanned logarithmically.
+Candidates without a solution count as bad, not as an error.
+Accuracy: the goal to about 1e-8 (relative); at a very flat
+optimum the varied quantity to about 4 significant digits.
+With a parametric study or value lists, the optimum is found
+for every point (like the Min/Max table in EES).
+Several statements are allowed, each with its own quantities.
+If they influence each other, the result is an equilibrium
+(no goal gets better alone) - for a joint optimum form ONE goal.
+Diagram goal over x: replace the MINIMIZE line by a parametric
+study x = a:step:b unit.
+Time limit: 120 s per optimisation (per point of a study).
+
 INITIAL VALUES (Solve > Initial Values):
 ----------------------------------------
-Iterated unknowns start from automatic values (by unit; unknown
-temperatures at the mean of the given ones). For equations with
+Iterated unknowns start from automatic values: by unit (unknown
+temperatures at the mean of the given ones), without units from
+known neighbours in sums (T_R - T_G1: T_G1 starts near T_R).
+Sheets therefore also work without any units (all values SI).
+For equations with
 several solutions (x^2 = 9: +3 or -3) the solver takes the one
 closest to the initial value. Set your own initial values in
 the dialog: in SI (288.15) or with unit (15 °C, 2 bar).
@@ -201,6 +252,9 @@ after opening the file on another computer. It can be edited by
 hand (one value per line or separated by ';'); delete the block
 to go back to the automatic values. Names that are not unknowns
 of the sheet are ignored.
+A start value WITH unit also sets the unit of a computed quantity
+whose unit does not follow from the equations (reported under
+ⓘ HINWEISE: "Einheit nicht bestimmbar ... Einheit von q angeben").
 
 THERMODYNAMIC FUNCTIONS (CoolProp):
 -----------------------------------
@@ -284,30 +338,64 @@ e is a normal variable; Euler's number: exp(1).
 Avoid naming a variable like a function you also call
 (sin, exp, ln, sqrt, max, pi, enthalpy, cp, ...).
 
-TEMPERATURE DIFFERENCES:
-------------------------
-Variables starting with "dT" or "delta" are temperature
-differences with the unit "delta_K" (also for input in °C:
-dT_1 = 10 °C -> 10 K, no offset). Differences of two
-temperatures (T_1 - T_2) are recognized automatically.
-
-Examples:
-  dT_N = 49.83 K        {Recognized as delta_K}
-  delta_T = 10 K        {Recognized as delta_K}
-  dT_log = (T1-T2)/ln((T1-T0)/(T2-T0))  {Inferred as delta_K}
-
-This avoids incorrect offset conversions (K -> °C).
-Absolute temperatures (T_1, T_VL, etc.) are shown in °C.
+TEMPERATURE DIFFERENCES - ALWAYS IN K:
+--------------------------------------
+°C and °F are ALWAYS absolute temperatures (10 °C = 283.15 K).
+Enter temperature DIFFERENCES in K:
+  dT_1 = 10 K           {difference of 10 K}
+  dT_1 = 10 °C          {WRONG: 283.15 K, an absolute temperature}
+The name does not matter (dT, delta, theta, x, ...). Whether a
+quantity is a temperature or a difference follows from the
+equations (absolute temperatures are points, differences are
+steps between them):
+  theta = T_1 - T_2     {difference}
+  T_1 = T_2 + x         {x difference, T_1 and T_2 absolute}
+  T_m = (T_1 + T_2)/2   {absolute}
+  enthalpy(water, T=T_s, ...), Eb(T, ...)  {T_s, T absolute}
+  Q = m*c*(T_1 - T_2)   {a temperature in a product that is not
+                         a temperature is a difference: T_1 - T_2;
+                         with T_1 absolute, T_2 is absolute}
+  Q = m*c*theta         {theta difference}
+  sigma*T^4             {T absolute (radiation needs Kelvin)}
+Absolute temperatures are shown in °C (Settings), differences
+in K (the unit selector converts them without offset).
+Values entered in K whose meaning cannot be decided are shown
+as entered (K). T only in p*v = R*T (product): shown in K -
+the value in K is right either way.
+Sums of absolute temperatures (T_3 = T_1 + T_2) depend on the
+zero point of the scale - in Kelvin they are no temperature.
+They are calculated on the scale of the input, as in EES:
+  T_1 = 20 °C, T_2 = 40 °C, T_3 = T_1 + T_2  ->  T_3 = 60 °C
+(reported under ⓘ HINWEISE). Temperatures with a factor
+(T_2 = T_1*(p_2/p_1)^...) stay physical laws in Kelvin.
 
 TEMPERATURE SCALE - IMPORTANT:
 ------------------------------
 Temperatures are calculated in KELVIN. Physical laws work
 directly (p*v = R*T, sigma*T^4, T_2 = T_1*(p_2/p_1)^...).
-Formulas DEFINED IN °C (heating curve T_VL = a + b*theta_a,
-Magnus formula, cp(theta) polynomials) need theta = T - T_0:
-  T_0 = 0 °C
-  T_VL = a + b*(T_a - T_0)      {heating curve in °C}
-Otherwise the result is wrong without any error message.
+Formulas DEFINED IN °C (heating curve, Magnus formula,
+cp(theta) polynomials) are numeric-value equations - write them
+with value() and quantity() (see next section), otherwise the
+result is wrong without any error message.
+
+NUMERIC-VALUE EQUATIONS - value() / quantity():
+-----------------------------------------------
+Empirical formulas often hold only for NUMBERS in certain units
+(heating curve in °C, h = 5.7 + 3.8*v with v in m/s):
+  value(x, unit)     number of the quantity x in that unit
+                     (dimensionless), e.g. value(T_a, °C)
+  quantity(z, unit)  quantity from a number z in that unit
+Any unit works (°C, °F, bar, kW, m3/h, %, ...).
+Examples:
+  T_a = -5 °C
+  T_VL = quantity(20 + 1.5*(20 - value(T_a, °C)), °C)
+                         {heating curve in °C: 57.5 °C}
+  v = 2 m/s
+  h = quantity(5.7 + 3.8*value(v, m/s), W/(m^2*K))
+  p = 3 bar
+  n = value(p, bar)      {3}
+The unit check knows these functions: value(T_a, °C) requires a
+temperature, the result of quantity(..., W/(m^2*K)) has W/(m²K).
 
 PARAMETRIC STUDIES (Sweeps):
 ----------------------------
@@ -342,14 +430,24 @@ Abbruch nach Zeitlimit = no solution within 60 s: set initial
   values (Solve > Initial Values) or simplify the system
 Startwert ... / Startwerte-Block = error in {$Startwerte ... $}
   (line number as for equations)
+Einheit nicht bestimmbar = the unit of these quantities does not
+  follow from the equations; give the named one a unit (start
+  value with unit), the others follow
+Optimierung: Minimum/Maximum von ... = optimisation result;
+  "an der Untergrenze/Obergrenze" = optimum at the edge of the range
 ⚠ UNIT WARNINGS (n) and ⓘ HINWEISE (n) above the results are
 clickable and open the details in the Residuals tab.
 """
 
 
 def pretty_unit(unit: str) -> str:
-    """Anzeigeform einer Einheit: degC -> °C, degF -> °F, um -> µm (pint versteht beide)."""
+    """
+    Anzeigeform einer Einheit: degC -> °C, degF -> °F, um -> µm (pint versteht beide),
+    delta_K -> K (Temperaturdifferenzen werden in K angezeigt, DIN 1345 / ISO 80000-5).
+    """
     import re
+    if unit == 'delta_K':
+        return 'K'
     unit = unit.replace('degC', '°C').replace('degF', '°F')
     return re.sub(r'(?<![A-Za-z])um(?![A-Za-z])', 'µm', unit)
 
@@ -916,6 +1014,27 @@ class EquationSolverApp(ctk.CTk):
         hints = getattr(analysis, "hints", []) if analysis else []
         self.hints_label.configure(text=f"ⓘ HINWEISE ({len(hints)})" if hints else "")
 
+    @staticmethod
+    def _check_optimization(goals, variables, constants, sweep_vars) -> dict:
+        """
+        Prüft die variierten Größen der Optimierungsanweisungen und liefert
+        {Name: Bereichsmitte} (Platzhalter für Struktur- und Einheitenprüfung).
+        """
+        optimized = {}
+        for goal in goals:
+            for name, lower, upper in zip(goal.names, goal.lower, goal.upper):
+                shown = display_name(name)
+                if name in constants:
+                    raise ValueError(f"Zeile {goal.line}: {shown} hat im Blatt einen festen Wert - "
+                                     f"für die Optimierung die Zuweisung entfernen")
+                if name in sweep_vars:
+                    raise ValueError(f"Zeile {goal.line}: {shown} ist eine Parameterstudie/Werteliste "
+                                     f"und kann nicht zugleich optimiert werden")
+                if name not in variables:
+                    raise ValueError(f"Zeile {goal.line}: {shown} kommt in keiner Gleichung vor")
+                optimized[name] = (lower + upper) / 2
+        return optimized
+
     def _structure_message(self, equations, variables, constants, original_equations, source_text) -> str:
         """Strukturdiagnose (unter-/überbestimmte Teile + Namens-Hinweise) als Meldungstext."""
         if not DIAGNOSTICS_AVAILABLE or not equations:
@@ -1471,20 +1590,37 @@ class EquationSolverApp(ctk.CTk):
         try:
             # Parse Gleichungen mit Einheiten
             equations, variables, initial_values, sweep_vars, original_equations, unit_values = parse_equations(equations_text, parse_units=True)
+            # Summen absoluter Temperaturen, die vom Nullpunkt abhängen (T_3 = T_1 + T_2):
+            # auf der Skala der Eingabe rechnen (in Kelvin wären sie keine Temperatur)
+            self._scale_points, scale_hints = set(), []
+            if CONSTRAINT_PROPAGATION_AVAILABLE and UNITS_AVAILABLE:
+                equations, original_equations, self._scale_points, scale_hints = \
+                    self._apply_input_scale(equations, original_equations, unit_values)
+
             # Startwerte stehen im Blatt (Block {$Startwerte ... $}, von
             # Solve > Initial Values geschrieben) - der Text ist die einzige Quelle
             self.manual_initial_values = parse_start_values(equations_text)
 
+            # Optimierung: die variierten Größen sind keine Unbekannten
+            goals = parse_optimization(equations_text)
+            if goals and not OPTIMIZER_AVAILABLE:
+                raise RuntimeError("Optimierung nicht verfügbar (optimizer.py fehlt)")
+            optimized = self._check_optimization(goals, variables, initial_values, sweep_vars)
+            for goal in goals:
+                unit_values.update(goal.unit_values)   # Anzeige in der Einheit der Grenzen
+
             self.known_variables = variables.copy()
             self.current_unit_values = unit_values
             self.known_variables.update(sweep_vars.keys())
+            variables = variables - set(optimized)
 
             self.last_solution = None
             self.last_sweep_vars = sweep_vars
             self.last_analysis = None  # Residuals-Daten
 
-            # Validiere System (mit Konstanten für Constraint-Zählung)
-            valid, msg = validate_system(equations, variables, initial_values)
+            # Validiere System (mit Konstanten für Constraint-Zählung; variierte
+            # Größen zählen wie gegebene Werte)
+            valid, msg = validate_system(equations, variables, {**initial_values, **optimized})
 
             n_equations = len(equations)
             n_variables = len(variables)
@@ -1506,7 +1642,8 @@ class EquationSolverApp(ctk.CTk):
 
             if not valid:
                 self._show_error(self._structure_message(
-                    equations, variables, initial_values, original_equations, equations_text) or msg)
+                    equations, variables, {**initial_values, **optimized}, original_equations,
+                    equations_text) or msg)
                 self.status_label.configure(text="Error: System not solvable")
                 return
 
@@ -1515,36 +1652,81 @@ class EquationSolverApp(ctk.CTk):
             # Manuelle Startwerte
             solver_initial = {}
             for var, val in self.manual_initial_values.items():
-                if var in variables:
+                if var in variables or var in optimized:
                     solver_initial[var] = val
 
             # NEU: Einheiten-Propagation VOR dem Lösen für bessere Startwerte
             # Dies ist der generische Ansatz, der NICHT von Variablennamen abhängt
             self.inferred_units = {}  # Speichere abgeleitete Einheiten für Dialog
+            temperature_hints = []
             if CONSTRAINT_PROPAGATION_AVAILABLE and UNITS_AVAILABLE:
                 # Sammle bekannte Einheiten aus unit_values
                 known_units = {}
                 for var, uv in unit_values.items():
                     if uv.calc_unit:
                         known_units[var] = uv.calc_unit
+                for var in self._scale_points:
+                    known_units.setdefault(var, 'K')
+                # In K eingegebene Größen: absolut oder Differenz folgt aus den Gleichungen
+                open_k, celsius = self._temperature_inputs(unit_values)
+                # Startwerte mit Einheit legen die Einheit berechneter Größen fest
+                self._start_units = {}
+                for name, uv in start_value_units(equations_text).items():
+                    if name not in known_units and uv.calc_unit:
+                        known_units[name] = uv.calc_unit
+                        self._start_units[name] = uv
+                        if uv.calc_unit == 'K' and uv.original_unit.strip() in ('K', 'kelvin'):
+                            open_k.add(name)
 
-                # Führe vollständige Einheiten-Propagation durch
-                all_units = propagate_all_units_complete(original_equations, known_units)
+                # Führe vollständige Einheiten-Propagation durch (nicht bestimmbarer
+                # Temperatur-Charakter zählt für die Startwerte als absolut)
+                all_units = propagate_all_units_complete(original_equations, known_units,
+                                                         open_temperatures=open_k)
                 self.inferred_units = all_units
+                # Mittel der gegebenen Temperaturen nur über sicher absolute Werte
+                definite = propagate_all_units_complete(original_equations, known_units,
+                                                        open_temperatures=open_k,
+                                                        undetermined_temperature='delta_K')
+                start_units = {**all_units, **{v: definite.get(v) for v in open_k}}
+                if any(uv.original_unit for uv in unit_values.values()):
+                    temperature_hints += self._missing_unit_hints(
+                        original_equations, {**known_units, **{c: '' for c in list(constants) + list(sweep_vars)
+                                                               if c not in known_units}}, open_k)
+                handled = {h_source for h_source, _ in scale_hints}
+                temperature_hints += [text for _, text in scale_hints] + [
+                    h for h in self._celsius_difference_hints(
+                        original_equations, known_units, open_k, celsius, unit_values)
+                    if not any(f"'{unmangle(src)}'" in h for src in handled)]
 
                 # Leite Startwerte aus Einheiten ab (nur für Variablen ohne manuellen Startwert)
-                unit_initial = initial_values_from_units(variables, all_units, constants)
+                unit_initial = initial_values_from_units(variables, start_units, {**constants, **optimized})
                 self.auto_initial_values = unit_initial  # Anzeige im Initial-Values-Dialog
                 for var, value in unit_initial.items():
                     if var not in solver_initial:
                         solver_initial[var] = value
 
             # Löse System
-            if sweep_vars:
-                def progress_callback(current, total):
-                    self.status_label.configure(text=f"Solving... {current}/{total}")
-                    self.update()
+            def progress_callback(current, total):
+                self.status_label.configure(text=f"Solving... {current}/{total}")
+                self.update()
 
+            if goals and sweep_vars:
+                # Optimum je Punkt (wie die Min/Max-Tabelle in EES)
+                success, solution, solve_msg = optimize_parametric(
+                    equations, variables, sweep_vars, goals, solver_initial,
+                    progress_callback=progress_callback, constants=constants,
+                    original_equations=original_equations
+                )
+                analysis = None
+            elif goals:
+                self.status_label.configure(text="Optimizing...")
+                self.update()
+                success, solution, solve_msg, analysis = optimize_system(
+                    equations, variables, goals, solver_initial, constants,
+                    original_equations, return_analysis=True
+                )
+                self.last_analysis = analysis
+            elif sweep_vars:
                 success, solution, solve_msg = solve_parametric(
                     equations, variables, sweep_vars, solver_initial,
                     progress_callback=progress_callback, constants=constants,
@@ -1583,15 +1765,17 @@ class EquationSolverApp(ctk.CTk):
             if DIAGNOSTICS_AVAILABLE and not sweep_vars:
                 try:
                     diagnosis_errors, hints = diagnose(
-                        equations, variables, constants, original_equations, equations_text,
-                        solution if not success else None)
+                        equations, variables, {**constants, **optimized}, original_equations,
+                        equations_text, solution if not success else None)
                     if analysis is not None:
-                        analysis.hints = hints
+                        analysis.hints = temperature_hints + hints
                 except Exception:
                     diagnosis_errors = []
 
             if success:
-                self._show_results(solution, solve_msg, n_equations, n_variables, "OK")
+                self._show_results(solution, solve_msg, n_equations,
+                                   f"{n_variables} + {len(optimized)} optimized"
+                                   if optimized else n_variables, "OK")
                 self.last_solution = solution
                 if sweep_vars and solve_msg.startswith("Parameterstudie teilweise"):
                     # Einzelne Punkte ohne Lösung: nicht als voller Erfolg anzeigen
@@ -1601,7 +1785,10 @@ class EquationSolverApp(ctk.CTk):
                 elif sweep_vars:
                     self.status_label.configure(text=f"Parametric study: {len(list(sweep_vars.values())[0])} points")
                 else:
-                    self.status_label.configure(text="Solution found")
+                    self.status_label.configure(text="Optimum found" if goals else "Solution found")
+                    if goals:
+                        # Ergebnis der Optimierung (Minimum/Maximum, Grenzen) statt der Zählung
+                        self.info_label.configure(text=solve_msg, text_color=COLORS["text"])
                     # Residuals Tab aktualisieren
                     if analysis:
                         self._update_residuals_tab(analysis)
@@ -1621,7 +1808,7 @@ class EquationSolverApp(ctk.CTk):
                 is_contradiction = "widersprüch" in (solve_msg or "").lower()
                 # Nicht-Widerspruch: generische Diagnose (unterbestimmter Teil bzw.
                 # numerisch ungelöste Unbekannte) statt "Unvollständig: n Gleichungen ..."
-                if not is_contradiction and diagnosis_errors:
+                if not is_contradiction and diagnosis_errors and not goals:
                     timed_out = (solve_msg or "").startswith("Zeitlimit")
                     solve_msg = " ".join(diagnosis_errors)
                     if timed_out:
@@ -1652,6 +1839,114 @@ class EquationSolverApp(ctk.CTk):
             self._show_error(str(e))
             self.status_label.configure(text=f"Error: {e}")
 
+    @staticmethod
+    def _temperature_inputs(unit_values: dict):
+        """
+        (in K eingegebene Größen, in °C/°F eingegebene Größen). °C/°F sind immer
+        absolute Temperaturen; eine Angabe in K kann eine Temperatur oder eine
+        Temperaturdifferenz sein - das folgt aus den Gleichungen, nicht aus dem Namen.
+        """
+        open_k, celsius = set(), set()
+        for var, uv in unit_values.items():
+            if uv.calc_unit != 'K' or not uv.original_unit:
+                continue
+            if uv.original_unit.strip() in ('K', 'kelvin'):
+                open_k.add(var)
+            else:
+                celsius.add(var)
+        return open_k, celsius
+
+    def _apply_input_scale(self, equations, original_equations, unit_values):
+        """
+        Summen absoluter Temperaturen, deren Ergebnis vom Nullpunkt der Skala abhängt
+        (unit_constraints.scale_dependent_sums), auf der Eingabe-Skala rechnen:
+        Residuum + Korrektur (T_3 = T_1 + T_2 - 273.15 K -> 20 °C + 40 °C = 60 °C).
+        Liefert (Gleichungen, Original-Zuordnung, neu absolute Größen, Hinweise).
+        """
+        import ast
+        known_units = {v: uv.calc_unit for v, uv in unit_values.items() if uv.calc_unit}
+        open_k, celsius = self._temperature_inputs(unit_values)
+        origins = {v: scale_origin(unit_values[v].original_unit) for v in celsius}
+        origins = {v: o for v, o in origins.items() if o}
+        try:
+            found = scale_dependent_sums(original_equations, known_units, open_k, origins)
+        except Exception:
+            return equations, original_equations, set(), []
+        if not found:
+            return equations, original_equations, set(), []
+        replaced = {}
+        points, hints = set(), []
+        for item in found:
+            key = item['key']
+            try:
+                tree = ast.parse(key, mode='eval').body
+                left = ast.get_source_segment(key, tree.left)
+                right = ast.get_source_segment(key, tree.right)
+            except Exception:
+                continue
+            if not (isinstance(tree, ast.BinOp) and isinstance(tree.op, ast.Sub) and left and right):
+                continue
+            # Residuum + Korrektur: links - (rechts - Korrektur)
+            replaced[key] = f"({left}) - (({right}) - ({item['correction']!r}))"
+            points.update(item['points'])
+            scale = next((pretty_unit(unit_values[v].original_unit) for v in celsius
+                          if abs(origins.get(v, 0) - item['origin']) < 1e-6), '°C')
+            hints.append((item['source'],
+                          f"'{unmangle(item['source'])}': Summe absoluter Temperaturen - auf der "
+                          f"{scale}-Skala gerechnet, wie eingegeben (in Kelvin ergäbe die Summe weder "
+                          f"eine Temperatur noch eine Temperaturdifferenz)"))
+        equations = [replaced.get(eq, eq) for eq in equations]
+        original_equations = {replaced.get(eq, eq): text for eq, text in original_equations.items()}
+        return equations, original_equations, points, hints
+
+    @staticmethod
+    def _missing_unit_hints(original_equations, known_units, open_k) -> List[str]:
+        """
+        Hinweise für Größen, deren Einheit aus den Gleichungen nicht folgt, mit den
+        Größen, deren Einheit man angeben muss (unit_constraints.missing_unit_annotations).
+        """
+        try:
+            groups = missing_unit_annotations(original_equations, known_units, open_k)
+        except Exception:
+            return []
+        hints = []
+        for members, suggest in groups:
+            names = [display_name(n) for n in members]
+            given = [display_name(n) for n in suggest]
+            others = [n for n in names if n not in given]
+            alternative = f" (oder von {', '.join(others)})" if len(given) == 1 and others else ""
+            hints.append(
+                f"Einheit nicht bestimmbar: {', '.join(names)} - aus den Gleichungen folgt nur ihr "
+                f"Zusammenhang. Einheit von {', '.join(given)}{alternative} angeben: als Startwert mit "
+                f"Einheit (Solve > Initial Values, z.B. {given[0]} = 1 <Einheit>); die übrigen folgen daraus")
+        return hints
+
+    @staticmethod
+    def _celsius_difference_hints(original_equations, known_units, open_k, celsius, unit_values):
+        """
+        Hinweise für Gleichungen, in denen in °C/°F angegebene Werte (absolute
+        Temperaturen) so addiert werden, dass weder Temperatur noch Differenz
+        herauskommt - meist eine Temperaturdifferenz in °C (T_2 = T_1 + x, x = 10 °C).
+        """
+        if not celsius:
+            return []
+        try:
+            conflicts = temperature_sum_conflicts(original_equations, known_units, open_k)
+        except Exception:
+            return []
+        hints = []
+        for equation, names in conflicts:
+            given = [display_name(n) for n in names if n in celsius]
+            if not given:
+                continue
+            units = sorted({pretty_unit(unit_values[n].original_unit) for n in names if n in celsius})
+            hints.append(
+                f"'{unmangle(equation)}': {', '.join(given)} in {'/'.join(units)} angegeben, also "
+                f"absolute Temperatur(en) - so kombiniert ergibt sich weder eine Temperatur noch "
+                f"eine Temperaturdifferenz. Ist ein Wert eine Temperaturdifferenz? "
+                f"Temperaturdifferenzen in K angeben (z.B. 10 K statt 10 °C)")
+        return hints
+
     def _assign_result_units(self, solution: dict, original_equations: dict, unit_values: dict,
                              constants: dict):
         """
@@ -1670,15 +1965,46 @@ class EquationSolverApp(ctk.CTk):
         if not CONSTRAINT_PROPAGATION_AVAILABLE:
             return
         known_units = {var: uv.calc_unit for var, uv in unit_values.items() if uv.calc_unit}
+        for var in getattr(self, '_scale_points', ()):
+            known_units.setdefault(var, 'K')
         if any(uv.original_unit for uv in unit_values.values()):
             for var in constants:
                 known_units.setdefault(var, '')
+        open_k, _ = self._temperature_inputs(unit_values)
+        for name, uv in getattr(self, '_start_units', {}).items():
+            if name not in known_units:
+                known_units[name] = uv.calc_unit
+                if uv.calc_unit == 'K' and uv.original_unit.strip() in ('K', 'kelvin'):
+                    open_k.add(name)
+        self._kelvin_display = set()
         try:
-            units = propagate_all_units_complete(original_equations, known_units)
+            # Temperatur-Charakter aus der Struktur (Summen, Funktionsargumente; für die
+            # Anzeige zusätzlich: Temperatur im Produkt ohne Temperatur-Dimension =
+            # Differenz). Zwei Durchläufe unterscheiden "bestimmt" von "nicht bestimmbar".
+            units = propagate_all_units_complete(original_equations, known_units,
+                                                 open_temperatures=open_k,
+                                                 undetermined_temperature='K',
+                                                 differences_in_products=True)
+            safe = propagate_all_units_complete(original_equations, known_units,
+                                                open_temperatures=open_k,
+                                                undetermined_temperature='delta_K',
+                                                differences_in_products=True)
         except Exception:
             return
         for var, val in solution.items():
             existing = self.current_unit_values.get(var)
+            if var in open_k:
+                if units.get(var) == 'delta_K':
+                    # In K eingegeben, aus den Gleichungen eine Differenz: in K anzeigen
+                    try:
+                        first = float(val[0]) if isinstance(val, np.ndarray) else float(val)
+                        self.current_unit_values[var] = UnitValue.from_si_base(first, 'delta_K')
+                    except Exception:
+                        pass
+                elif safe.get(var) == 'delta_K':
+                    # In K eingegeben, Charakter nicht bestimmbar: wie eingegeben (K)
+                    self._kelvin_display.add(var)
+                continue
             if existing is not None and existing.original_unit:
                 continue  # Vom Benutzer angegebene Einheit hat Vorrang
             unit = units.get(var)
@@ -1741,6 +2067,8 @@ class EquationSolverApp(ctk.CTk):
         if not (unit_value and unit_value.original_unit):
             return val, ''
         unit = self._display_unit_for(unit_value)
+        if var in getattr(self, '_kelvin_display', ()):
+            unit = 'K'   # in K eingegeben, Charakter nicht bestimmbar: wie eingegeben
         if isinstance(val, np.ndarray):
             return np.array([self._si_to_unit(v, unit) if np.isfinite(v) else np.nan
                              for v in val]), unit
@@ -1857,7 +2185,10 @@ class EquationSolverApp(ctk.CTk):
 
             # Unit Dropdown oder Platzhalter (rechts außen, vor Value)
             if has_unit and not isinstance(val, np.ndarray):
-                compatible_units = [pretty_unit(u) for u in get_compatible_units(display_unit)]
+                stored = self.current_unit_values.get(var)
+                is_difference = stored is not None and stored.original_unit == 'delta_K'
+                compatible_units = list(dict.fromkeys(
+                    pretty_unit(u) for u in get_compatible_units('delta_K' if is_difference else display_unit)))
                 if display_unit not in compatible_units:
                     compatible_units = [display_unit] + list(compatible_units)
 
@@ -2162,7 +2493,7 @@ class EquationSolverApp(ctk.CTk):
             if unit is None:
                 unit_text = "???"
             else:
-                unit_text = unit if unit else "-"
+                unit_text = pretty_unit(unit) if unit else "-"
             ctk.CTkLabel(row, text=unit_text, width=100, anchor="w",
                          text_color=COLORS["accent"]).pack(side="left", padx=5)
 

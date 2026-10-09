@@ -16,6 +16,7 @@ Equation solver for teaching and rapid calculation of thermodynamic state change
 - **Parameter Studies**: Simple sweep syntax (`p = 25:5:50 bar`) and value lists for measured data (`T = [20 25 31] °C`)
 - **Case Distinction**: `IF(a, b, x, y, z)` as in EES (`Nu = IF(Re, 2300, Nu_lam, Nu_turb, Nu_turb)`)
 - **Initial Values in the Sheet**: saved with the file as block `{$Startwerte ... $}`
+- **Optimization**: `MAXIMIZE eps_tot VARY m_dot_gly = 0.1 .. 4 kg/s` - also several quantities and per point of a parameter study (measured data)
 - **Unit System**: Automatic unit parsing, propagation and consistency checking
 - **GUI**: Modern CustomTkinter interface with plotting capabilities
 - **Temperature Display**: Configurable display in °C or K (Settings)
@@ -73,6 +74,7 @@ HVAC-Equation-Solver/
 ├── main.py              # Tkinter GUI (main application)
 ├── parser.py            # Equation syntax → Python conversion
 ├── solver.py            # Block decomposition + bracket search solver
+├── optimizer.py         # MINIMIZE/MAXIMIZE (grid + bounded Brent/Powell, per point)
 ├── thermodynamics.py    # CoolProp wrapper with unit conversion
 ├── humid_air.py         # CoolProp HumidAirProp wrapper
 ├── radiation.py         # Blackbody radiation functions
@@ -88,6 +90,7 @@ HVAC-Equation-Solver/
 ├── test_regressions.py  # Regression tests: parser, solver, units
 ├── test_unit_constraints.py  # Unit propagation / dimension checks
 ├── test_berechnungen.py # Thermodynamics & heat transfer problems vs. reference values
+├── test_optimierung.py  # Optimization vs. analytic/scipy references
 ├── test_gui.py          # Headless GUI tests
 ├── CLAUDE.md            # Technical documentation
 └── README.md            # This file
@@ -184,6 +187,25 @@ Nu = IF(Re, Re_krit, Nu_lam, Nu_turb, Nu_turb)   {laminar below Re_krit}
 and `x`, `y`, `z` must have the same unit. All arguments are evaluated - the branch
 not chosen must be computable too (no division by zero).
 
+### Optimization (MINIMIZE / MAXIMIZE)
+
+```
+MAXIMIZE epsilon_tot VARY m_dot_gly = 0.1 .. 4 kg/s
+MAXIMIZE e_tot VARY m_dot_w_2 = 0.5 .. 2 kg/s, m_dot_w_4 = 0.5 .. 2 kg/s
+MINIMIZE q_L VARY s_L = 11 .. 30 mm
+```
+
+The varied quantities are chosen within their bounds so that the goal (a variable that
+follows from the equations) becomes minimal or maximal; they are not unknowns, so the
+sheet has one equation less per varied quantity. The unit at the end applies to both
+bounds. Method: a grid over the whole range (finds the best of several local optima),
+then an exact local search (Brent for one quantity, Powell for several, both bounded);
+ranges over more than two decades are scanned logarithmically. For every candidate the
+normal solver solves the remaining system (warm start). Optima at a bound are reported.
+Together with a parameter study or value lists the optimum is found for every point
+(like the Min/Max table in EES) - e.g. the optimal glycol mass flow for each operating
+hour of a year of measured data.
+
 ### Initial Values in the Sheet
 
 For equations with several solutions the solver takes the one closest to the
@@ -261,7 +283,9 @@ The solver uses robust block decomposition:
   (`sin(alpha) = 0.5` yields 30, not 150)
 - Contradictory systems (e.g. `x+1=3` and `x+1=4`) are reported as errors
 - Parameter studies use warm starts (previous point's solution as initial value)
-- Default initial value 1.0 for all variables (or unit-based if units are known)
+- Initial values from the unit (unknown temperatures at the mean of the given ones) or,
+  without units, from the structure: an unknown that stands as a summand next to known
+  values (`T_R - T_G1`) starts near them - sheets work with and without units
 - Time budget of ~10 s per single equation (unsolvable equations do not freeze the GUI)
 
 **Note:** A line is only treated as a constant assignment if the left-hand side
@@ -277,7 +301,7 @@ equations and are solved iteratively. Expression constants with units like
 | Property | Internal Unit (SI) | Input Examples |
 |----------|--------------------|----------------|
 | Temperature T | K | `25 °C`, `298.15 K` |
-| Temperature difference | delta_K | `dT = 7 K`, `dT = 7 °C` (no offset) |
+| Temperature difference | delta_K | `dT = 7 K` (always in K; °C is an absolute temperature) |
 | Pressure p | Pa | `1 bar`, `101325 Pa` |
 | Enthalpy h | J/kg | `100 kJ/kg` |
 | Angles (sin, cos, tan) | Degrees (°) | |
@@ -285,9 +309,26 @@ equations and are solved iteratively. Expression constants with units like
 | Density rho | kg/m³ | |
 | Vapor quality x | - (0-1) | |
 
-Variables starting with `dT` or `delta` are treated as temperature differences
-(`delta_K`, no K↔°C offset). Computed differences like `theta = T_1 - T_2` are
-recognized as `delta_K` automatically.
+`°C`/`°F` are always absolute temperatures; temperature differences are entered in `K`.
+Whether a quantity is a temperature or a difference follows from the equations, never from
+its name: `theta = T_1 - T_2` is a difference, `T_2 = T_1 + dT` makes `dT` a difference and
+`T_2` absolute, `(T_1 + T_2)/2` is absolute, and a temperature inside a product whose
+dimension is not a temperature is a difference (as in COMSOL): in `Q = m*c*(T_1 - T_2)` with
+`T_1` absolute, `T_2` is absolute. Absolute temperatures are shown in °C (Settings),
+differences in K. Sums of absolute temperatures depend on the zero point of the scale (in
+Kelvin they are no temperature); they are calculated on the scale of the input, as in EES:
+`T_1 = 20 °C`, `T_2 = 40 °C`, `T_3 = T_1 + T_2` gives 60 °C.
+
+Numeric-value equations (formulas that only hold for numbers in certain units, such as a
+heating curve in °C) use `value(x, unit)` and `quantity(z, unit)`:
+`T_VL = quantity(20 + 1.5*(20 - value(T_a, °C)), °C)`.
+
+Units of computed variables are inferred in two stages (as described by Olsson 2025 for
+Modelica): local propagation (keeps readable units like kW, kJ/kg), then complete
+Hindley-Milner inference after Kennedy - all unit equations form one linear system in the
+exponents of the SI base units, solved exactly; this also finds coupled units
+(`a*b = X`, `a/b = Y`). If units cannot be determined, a hint names the quantities whose
+unit has to be given (as a start value with unit) so that all others follow.
 
 ### Humid Air Units
 
@@ -403,6 +444,7 @@ In the Settings dialog you can configure:
 python3 test_regressions.py       # parser, solver, unit system
 python3 test_unit_constraints.py  # unit propagation and dimension checks
 python3 test_berechnungen.py      # 59 problems, with and without units
+python3 test_optimierung.py       # MINIMIZE/MAXIMIZE against analytic/scipy references
 python3 test_gui.py               # headless GUI (briefly takes focus - don't type)
 ```
 

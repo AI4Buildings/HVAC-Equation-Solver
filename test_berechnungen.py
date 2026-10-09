@@ -550,7 +550,7 @@ check("E8 Energie kWh / Zeit h", "E = 5 kWh\nt = 2 h\nP = E/t", {'P': 2500.0})
 check("E9 Fahrenheit-Temperatur", "T = 68 °F\nx = T", {'x': 293.15}, rtol=1e-6)
 check("E10 Druck in atm und kPa", "p_1 = 1 atm\np_2 = 250 kPa\ndp = p_2 - p_1", {'dp': 250000 - 101325})
 check("E11 Volumenstrom m^3/h", "V_dot = 500 m^3/h\nrho = 1.2 kg/m^3\nm_dot = rho*V_dot", {'m_dot': 500 / 3600 * 1.2})
-check("E12 dT in °C (Differenz)", "dT_1 = 10 °C\nm = 1 kg/s\nc = 4.19 kJ/(kg*K)\nQ = m*c*dT_1", {'Q': 41900.0})
+check("E12 Temperaturdifferenz in K", "dT_1 = 10 K\nm = 1 kg/s\nc = 4.19 kJ/(kg*K)\nQ = m*c*dT_1", {'Q': 41900.0})
 check("E13 Mitteltemperatur aus °C", "T_1 = 10 °C\nT_2 = 30 °C\nT_m = (T_1 + T_2)/2", {'T_m': 293.15})
 check("E14 Exponent ohne ^ (cm2, W/m2K) MIT Einheiten", """alpha=10 W/m2K
 

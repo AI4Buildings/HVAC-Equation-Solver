@@ -13,13 +13,14 @@ Unterstützte Syntax:
 
 import keyword
 import re
+from dataclasses import dataclass, field
 import numpy as np
 from typing import List, Set, Tuple, Dict, Union, Optional
 
 # Einheiten-Modul (optional, falls nicht vorhanden wird ohne Einheiten gearbeitet)
 try:
     from units import (parse_value_with_unit, UnitValue, unit_value_strict, UnknownUnitError,
-                       check_unit_dimension)
+                       check_unit_dimension, unit_affine, unit_number, unit_quantity)
     UNITS_AVAILABLE = True
 except ImportError:
     UNITS_AVAILABLE = False
@@ -34,8 +35,12 @@ MATH_FUNCTIONS = {
     'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
     'sinh', 'cosh', 'tanh',
     'exp', 'ln', 'lg', 'log10', 'sqrt', 'abs',
-    'pi', 'max', 'min', 'IF'
+    'pi', 'max', 'min', 'IF', 'value', 'quantity'
 }
+
+# Zahlenwertgleichungen: value(x, Einheit) = Zahlenwert von x in der Einheit,
+# quantity(z, Einheit) = Größe aus dem Zahlenwert z (units.unit_number/unit_quantity)
+UNIT_VALUE_FUNCTIONS = {'value', 'quantity'}
 
 # Thermodynamik-Funktionen (CoolProp)
 THERMO_FUNCTIONS = {
@@ -461,6 +466,20 @@ def _convert_positional_call(func_name: str, args_str: str, keep_case: bool = Tr
     return f"{func_name}({', '.join(args)})"
 
 
+def _convert_unit_function_call(func_name: str, args_str: str, keep_case: bool = False) -> str:
+    """
+    value(T_a, °C) -> value(T_a, '°C'): die Einheit wird geprüft (unbekannte Einheit
+    -> UnknownUnitError mit Zeilennummer) und als Text übergeben.
+    """
+    args = _split_call_args(args_str)
+    if len(args) != 2 or args[1].strip().startswith(("'", '"')):
+        return f"{func_name.lower()}({args_str})"
+    unit_text = args[1].strip()
+    if UNITS_AVAILABLE:
+        unit_affine(unit_text)
+    return f"{func_name.lower()}({args[0]}, {unit_text!r})"
+
+
 def _replace_calls_balanced(text: str, func_names: Set[str], keep_case: bool = False,
                             converter=None) -> str:
     """
@@ -526,6 +545,10 @@ def tokenize_equation(equation: str) -> str:
     equation = _replace_calls_balanced(equation, RADIATION_FUNCTIONS, keep_case=True,
                                        converter=_convert_positional_call)
 
+    # Zahlenwertgleichungen: Einheit als Text (value(T_a, °C) -> value(T_a, '°C'))
+    equation = _replace_calls_balanced(equation, UNIT_VALUE_FUNCTIONS, keep_case=False,
+                                       converter=_convert_unit_function_call)
+
     return equation
 
 
@@ -564,6 +587,8 @@ def extract_variables(equation: str) -> Set[str]:
     # Ersetze komplette Thermodynamik-/HumidAir-Funktionsaufrufe durch die
     # Variablen-Tokens ihrer Argumente (balanciert, auch verschachtelt)
     temp_eq = _reduce_special_calls_to_tokens(equation)
+    # Texte sind nie Variablen (Einheit in value(x, 'bar'), Stoffnamen)
+    temp_eq = re.sub(r"'[^']*'|\"[^\"]*\"", ' ', temp_eq)
 
     # Entferne Funktionsnamen aus der Suche - NUR wenn sie als Funktionen verwendet werden
     # (d.h. mit Klammern dahinter), nicht wenn sie als Variablen verwendet werden
@@ -621,6 +646,7 @@ def _get_const_eval_context() -> dict:
         'exp': np.exp, 'abs': abs,
         'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,
         'max': max, 'min': min, 'IF': if_function,
+        'value': unit_number, 'quantity': unit_quantity,
     }
 
 
@@ -768,6 +794,14 @@ def _check_call_signature(node, func_name: str, text: str, offset: int) -> None:
     if func_name in ('max', 'min'):
         if n_args < 2 or keywords:
             raise EquationSyntaxError(f"{func_name}() erwartet mindestens 2 Argumente, {where}")
+        return
+    if func_name in UNIT_VALUE_FUNCTIONS:
+        unit = node.args[1] if n_args == 2 else None
+        if (n_args != 2 or keywords or not isinstance(unit, ast_module().Constant)
+                or not isinstance(unit.value, str)):
+            raise EquationSyntaxError(
+                f"{func_name}(x, Einheit) erwartet eine Größe bzw. Zahl und eine Einheit "
+                f"(z.B. value(T_a, °C), quantity(20, °C)), {where}")
         return
     if func_name == 'IF':
         if n_args != 5 or keywords:
@@ -991,6 +1025,13 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
 
     # Entferne Kommentare (Zeilenumbrüche bleiben erhalten -> Zeilen bleiben synchron)
     text = remove_comments(text)
+    # Optimierungsanweisungen (MINIMIZE/MAXIMIZE ... VARY ...) sind keine Gleichungen -
+    # parse_optimization liest sie; hier werden sie zu Leerzeilen (Nummern bleiben)
+    raw_lines = text.split('\n')
+    for _, used in _optimization_line_groups(raw_lines):
+        for j in used:
+            raw_lines[j] = ''
+    text = '\n'.join(raw_lines)
 
     # Teile in Zeilen auf; Python-Schlüsselwörter als Variablennamen intern
     # umbenennen (lambda -> _kw_lambda), auch in den Originalzeilen, damit die
@@ -1087,16 +1128,6 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
             if vec_unit and UNITS_AVAILABLE:
                 try:
                     from units import UnitValue
-                    # Temperaturdifferenz (dT..., delta...): Faktor, KEIN Offset -
-                    # wie bei Einzelwerten (dT = 0:5:20 °C -> 0..20 K, nicht 273..293 K)
-                    lower_name = var_name.lower()
-                    diff_factor = {'K': 1.0, 'kelvin': 1.0, '°C': 1.0, 'C': 1.0, 'degC': 1.0,
-                                   'celsius': 1.0, '°F': 5.0 / 9.0, 'degF': 5.0 / 9.0,
-                                   'fahrenheit': 5.0 / 9.0}.get(vec_unit.strip())
-                    if (lower_name.startswith('dt') or lower_name.startswith('delta')) and diff_factor:
-                        sweep_vars[var_name] = vec_array * diff_factor
-                        unit_values[var_name] = UnitValue.from_input(float(vec_array[0]) * diff_factor, 'delta_K')
-                        continue
                     # Konvertiere IMMER elementweise: nur so werden Offset-Einheiten
                     # (°C -> K: +273.15) korrekt behandelt. Ein multiplikativer
                     # Faktor wäre bei 20:10:50 °C für alle Werte außer dem ersten falsch.
@@ -1148,36 +1179,18 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
                     # Wert mit Einheit gefunden (z.B. "15°C", "10g", "10000/3600 kg/s")
                     var_name = left
 
-                    # Spezialfall: Temperaturdifferenz (dT..., delta...)
-                    # Temperatur-Einheiten werden als Differenz behandelt, nicht absolut
-                    # (verhindert falsche Offset-Konvertierung, z.B. +273.15 bei °C)
-                    var_lower = var_name.lower()
-                    is_temp_diff_name = (var_lower.startswith('dt') or
-                                         var_lower.startswith('delta'))
-                    # Faktor Einheit -> delta_K: 1 K-Diff = 1 °C-Diff, 1 °F-Diff = 5/9 K
-                    diff_factor = {
-                        'K': 1.0, 'kelvin': 1.0,
-                        '°C': 1.0, 'C': 1.0, 'degC': 1.0, 'celsius': 1.0,
-                        '°F': 5.0 / 9.0, 'degF': 5.0 / 9.0, 'fahrenheit': 5.0 / 9.0,
-                    }.get(unit_str.strip())
+                    # °C/°F sind immer absolute Temperaturen (mit Offset), unabhängig vom
+                    # Namen; Temperaturdifferenzen werden in K angegeben (kein Offset)
+                    # Unbekannte Einheit -> UnknownUnitError (kein ValueError,
+                    # wird also unten NICHT verschluckt)
+                    unit_value = unit_value_strict(magnitude, unit_str, line)
+                    # Verwende calc_value für Berechnungen (konvertiert zu Standard-Einheit)
+                    # z.B. 10 kg/h → 0.00278 kg/s, 20 °C → 293.15 K
+                    initial_values[var_name] = unit_value.calc_value
 
-                    if is_temp_diff_name and diff_factor is not None:
-                        # Temperaturdifferenz: keine Offset-Konvertierung
-                        initial_values[var_name] = magnitude * diff_factor
-                        if parse_units:
-                            # Erstelle UnitValue mit delta_K als Differenz-Einheit
-                            unit_values[var_name] = UnitValue.from_input(magnitude * diff_factor, 'delta_K')
-                    else:
-                        # Unbekannte Einheit -> UnknownUnitError (kein ValueError,
-                        # wird also unten NICHT verschluckt)
-                        unit_value = unit_value_strict(magnitude, unit_str, line)
-                        # Verwende calc_value für Berechnungen (konvertiert zu Standard-Einheit)
-                        # z.B. 10 kg/h → 0.00278 kg/s, aber 20°C bleibt 20°C
-                        initial_values[var_name] = unit_value.calc_value
-
-                        # Speichere Einheiten-Info nur wenn parse_units aktiviert
-                        if parse_units:
-                            unit_values[var_name] = unit_value
+                    # Speichere Einheiten-Info nur wenn parse_units aktiviert
+                    if parse_units:
+                        unit_values[var_name] = unit_value
                     continue
             except ValueError:
                 pass  # Kein gültiger Wert mit Einheit, normale Verarbeitung
@@ -1268,19 +1281,33 @@ def find_start_values_block(text: str) -> Optional[Tuple[int, Optional[int]]]:
     return (start, None) if start is not None else None
 
 
+def _single_assignment(line: str):
+    """
+    Wertet eine einzelne Zuweisung 'Name = Wert [Einheit]' genau wie im Blatt aus
+    (Einheit -> SI, Temperaturdifferenzen dT.../delta... ohne Offset).
+    Liefert (interner Name, SI-Wert, UnitValue oder None) bzw. None, wenn die
+    Zeile keine solche Zuweisung ist. Einlesefehler werden weitergereicht.
+    """
+    equations, _, constants, sweeps, _, unit_values = _parse_equations(line, True, [0])
+    if len(constants) != 1 or equations or sweeps:
+        return None
+    name, value = next(iter(constants.items()))
+    return name, value, unit_values.get(name)
+
+
 def parse_start_value(line: str) -> Tuple[str, float]:
     """
     Liest einen Startwert 'Name = Wert [Einheit]' (wie eine Zuweisung im Blatt:
     T_2 = 15 °C, p = 2 bar, x = 0.5). Liefert (interner Name, SI-Wert).
     """
     try:
-        equations, _, constants, sweeps, _, _ = _parse_equations(line, True, [0])
+        result = _single_assignment(line)
     except (EquationSyntaxError, UnknownUnitError) as exc:
         raise type(exc)(f"{exc} (Startwert: {line.strip()})") from None
-    if len(constants) != 1 or equations or sweeps:
+    if result is None:
         raise EquationSyntaxError(
             f"Startwert als 'Name = Wert Einheit' angeben (z.B. T_2 = 15 °C), nicht: {line.strip()}")
-    return next(iter(constants.items()))
+    return result[0], result[1]
 
 
 def parse_start_values(text: str) -> Dict[str, float]:
@@ -1317,6 +1344,23 @@ def start_value_entries(text: str) -> Dict[str, Tuple[float, str]]:
     return values
 
 
+def start_value_units(text: str) -> Dict[str, object]:
+    """
+    Einheiten der mit Einheit angegebenen Startwerte {Name: UnitValue}. Sie gelten auch
+    als Einheitenangabe für berechnete Größen, deren Einheit aus den Gleichungen allein
+    nicht folgt (wie "Variable Info" in EES).
+    """
+    units = {}
+    for name, (_, line) in start_value_entries(text).items():
+        try:
+            result = _single_assignment(line)
+        except Exception:
+            continue
+        if result is not None and result[2] is not None and result[2].original_unit:
+            units[name] = result[2]
+    return units
+
+
 def start_values_edit(text: str, lines: List[str]) -> Tuple[int, int, str]:
     """
     Änderung, die den Startwerte-Block durch 'lines' ersetzt: (start, end, neu)
@@ -1338,6 +1382,114 @@ def start_values_edit(text: str, lines: List[str]) -> Tuple[int, int, str]:
         before = text[:start].rstrip()
         return len(before), len(text), '\n' if before else ''
     return start, end, block
+
+
+# ---------------------------------------------------------------------------
+# Optimierung: MINIMIZE ziel VARY x = a .. b Einheit[, y = c .. d Einheit]
+# Eine eigene Zeile (endet sie mit ',', geht sie in der nächsten weiter). Die
+# variierten Größen sind keine Unbekannten mehr - optimizer.py wählt sie so,
+# dass die Zielgröße minimal bzw. maximal wird.
+# ---------------------------------------------------------------------------
+_OPTIMIZE_PATTERN = re.compile(r'^\s*(MINIMIZE|MAXIMIZE)\b', re.IGNORECASE)
+_OPTIMIZE_SYNTAX = "MAXIMIZE ziel VARY x = a .. b Einheit (mehrere Größen durch Komma getrennt)"
+
+
+@dataclass
+class OptimizationGoal:
+    """Eine Anweisung MINIMIZE/MAXIMIZE ... VARY ... (Werte in SI)."""
+    sense: str                    # 'min' oder 'max'
+    objective: str                # Zielgröße (interner Name)
+    names: List[str]              # variierte Größen (interne Namen)
+    lower: List[float]            # Grenzen in SI
+    upper: List[float]
+    line: int                     # Zeilennummer der Anweisung
+    unit_values: Dict[str, object] = field(default_factory=dict)  # Anzeige-Einheit je Größe
+
+
+def _optimization_line_groups(lines: List[str]) -> List[Tuple[int, List[int]]]:
+    """(erste Zeile, alle Zeilen) jeder Optimierungsanweisung (Indizes ab 0)."""
+    groups = []
+    i = 0
+    while i < len(lines):
+        if _OPTIMIZE_PATTERN.match(lines[i]):
+            used = [i]
+            while lines[used[-1]].rstrip().endswith(',') and used[-1] + 1 < len(lines):
+                used.append(used[-1] + 1)
+            groups.append((i, used))
+            i = used[-1] + 1
+        else:
+            i += 1
+    return groups
+
+
+def _bound_in_si(name: str, value_text: str, unit: str, line_no: int):
+    """Grenze 'Wert' + Einheit in SI (wie eine Zuweisung; dT... ohne Offset)."""
+    try:
+        result = _single_assignment(f"{name} = {value_text} {unit}".strip())
+    except (EquationSyntaxError, UnknownUnitError) as exc:
+        raise type(exc)(f"Zeile {line_no}: {exc} (Grenze von {unmangle(name)})") from None
+    if result is None:
+        raise EquationSyntaxError(
+            f"Zeile {line_no}: Grenze von {unmangle(name)} ist keine Zahl: '{value_text}'")
+    return result[1], result[2]
+
+
+def parse_optimization(text: str) -> List[OptimizationGoal]:
+    """
+    Liest alle Anweisungen MINIMIZE/MAXIMIZE ziel VARY x = a .. b Einheit aus dem
+    Blatt. Die Einheit am Ende gilt für beide Grenzen (wie bei Parameterstudien);
+    eine Grenze darf auch eine eigene Einheit haben. Fehler mit Zeilennummer.
+    """
+    lines = remove_comments(text).split('\n')
+    goals = []
+    seen = {}
+    for start, used in _optimization_line_groups(lines):
+        line_no = start + 1
+        statement = ' '.join(lines[j].strip() for j in used)
+        if re.search(r'\d,\d', statement):
+            raise EquationSyntaxError(
+                f"Zeile {line_no}: Dezimalkomma? Zahlen mit Punkt schreiben (0.5 statt 0,5)")
+        match = re.match(r'^(MINIMIZE|MAXIMIZE)\s+([A-Za-z_]\w*)\s+VARY\s+(.+)$', statement, re.IGNORECASE)
+        if not match:
+            raise EquationSyntaxError(f"Zeile {line_no}: Optimierung so schreiben: {_OPTIMIZE_SYNTAX}")
+        goal = OptimizationGoal(sense='min' if match.group(1).upper() == 'MINIMIZE' else 'max',
+                                objective=mangle_keywords(match.group(2)),
+                                names=[], lower=[], upper=[], line=line_no)
+        for spec in match.group(3).split(','):
+            spec_match = re.match(r'^\s*([A-Za-z_]\w*)\s*=\s*(.+?)\s*\.\.\s*(.+?)\s*$', spec)
+            if not spec_match:
+                raise EquationSyntaxError(
+                    f"Zeile {line_no}: '{spec.strip()}' - Bereich als x = a .. b Einheit angeben "
+                    f"(z.B. m_dot = 0.1 .. 4 kg/s)")
+            name = mangle_keywords(spec_match.group(1))
+            lo_text, hi_text = spec_match.group(2), spec_match.group(3)
+            try:
+                lo_value, lo_unit = parse_value_with_unit(lo_text) if UNITS_AVAILABLE else (float(lo_text), '')
+                hi_value, hi_unit = parse_value_with_unit(hi_text) if UNITS_AVAILABLE else (float(hi_text), '')
+            except ValueError:
+                raise EquationSyntaxError(
+                    f"Zeile {line_no}: Grenzen von {unmangle(name)} sind keine Zahlen: '{spec.strip()}'") from None
+            # Einheit am Ende gilt für beide Grenzen (0.1 .. 4 kg/s), sonst je Grenze
+            lo_unit, hi_unit = lo_unit or hi_unit, hi_unit or lo_unit
+            lower, unit_value = _bound_in_si(name, repr(lo_value), lo_unit, line_no)
+            upper, _ = _bound_in_si(name, repr(hi_value), hi_unit, line_no)
+            if not lower < upper:
+                raise EquationSyntaxError(
+                    f"Zeile {line_no}: Untere Grenze von {unmangle(name)} muss kleiner als die obere sein")
+            if name in seen:
+                raise EquationSyntaxError(
+                    f"Zeile {line_no}: {unmangle(name)} wird schon in Zeile {seen[name]} variiert")
+            seen[name] = line_no
+            goal.names.append(name)
+            goal.lower.append(lower)
+            goal.upper.append(upper)
+            if unit_value is not None:
+                goal.unit_values[name] = unit_value
+        if goal.objective in goal.names:
+            raise EquationSyntaxError(
+                f"Zeile {line_no}: Die Zielgröße {unmangle(goal.objective)} kann nicht selbst variiert werden")
+        goals.append(goal)
+    return goals
 
 
 def validate_system(equations: List[str], variables: Set[str], constants: Optional[Dict[str, float]] = None) -> Tuple[bool, str]:

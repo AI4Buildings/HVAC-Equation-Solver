@@ -9,6 +9,7 @@ behobenen Fehler ab. Weitere Testdateien:
 Ausführen mit:  python3 test_regressions.py
 """
 import os
+import re
 import subprocess
 import sys
 import time
@@ -21,7 +22,8 @@ warnings.filterwarnings("ignore")
 from parser import (parse_equations, parse_vector, remove_comments, tokenize_equation, extract_variables,
                     display_name, if_function, parse_start_values, start_values_edit)
 from solver import solve_system, solve_parametric, _get_equation_unknowns, _find_tear_candidates
-from unit_constraints import analyze_equation, check_equation_dimensions, check_all_unit_consistency
+from unit_constraints import (analyze_equation, check_equation_dimensions, check_all_unit_consistency,
+                              propagate_all_units_complete)
 from units import UnitValue, get_initial_from_unit, detect_unit_from_equation
 from radiation import Eb, Wien_displacement, Blackbody
 from diagnostics import analyze_structure, describe_structure, name_hints, diagnose
@@ -67,10 +69,91 @@ check("0:10:95 ohne 95", np.allclose(parse_vector("0:10:95"), np.arange(0, 91, 1
 _, _, _, sweeps, _, _ = parse_equations("T = 20:10:50 °C")
 check("Sweep 20:10:50 °C -> K", np.allclose(sweeps['T'], [293.15, 303.15, 313.15, 323.15]))
 
-# Temperaturdifferenz in °C ohne Offset
-_, _, consts, _, _, uv = parse_equations("dT_1 = 10 °C")
-check("dT_1 = 10 °C -> 10 delta_K", abs(consts.get('dT_1', 0) - 10) < 1e-9
-      and uv['dT_1'].original_unit == 'delta_K')
+# °C ist immer eine absolute Temperatur, unabhängig vom Namen; Differenzen in K
+_, _, consts, _, _, uv = parse_equations("dT_1 = 10 °C\ndT_2 = 10 K\ntheta = 10 °C")
+check("°C immer absolut (auch dT_1), K ohne Offset",
+      abs(consts['dT_1'] - 283.15) < 1e-9 and abs(consts['theta'] - 283.15) < 1e-9
+      and abs(consts['dT_2'] - 10) < 1e-12, str(consts))
+
+# Temperatur-Charakter aus der Struktur, nicht aus dem Namen (gleiches Ergebnis für jeden Namen)
+from unit_constraints import temperature_sum_conflicts
+labels = []
+for x, y, z in (("dT", "T_2", "theta"), ("a", "b", "c")):
+    text = f"T_1 = 20 °C\n{x} = 10 K\n{y} = T_1 + {x}\nQ = 4190*{z}\n{z} = {y} - T_1"
+    eqs, variables, consts, _, orig, uv = parse_equations(text)
+    known = {v: u.calc_unit for v, u in uv.items()}
+    units = propagate_all_units_complete(orig, known, open_temperatures={x}, undetermined_temperature='delta_K')
+    labels.append((units.get(x), units.get(y), units.get(z)))
+check("Charakter aus der Struktur: Differenz in K, Summe absolut, Differenz zweier Temperaturen",
+      labels[0] == labels[1] == ('delta_K', 'K', 'delta_K'), str(labels))
+eqs, variables, consts, _, orig, uv = parse_equations("Q = 41900 W\nm = 1 kg/s\nc = 4190 J/(kg*K)\nQ = m*c*theta")
+units = propagate_all_units_complete(orig, {v: u.calc_unit for v, u in uv.items()},
+                                     undetermined_temperature='delta_K')
+check("Nur in Produkten: Charakter offen -> Anzeige in K", units.get('theta') == 'delta_K', str(units))
+# Anzeige: Temperatur im Produkt ohne Temperatur-Dimension ist eine Differenz (wie COMSOL)
+for a, b, q in (("T1", "T2", "Q_dot"), ("u", "w", "zz")):
+    text = f"{a} = 80 °C\n{q} = 20 kW\nm_dot = 1 kg/s\nc = 4 kJ/kgK\n{q} = m_dot*c*({a} - {b})"
+    eqs, variables, consts, _, orig, uv = parse_equations(text)
+    units = propagate_all_units_complete(orig, {v: u.calc_unit for v, u in uv.items()},
+                                         undetermined_temperature='delta_K', differences_in_products=True)
+    check(f"Q = m*c*({a} - {b}) mit {a} absolut: {b} absolut", units.get(b) == 'K', str(units))
+text = "T_R = 20 °C\nh = 7.7 W/(m^2*K)\nq = 30 W/m^2\nRa = 9.81/((T_R + T_G)/2)*(T_R - T_G)\nq = h*(T_R - T_G)"
+eqs, variables, consts, _, orig, uv = parse_equations(text)
+units = propagate_all_units_complete(orig, {v: u.calc_unit for v, u in uv.items()},
+                                     undetermined_temperature='delta_K', differences_in_products=True)
+check("Mittelwert (T_R + T_G)/2 im Produkt: T_G bleibt absolut", units.get('T_G') == 'K', str(units))
+# sigma*T^4: Temperatur mit ganzzahligem Exponent >= 2 ist absolut -> Differenz zweier solcher ist Differenz
+text = ("sigma = 5.67e-8 W/(m^2*K^4)\nT_a = 20 °C\nG = 300 W/m^2\nsigma*T_s^4 = sigma*T_a^4 + 50 W/m^2\n"
+        "T_ms^4 = T_s^4 + G/sigma\ndT_solar = T_ms - T_s")
+text = text.replace("+ 50 W/m^2", "+ G/6")
+eqs, variables, consts, _, orig, uv = parse_equations(text)
+units = propagate_all_units_complete(orig, {v: u.calc_unit for v, u in uv.items()},
+                                     undetermined_temperature='delta_K', differences_in_products=True)
+check("sigma*T^4: T_s, T_ms absolut, dT_solar = T_ms - T_s Differenz",
+      (units.get('T_s'), units.get('T_ms'), units.get('dT_solar')) == ('K', 'K', 'delta_K'), str(units))
+eqs, variables, consts, _, orig, uv = parse_equations("dT = 10 K\nh = 1.31*dT^(1/3)")
+units = propagate_all_units_complete(orig, {v: u.calc_unit for v, u in uv.items()}, open_temperatures={'dT'},
+                                     undetermined_temperature='delta_K', differences_in_products=True)
+check("Gebrochener Exponent (dT^(1/3)): Charakter bleibt offen", units.get('dT') == 'delta_K', str(units))
+
+# Vollständige Einheiten-Ableitung (Stufe 2, Kennedy/Olsson): gekoppelte Einheiten aus dem
+# gemeinsamen linearen System der Exponenten - die lokale Propagation findet sie nicht
+for label, text, expected in (
+        ("a*b = X, a/b = Y", "X = 6 m^2\nY = 1.5\nX = a*b\nY = a/b", {'a': 'm', 'b': 'm'}),
+        ("v*x = w, v*v = k (Olsson)", "w = 3 m\nk = 1\nv*x = w\nv*v = k", {'v': '', 'x': 'm'}),
+        ("Olsson SecondOrder", "k = 2\nu = 1\ny = 3\nyd = 4 1/s\nydd = 2 1/s^2\nydd = w*(w*(k*u - y) - 2*D*yd)",
+         {'w': '1/s', 'D': ''}),
+        ("x = y^n (n Variable): keine Willkür", "y = 5 m\nn = 0.4\nx = y^n", {'x': None})):
+    eqs, variables, consts, _, orig, uv = parse_equations(text)
+    known = {v: u.calc_unit for v, u in uv.items() if u.calc_unit} | {v: '' for v in consts if v not in uv}
+    units = propagate_all_units_complete(orig, known)
+    check(f"Einheiten-Ableitung gekoppelt: {label}", {k: units.get(k) for k in expected} == expected,
+          str({k: units.get(k) for k in expected}))
+
+# Summe absoluter Temperaturen hängt vom Nullpunkt ab: auf der Eingabe-Skala rechnen
+from unit_constraints import scale_dependent_sums, scale_origin
+for text, expected in (("T_1 = 20 °C\nT_2 = 40 °C\nT_3 = T_2 + T_1", [273.15]),
+                       ("T_1 = 20 °C\nT_2 = 40 °C\nT_3 = T_2 + T_1\nT_4 = T_3 + T_1", [273.15, 273.15]),
+                       ("T_1 = 68 °F\nT_2 = 104 °F\nT_3 = T_2 + T_1", [255.372]),
+                       ("T_1 = 20 °C\nT_2 = 40 °C\nT_m = (T_1 + T_2)/2\ntheta = T_2 - T_1", []),
+                       ("T_1 = 20 °C\ndT = 5 K\nT_2 = T_1 + dT", []),
+                       ("T_1 = 20 °C\nr = 1.2\nT_2 = T_1*r", []),
+                       ("T_1 = 300 K\nT_2 = 400 K\nT_3 = T_1 + T_2", [])):
+    eqs, variables, consts, _, orig, uv = parse_equations(text)
+    known = {v: u.calc_unit for v, u in uv.items()}
+    open_k = {v for v, u in uv.items() if u.original_unit == 'K'}
+    origins = {v: scale_origin(u.original_unit) for v, u in uv.items() if u.calc_unit == 'K' and v not in open_k}
+    found = [round(item['correction'], 3) for item in scale_dependent_sums(orig, known, open_k, origins)]
+    check(f"Skala: {text.splitlines()[-1]} -> Korrektur {expected}", found == expected, str(found))
+for text, expected in (("T_1 = 20 °C\nx = 10 °C\nT_2 = T_1 + x", 1), ("T_1 = 20 °C\nx = 10 K\nT_2 = T_1 + x", 0),
+                       ("T_1 = 80 °C\nT_2 = 20 °C\nT_m = (T_1 + T_2)/2\ntheta = T_1 - T_2", 0),
+                       ("T_1 = 20 °C\nT_2 = T_1 + 10", 0)):
+    eqs, variables, consts, _, orig, uv = parse_equations(text)
+    known = {v: u.calc_unit for v, u in uv.items()}
+    open_k = {v for v, u in uv.items() if u.original_unit == 'K'}
+    found = temperature_sum_conflicts(orig, known, open_k)
+    check(f"Temperatur-Summe ohne Charakter erkannt: {text.splitlines()[-1]} -> {expected}",
+          len(found) == expected, str(found))
 
 # Verschachtelte Kommentare
 check("Kommentare verschachtelt", remove_comments("{a {b} c} x = 5").strip() == "x = 5")
@@ -615,6 +698,37 @@ s_, sol, msg = solve_system(eqs, variables, start, constants=consts, original_eq
 check("Fensterbilanz natürlich formuliert (ohne abs) mit Einheiten-Startwerten in < 10 s",
       s_ and abs(sol['T_G1'] - 285.7761) < 1e-3 and time.monotonic() - t0 < 10, msg)
 
+# Dasselbe OHNE Einheiten (alle Werte in SI, keine Startwerte aus Einheiten): Startwerte aus
+# der Struktur - T_G1, T_G2 stehen als Summanden neben T_R bzw. T_a (T_R - T_G1, T_G2 - T_a)
+SI_VALUES = {"20 °C": "293.15", "25 °C": "298.15", "-10 °C": "263.15", "20 mm": "0.02"}
+fenster_si = FENSTER_NATUERLICH
+for with_unit, si in SI_VALUES.items():
+    fenster_si = fenster_si.replace(f"= {with_unit}\n", f"= {si}\n")
+fenster_si = re.sub(r"(= [-\d.e]+) [^\n]*?(?=\n)", r"\1", fenster_si)
+eqs, variables, consts, _, orig, uvals = parse_equations(fenster_si)
+t0 = time.monotonic()
+s_, sol, msg = solve_system(eqs, variables, {}, constants=consts, original_equations=orig)
+check("Fensterbilanz OHNE Einheiten (keine Einheit im Blatt, keine Startwerte) gleich",
+      not uvals and s_ and abs(sol['T_G1'] - 285.7761) < 1e-3 and time.monotonic() - t0 < 10,
+      f"{msg} {sorted(uvals)[:3]}")
+
+# Formelzeichen dürfen das Ergebnis nicht beeinflussen (Regeln nur aus der Struktur):
+# alle Variablen der einheitenfreien Fensterbilanz neutral umbenannt (Reihenfolge gemischt)
+names = sorted(variables | set(consts), key=len, reverse=True)
+mapping = {name: f"zq{(i * 7) % len(names)}" for i, name in enumerate(sorted(names))}
+renamed = re.sub(r"(?<![\w.])[A-Za-z_]\w*(?!\w)", lambda m: mapping.get(m.group(0), m.group(0)), fenster_si)
+eqs, variables, consts, _, orig, _ = parse_equations(renamed)
+s_, sol_renamed, msg = solve_system(eqs, variables, {}, constants=consts, original_equations=orig)
+check("Fensterbilanz mit neutralen Namen: gleiches Ergebnis",
+      s_ and all(abs(sol_renamed[mapping[k]] - v) <= 1e-7 * max(1.0, abs(v)) for k, v in sol.items()), msg)
+roots = []
+for known, unknown in (("r_1", "r_2"), ("a", "b")):
+    eqs, variables, consts, _, orig, _ = parse_equations(f"{known} = -5\n{unknown}^2 = 4")
+    s_, sol_root, _ = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    roots.append(sol_root[unknown])
+check("Wurzelwahl hängt nicht von ähnlichen Namen ab (r_2 wie b)",
+      roots[0] == roots[1] and abs(roots[0] - 2) < 1e-9, str(roots))
+
 # Parameterstudie: nach zwei Zeitüberschreitungen hintereinander abbrechen
 import solver as _solver_module
 _old_limit = _solver_module.SOLVE_TIME_LIMIT
@@ -703,8 +817,9 @@ for text, expected in [("T = [20 25 30] °C", [293.15, 298.15, 303.15]),
                        ("T = [\r\n20\r\n25\r\n30\r\n] °C", [293.15, 298.15, 303.15]),
                        ("x = [1e-3 2.5E2 -3]", [0.001, 250, -3]),
                        ("m = [1 2] kg/h", [1 / 3600, 2 / 3600]),
-                       ("dT = [0 10 20] °C", [0, 10, 20]),
-                       ("dT = 0:5:20 °C", [0, 5, 10, 15, 20])]:
+                       ("dT = [0 10 20] K", [0, 10, 20]),
+                       ("dT = 0:5:20 K", [0, 5, 10, 15, 20]),
+                       ("dT = [0 10] °C", [273.15, 283.15])]:
     _, _, _, sweeps, _, _ = parse_equations(text)
     name = text.split("=")[0].strip()
     check(f"Werteliste: {text!r}", np.allclose(sweeps.get(name, []), expected), str(sweeps))
@@ -823,7 +938,7 @@ check("IF: Zweige verschiedener Dimension -> Einheitenwarnung", len(w) == 1, str
 # ---------------------------------------------------------------------------
 print("\n=== Startwerte im Blatt {$Startwerte ... $} ===")
 # ---------------------------------------------------------------------------
-SHEET = "x^2 = 9\n{$Startwerte\nx = -3\nT_2 = 15 °C; lambda = 4 µm  {Kommentar}\ndT = 5 °C\n$}\n"
+SHEET = "x^2 = 9\n{$Startwerte\nx = -3\nT_2 = 15 °C; lambda = 4 µm  {Kommentar}\ndT = 5 K\n$}\n"
 check("Block wird gelesen (SI, Schlüsselwort-Namen, Temperaturdifferenz)",
       parse_start_values(SHEET) == {'x': -3.0, 'T_2': 288.15, '_kw_lambda': 4e-06, 'dT': 5.0},
       str(parse_start_values(SHEET)))
@@ -853,6 +968,45 @@ check("Block anhängen (eine Leerzeile davor)",
 check("Block ersetzen (Rest unverändert)",
       apply_edit("a = 1\n{$Startwerte\nx = 1\n$}\nb = 2", ["x = 5"]) == "a = 1\n{$Startwerte\nx = 5\n$}\nb = 2")
 check("Block entfernen", apply_edit("x^2 = 9\n\n{$Startwerte\nx = -3\n$}\n", []) == "x^2 = 9\n")
+
+# Zahlenwertgleichungen: value(x, Einheit), quantity(z, Einheit) - generisch über pint
+from units import unit_number, unit_quantity
+check("value/quantity: °C, °F, bar, %, Winkel",
+      abs(unit_number(293.15, '°C') - 20) < 1e-12 and abs(unit_quantity(68, '°F') - 293.15) < 1e-5
+      and unit_number(3e5, 'bar') == 3 and abs(unit_number(0.5, '%') - 50) < 1e-12
+      and abs(unit_number(180, 'rad') - np.pi) < 1e-12)
+for text, name, expected in (
+        ("T_a = -5 °C\nT_VL = quantity(20 + 1.5*(20 - value(T_a, °C)), °C)", 'T_VL', 330.65),
+        ("v = 2 m/s\nh = quantity(5.7 + 3.8*value(v, m/s), W/(m^2*K))", 'h', 13.3),
+        ("x = quantity(3, bar)", 'x', 3e5)):
+    eqs, variables, consts, _, orig, _ = parse_equations(text)
+    s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    check(f"Zahlenwertgleichung: {text.splitlines()[-1][:45]}", s_ and abs(sol[name] - expected) < 1e-9,
+          str(sol.get(name)))
+check("value(): unbekannte Einheit mit Zeile", "Zeile 2: Unbekannte Einheit 'qcm'"
+      in parse_error("T_a = 0 °C\ny = value(T_a, qcm)"))
+check("value(): falsche Argumente", "value(x, Einheit) erwartet" in parse_error("T_a = 0 °C\ny = value(T_a)"))
+text = "v = 2 m/s\nh = quantity(5.7 + 3.8*value(v, m/s), W/(m^2*K))\nq = h*dT\ndT = 10 K"
+eqs, variables, consts, _, orig, uv = parse_equations(text)
+units = propagate_all_units_complete(orig, {v: u.calc_unit for v, u in uv.items()})
+check("Einheiten durch quantity()/value() abgeleitet", units.get('h') == 'W/(m^2*K)' and units.get('q') == 'W/m^2',
+      str(units))
+w = check_all_unit_consistency({}, {"(n2) - (value(p, 'kg'))": "n2 = value(p, kg)"}, {'p': 'bar'})
+check("value(p, kg) mit p in bar -> Einheitenwarnung", len(w) == 1, str(w))
+
+# Fehlende Einheitenangaben benennen (Rang-Defekt der Einheiten-Gleichungen)
+from unit_constraints import missing_unit_annotations
+from parser import start_value_units
+for text, expected in (("X = 6 m^2\nX = a*b", [(['a', 'b'], ['b'])]),
+                       ("X = 6 m^2\nY = 1.5\nX = a*b\nY = a/b", []),
+                       ("P = 2 kW\nx*y = P\nx^2*y^2 = P^2\nz = x + w", [(['x', 'y', 'z', 'w'], ['w'])]),
+                       ("X = 6 m^2\nX = a*b\n{$Startwerte a = 2 m $}", [])):
+    eqs, variables, consts, _, orig, uv = parse_equations(text)
+    known = {v: u.calc_unit for v, u in uv.items()} | {v: '' for v in consts if v not in uv}
+    known |= {v: u.calc_unit for v, u in start_value_units(text).items() if v not in known}
+    found = missing_unit_annotations(orig, known)
+    check(f"Fehlende Einheiten: {text.splitlines()[-1][:30]} -> {expected}", found == expected, str(found))
+
 
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")

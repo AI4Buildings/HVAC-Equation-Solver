@@ -556,14 +556,57 @@ def close(value, ref, rtol=1e-4):
 
 solve("T_h_in = 90 °C\nT_c_out = 40 °C\nT_c_in = 20 °C\n"
       "dT_1 = T_h_in - T_c_out\ntheta = T_h_in - T_c_in")
-check("Temperaturdifferenz dT_1 = 50 delta_K (nicht -223.15 °C)", shown("dT_1") == (50.0, "delta_K"),
+check("Temperaturdifferenz dT_1 = 50 K (nicht -223.15 °C)", shown("dT_1") == (50.0, "K"),
       str(shown("dT_1")))
-check("Temperaturdifferenz theta = 70 delta_K", shown("theta") == (70.0, "delta_K"), str(shown("theta")))
+check("Temperaturdifferenz theta = 70 K", shown("theta") == (70.0, "K"), str(shown("theta")))
+
+# Temperaturdifferenzen immer in K; Charakter aus der Struktur, nicht aus dem Namen
+for diff, out in (("dT", "T_2"), ("a", "b")):
+    solve(f"T_1 = 20 °C\n{diff} = 10 K\n{out} = T_1 + {diff}")
+    check(f"Differenz in K ({diff}): {diff} = 10 K, {out} = 30 °C",
+          shown(diff) == (10.0, "K") and shown(out) == (30.0, "°C"), f"{shown(diff)} {shown(out)}")
+solve("T_1 = 20 °C\nx = 10 °C\nT_2 = T_1 + x")
+check("Zwei Werte in °C addiert -> auf der °C-Skala gerechnet (30 °C) + Hinweis",
+      shown("T_2") == (30.0, "°C") and app.hints_label.cget("text") == "ⓘ HINWEISE (1)"
+      and "°C-Skala gerechnet" in app.last_analysis.hints[0], f"{shown('T_2')} {app.hints_label.cget('text')}")
+solve("Q = 41.9 kW\nm = 1 kg/s\nc = 4.19 kJ/(kg*K)\nQ = m*c*theta")
+check("Temperatur im Produkt ohne Temperatur-Dimension = Differenz: theta = 10 K", shown("theta") == (10.0, "K"),
+      str(shown("theta")))
+# Nutzerfälle: Differenz zweier °C-Werte in K; (T1 - T2) im Produkt ist Differenz -> T2 absolut
+solve("T1=10°C\nT2=20°C\nT1=T2+x")
+check("T1 = T2 + x mit T1, T2 in °C: x = -10 K", shown("x") == (-10.0, "K"), str(shown("x")))
+for order, expected in (("T1-T2", 75.0), ("T2-T1", 85.0)):
+    solve(f"T1=80°C\nQ_dot=20kW\nm_dot=1 kg/s\nc=4 kJ/kgK\nQ_dot=m_dot*c*({order})")
+    check(f"Q = m*c*({order}) mit T1 = 80 °C: T2 = {expected} °C", shown("T2") == (expected, "°C"), str(shown("T2")))
+for text, name, expected in (("T_1=20°C\nT_2=40°C\n\n\nT_3=T_2+T_1", "T_3", 60.0),
+                             ("T_1=20°C\nT_2=40°C\nT_3=T_2+T_1\nT_4=T_3+T_1", "T_4", 80.0),
+                             ("T_1 = 20 °C\nT_2 = 40 °C\nT_m = (T_1 + T_2)/2", "T_m", 30.0)):
+    solve(text)
+    v, u = shown(name)
+    check(f"Summe absoluter Temperaturen auf der Eingabe-Skala: {name} = {expected} °C",
+          close(v, expected) and u == "°C", str((v, u)))
+solve("T_a = -5 °C\nT_VL = quantity(20 + 1.5*(20 - value(T_a, °C)), °C)")
+check("Zahlenwertgleichung (Heizkurve in °C): T_VL = 57.5 °C", shown("T_VL") == (57.5, "°C"), str(shown("T_VL")))
+solve("L_0 = 5 m\nn = 0.4\ny = L_0^n\nq = 2*y")
+check("Einheit nicht bestimmbar -> Hinweis mit anzugebender Größe",
+      app.hints_label.cget("text") == "ⓘ HINWEISE (1)" and "Einheit von q (oder von y) angeben"
+      in app.last_analysis.hints[0], str(app.last_analysis.hints if app.last_analysis else None))
+solve("L_0 = 5 m\nn = 0.4\ny = L_0^n\nq = 2*y\n{$Startwerte q = 2 m $}")
+check("Startwert mit Einheit legt die Einheit fest (kein Hinweis)",
+      shown("q")[1] == "m" and app.hints_label.cget("text") == "", str(shown("q")))
+app._on_unit_changed("T2", "K")
+solve("T1=10°C\nT2=20°C\nT1=T2+x")
+app._on_unit_changed("x", "°C")
+check("Differenz in °C umgestellt: ohne Offset (-10)", app.value_labels["x"].cget("text") == "-10",
+      app.value_labels["x"].cget("text"))
+solve("T_sun = 5800 K\nF = Blackbody_cumulative(T_sun, 4 µm)")
+check("In K eingegebene absolute Temperatur (Strahlungsfunktion) nach Settings in °C",
+      shown("T_sun") == (5526.85, "°C"), str(shown("T_sun")))
 
 solve("R_si = 0.13 m^2*K/W\nd_1 = 20 cm\nlambda_1 = 2.3 W/mK\nT_i = 20 °C\nT_e = -10 °C\n"
       "U = 1/(R_si + d_1/lambda_1 + 0.04)\nq = U*(T_i - T_e)\nT_si = T_i - q*R_si")
 v, u = shown("T_si")
-check("Oberflächentemperatur T_si = 4.82 °C (absolut, nicht delta_K)", close(v, 4.82164, 1e-3) and u == "°C",
+check("Oberflächentemperatur T_si = 4.82 °C (absolut, nicht als Differenz)", close(v, 4.82164, 1e-3) and u == "°C",
       str((v, u)))
 v, u = shown("U")
 check("U-Wert in W/(m²K), nicht 0.0039 kW/m²K", close(v, 3.89171) and u.startswith("W/"), str((v, u)))
@@ -769,6 +812,46 @@ check("Unbekannte Einheit -> Fehlermeldung statt falscher Wert",
 solve("T_1 = 20 °C\np = 1 bar\nh_1 = enthalpy(water, T=T_1, p=p)\nexp(z) = -1")
 v, u = shown("h_1")
 check("Teillösung: Werte mit Einheit (h_1 in kJ/kg)", close(v, 84.0061) and u == "kJ/kg", str((v, u)))
+
+# ---------------------------------------------------------------------------
+print("\n=== Optimierung (MINIMIZE/MAXIMIZE ... VARY ...) ===")
+solve("y = (s - 0.0207)^2*1e4 + 1\nMINIMIZE y VARY s = 11 .. 30 mm")
+v, u = shown("s")
+check("Optimum in der Einheit der Grenzen (s in mm)", close(v, 20.7) and u == "mm", str((v, u)))
+check("Status und Meldung der Optimierung",
+      "SOLUTION FOUND" in app.result_status_label.cget("text")
+      and "Minimum von y" in app.info_label.cget("text") and app.status_label.cget("text") == "Optimum found",
+      app.info_label.cget("text"))
+check("Residuals-Analyse beim Optimum vorhanden", app.last_analysis is not None)
+check("Variierte Größe im Initial-Values-Dialog wählbar", "s" in app.known_variables)
+
+solve("y = (s - 0.0207)^2\nMAXIMIZE y VARY s = 11 .. 30 mm")
+check("Maximum am Rand wird gemeldet", "s an der Untergrenze" in app.info_label.cget("text"),
+      app.info_label.cget("text"))
+
+solve("a = 1\ns = 5 mm\ny = s^2 + a\nMINIMIZE y VARY s = 1 .. 9 mm")
+check("Variierte Größe mit festem Wert -> Meldung mit Zeile",
+      "Zeile 4: s hat im Blatt einen festen Wert" in app.info_label.cget("text"), app.info_label.cget("text"))
+solve("y = a^2\na = 2\nMINIMIZE y VARY b = 1 .. 2")
+check("Variierte Größe in keiner Gleichung -> Meldung",
+      "b kommt in keiner Gleichung vor" in app.info_label.cget("text"), app.info_label.cget("text"))
+solve("y = x^2\nMINIMIZE y VARY x 1 .. 2")
+check("Syntaxfehler der Anweisung -> Meldung mit Zeile",
+      "Zeile 2:" in app.info_label.cget("text") and "Bereich als x = a .. b" in app.info_label.cget("text"),
+      app.info_label.cget("text"))
+solve("y = 5 + 0*x\nMINIMIZE y VARY x = 0 .. 1")
+check("Zielgröße unabhängig -> Teillösung mit Meldung",
+      "PARTIAL" in app.result_status_label.cget("text") and "ändert sich nicht" in app.info_label.cget("text"),
+      app.info_label.cget("text"))
+
+solve("y = (x^2 - 4)^2 + x\nMINIMIZE y VARY x = -3 .. 3\n{$Startwerte\nx = 2\n$}")
+check("Startwert im Block beim schlechteren Minimum: trotzdem globales Optimum",
+      app.last_solution is not None and abs(app.last_solution["x"] + 2.0305) < 1e-3)
+
+solve("a = [1 2 3] kg/s\nf = (m - a)^2\nMINIMIZE f VARY m = 0 .. 5 kg/s")
+check("Optimum je Punkt einer Werteliste",
+      isinstance(app.last_solution.get("m"), np.ndarray) and np.allclose(app.last_solution["m"], [1, 2, 3], atol=1e-4)
+      and "Parametric Study: 3 points" in app.info_label.cget("text"), str(app.last_solution.get("m")))
 
 # ---------------------------------------------------------------------------
 app.destroy()

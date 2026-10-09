@@ -65,44 +65,6 @@ class DimensionInfo:
             return False
 
 
-def is_temperature_difference_variable(var_name: str) -> bool:
-    """
-    Prüft ob ein Variablenname auf eine Temperaturdifferenz hindeutet.
-
-    Erkennungsmuster:
-    - Beginnt mit "dT" (z.B. dT_N, dT_log, dT_B)
-    - Beginnt mit "delta" (z.B. delta_T, deltaT)
-
-    Args:
-        var_name: Name der Variable
-
-    Returns:
-        True wenn der Name auf eine Temperaturdifferenz hindeutet
-    """
-    var_lower = var_name.lower()
-    return var_lower.startswith('dt') or var_lower.startswith('delta')
-
-
-def adjust_unit_for_variable(unit: str, var_name: str) -> str:
-    """
-    Passt die Einheit basierend auf dem Variablennamen an.
-
-    Speziell für Temperaturdifferenzen: Wenn die Einheit 'K' ist und der
-    Variablenname auf eine Differenz hindeutet (dT..., delta...), wird
-    'delta_K' zurückgegeben.
-
-    Args:
-        unit: Die abgeleitete Einheit (z.B. 'K')
-        var_name: Name der Variable
-
-    Returns:
-        Angepasste Einheit (z.B. 'delta_K' statt 'K' für Temperaturdifferenzen)
-    """
-    if unit == 'K' and is_temperature_difference_variable(var_name):
-        return 'delta_K'
-    return unit
-
-
 def get_dimension_from_unit(unit_str: str) -> Any:
     """Erzeugt eine pint Quantity mit Dimension 1 für eine Einheit.
 
@@ -464,7 +426,7 @@ def _dim_info_from_unit(unit: Optional[str], var: Optional[str] = None) -> Dimen
     """
     DimensionInfo für eine bekannte Einheit.
 
-    Temperatur-Charakter: 'delta...' oder Variablenname dT.../delta... -> Differenz,
+    Temperatur-Charakter aus der Einheit (nie aus dem Namen): 'delta...' -> Differenz,
     sonst absolute Temperatur. Nicht auswertbare Einheiten -> 'opak' (Einheit bekannt,
     Dimension aber nicht verwendbar).
     """
@@ -478,11 +440,9 @@ def _dim_info_from_unit(unit: Optional[str], var: Optional[str] = None) -> Dimen
         return DimensionInfo(u, None)
     weight = None
     if _is_temp_q(q):
-        if any(m in u.lower() for m in _DELTA_MARKERS) or \
-                (var is not None and is_temperature_difference_variable(var)):
-            weight = 0.0
-        else:
-            weight = 1.0
+        # Charakter aus der Einheit, nie aus dem Namen: delta_K = Differenz, sonst absolut
+        # (eine in K eingegebene Größe kann offen gelassen werden, siehe open_temperatures)
+        weight = 0.0 if any(m in u.lower() for m in _DELTA_MARKERS) else 1.0
     return DimensionInfo(u, q, weight=weight)
 
 
@@ -702,11 +662,36 @@ def _pow(base: DimensionInfo, exp: DimensionInfo) -> DimensionInfo:
     return DimensionInfo(None)
 
 
+def _unit_function_unit(node) -> Optional[Tuple[str, DimensionInfo]]:
+    """
+    value(x, 'Einheit') / quantity(z, 'Einheit'): (Funktionsname, DimensionInfo der
+    Einheit). Einheit mit Nullpunkt (°C, °F) -> absolute Temperatur (Gewicht 1).
+    """
+    fname = _func_name(node)
+    if fname not in ('value', 'quantity') or len(node.args) != 2:
+        return None
+    unit = node.args[1]
+    if not (isinstance(unit, ast.Constant) and isinstance(unit.value, str)):
+        return None
+    q = _q_for(unit.value)
+    if q is None:
+        return fname, DimensionInfo(None)
+    weight = None
+    if _is_temp_q(q):
+        origin = scale_origin(unit.value)
+        weight = 1.0 if origin else None
+    return fname, _dim(q, weight)
+
+
 def _special_call_dim(node) -> Optional[DimensionInfo]:
     """Dimension von CoolProp-/HumidAir-/Strahlungs-Aufrufen (Argumente egal)."""
     fname = _func_name(node)
     if fname is None:
         return None
+    unit_call = _unit_function_unit(node)
+    if unit_call is not None:
+        name, unit_dim = unit_call
+        return DimensionInfo('', _dimless_q()) if name == 'value' else unit_dim
     fl = fname.lower()
     if fl in _THERMO_OUT:
         label = _THERMO_OUT[fl]
@@ -762,6 +747,14 @@ def _eval_call(node, ctx: _Ctx) -> DimensionInfo:
     if fname is None:
         return DimensionInfo(None)
 
+    unit_call = _unit_function_unit(node)
+    if unit_call is not None and ctx.strict:
+        name, unit_dim = unit_call
+        arg = _eval(node.args[0], ctx)
+        expected = unit_dim.quantity if name == 'value' else _dimless_q()
+        if (expected is not None and arg.quantity is not None and not arg.literal
+                and arg.quantity.dimensionality != expected.dimensionality):
+            raise _DimMismatch()
     special = _special_call_dim(node)
     if special is not None:
         # Argumente von Stoffwert-/Strahlungsfunktionen werden nicht geprüft
@@ -895,6 +888,18 @@ def _split_solver_format(equation: str) -> Optional[Tuple[str, str]]:
 _PARSE_CACHE: Dict[str, Optional[Tuple[ast.AST, ast.AST]]] = {}
 
 
+def _quote_unit_arguments(equation: str) -> str:
+    """value(v, m/s) -> value(v, 'm/s'): die Einheit ist Text, keine Rechnung mit m und s."""
+    if 'value' not in equation and 'quantity' not in equation:
+        return equation
+    try:
+        from parser import _replace_calls_balanced, UNIT_VALUE_FUNCTIONS, _convert_unit_function_call
+        return _replace_calls_balanced(equation, UNIT_VALUE_FUNCTIONS, keep_case=False,
+                                       converter=_convert_unit_function_call)
+    except Exception:
+        return equation
+
+
 def _parse_equation(equation: str) -> Optional[Tuple[ast.AST, ast.AST]]:
     """
     Parst eine Gleichung zu (links, rechts) AST-Ausdrücken.
@@ -906,7 +911,7 @@ def _parse_equation(equation: str) -> Optional[Tuple[ast.AST, ast.AST]]:
         return _PARSE_CACHE[equation]
     result = None
     try:
-        eq = _remove_comments(equation)
+        eq = _quote_unit_arguments(_remove_comments(equation))
         sides = _split_equation(eq)
         if sides is None:
             sides = _split_solver_format(eq)
@@ -1128,6 +1133,11 @@ def _function_argument_candidates(side, known, out):
                 q = _q_for(expected)
                 weight = 1.0 if _is_temp_q(q) else None
                 targets.append((kw.value, _dim(q, weight, expected if expected else '')))
+        elif _unit_function_unit(node) is not None:
+            name, unit_dim = _unit_function_unit(node)
+            if unit_dim.quantity is not None:
+                # value(x, 'bar'): x ist ein Druck; quantity(z, 'bar'): z ist eine Zahl
+                targets.append((node.args[0], unit_dim if name == 'value' else _dim(_dimless_q())))
         elif fl in _RADIATION_ARGS:
             for arg, kind in zip(node.args, _RADIATION_ARGS[fl]):
                 if kind == 'T':
@@ -1284,6 +1294,232 @@ def _infer_dimensions(parsed_eqs, user_known: Dict[str, DimensionInfo],
 
 
 # ----------------------------------------------------------------------------
+# Vollständige Einheiten-Ableitung (Stufe 2, Hindley-Milner nach Kennedy 1996 bzw.
+# Olsson 2025 "Improved Unit Inference and Checking in Modelica")
+# ----------------------------------------------------------------------------
+# Jede Gleichung und jeder Teilausdruck liefert eine Einheiten-Gleichung:
+#   Summe/Gleichung: u[a] = u[b];  Produkt: u[x*y] = u[x]*u[y];  Quotient: u[x]/u[y];
+#   x^n (n Zahl): u[x]^n;  sqrt: u[x]^(1/2);  sin/exp/ln/x^y: Argument dimensionslos.
+# Zahlen sind in Produkten dimensionslos, allein in Summen beliebig (Casella 2016).
+# Logarithmiert ist das ein LINEARES Gleichungssystem in den Exponenten der SI-Basis-
+# einheiten - es wird für alle Gleichungen gemeinsam exakt (Brüche) eliminiert und findet
+# so auch gekoppelte Einheiten, die die lokale Propagation (Stufe 1) nicht findet:
+# a*b = X, a/b = Y -> a, b; v*x = w, v*v = k; w*(w*(...) - 2*D*yd) = yd.
+_BASE_DIMENSIONS = ('[length]', '[mass]', '[time]', '[current]', '[temperature]',
+                    '[substance]', '[luminosity]')
+_BASE_UNITS = ('m', 'kg', 's', 'A', 'K', 'mol', 'cd')
+
+
+class _AnyUnit:
+    """Zahlenliteral in einer Summe bzw. allein: jede Einheit möglich."""
+
+
+_ANY = _AnyUnit()
+
+
+def _exponent_vector(quantity):
+    from fractions import Fraction
+    dims = quantity.dimensionality
+    return [Fraction(dims.get(b, 0)).limit_denominator(1000) for b in _BASE_DIMENSIONS]
+
+
+def _quantity_from_vector(vector):
+    q = 1.0 * ureg.dimensionless
+    for exponent, unit in zip(vector, _BASE_UNITS):
+        if exponent:
+            q = q * ureg.Quantity(1.0, unit) ** float(exponent)
+    return _canon_quantity(q.dimensionality)
+
+
+def _complete_inference(parsed_eqs, known: Dict[str, DimensionInfo],
+                        report: Optional[Dict[str, Any]] = None) -> Dict[str, DimensionInfo]:
+    """
+    Stufe 2: Einheiten aller noch offenen Variablen aus dem gemeinsamen linearen
+    Gleichungssystem der Exponenten. Gleichungen, die den bisherigen widersprechen,
+    werden ausgelassen (ihre Einheitenwarnung kommt aus der normalen Prüfung).
+    """
+    from fractions import Fraction
+    zero = [Fraction(0)] * len(_BASE_DIMENSIONS)
+    rows: List[Tuple[Dict[str, Fraction], List[Fraction]]] = []
+    unknown_order: Dict[str, int] = {}
+    fresh = [0]
+
+    def const(vector):
+        return ({}, list(vector))
+
+    def variable(name):
+        unknown_order.setdefault(name, len(unknown_order))
+        return ({name: Fraction(1)}, list(zero))
+
+    def new_variable():
+        fresh[0] += 1
+        return variable(f"#{fresh[0]}")
+
+    def combine(a, b, factor=Fraction(1)):
+        coeffs = dict(a[0])
+        for name, c in b[0].items():
+            coeffs[name] = coeffs.get(name, Fraction(0)) + factor * c
+        return ({n: c for n, c in coeffs.items() if c != 0},
+                [x + factor * y for x, y in zip(a[1], b[1])])
+
+    def scale(a, factor):
+        return ({n: c * factor for n, c in a[0].items() if c * factor != 0}, [x * factor for x in a[1]])
+
+    def equal(a, b):
+        if a is _ANY or b is _ANY:
+            return
+        coeffs, rhs = combine(a, b, Fraction(-1))
+        if coeffs:
+            rows.append((coeffs, [-x for x in rhs]))
+
+    def literal_exponent(node):
+        d = _eval_collect(node, known)[0]
+        if d.literal and d.value is not None:
+            return Fraction(d.value).limit_denominator(1000)
+        return None
+
+    def form(node):
+        if isinstance(node, ast.Constant):
+            return _ANY
+        if isinstance(node, ast.Name):
+            if node.id == 'pi':
+                return _ANY
+            d = known.get(node.id)
+            if d is not None and d.quantity is not None:
+                return const(_exponent_vector(d.quantity))
+            return variable(node.id)
+        if isinstance(node, ast.UnaryOp):
+            return form(node.operand)
+        if isinstance(node, ast.BinOp):
+            if isinstance(node.op, (ast.Add, ast.Sub)):
+                result = _ANY
+                for _, term in _flatten_additive(node):
+                    f = form(term)
+                    if f is _ANY:
+                        continue
+                    if result is _ANY:
+                        result = f
+                    else:
+                        equal(result, f)
+                return result
+            if isinstance(node.op, (ast.Mult, ast.Div)):
+                left, right = form(node.left), form(node.right)
+                if left is _ANY and right is _ANY:
+                    return _ANY
+                left = const(zero) if left is _ANY else left
+                right = const(zero) if right is _ANY else right
+                return combine(left, right, Fraction(1) if isinstance(node.op, ast.Mult) else Fraction(-1))
+            if isinstance(node.op, ast.Pow):
+                base = form(node.left)
+                n = literal_exponent(node.right)
+                if n is not None:
+                    return _ANY if base is _ANY else scale(base, n)
+                # Exponent ohne festen Zahlenwert (Variable): er ist dimensionslos; das
+                # Ergebnis nur bei sicher dimensionsloser Basis - sonst keine Willkür
+                # (n kann eine Konstante wie 0.4 sein: y^n hätte dann die Einheit m^0.4)
+                equal(form(node.right), const(zero))
+                if base is _ANY or (not base[0] and not any(base[1])):
+                    return const(zero)
+                return new_variable()
+            return new_variable()
+        if isinstance(node, ast.Call):
+            fname = _func_name(node)
+            unit_call = _unit_function_unit(node)
+            if unit_call is not None:
+                name, unit_dim = unit_call
+                if unit_dim.quantity is None:
+                    return new_variable()
+                unit_form = const(_exponent_vector(unit_dim.quantity))
+                if name == 'value':
+                    equal(form(node.args[0]), unit_form)
+                    return const(zero)
+                equal(form(node.args[0]), const(zero))
+                return unit_form
+            special = _special_call_dim(node)
+            if special is not None:
+                return const(_exponent_vector(special.quantity)) if special.quantity is not None else new_variable()
+            args = node.args
+            if fname in _TRANSCENDENTAL or (fname or '').lower() in ('sinh', 'cosh', 'tanh', 'exp'):
+                for a in args:
+                    equal(form(a), const(zero))
+                return const(zero)
+            if fname == 'sqrt' and args:
+                f = form(args[0])
+                return _ANY if f is _ANY else scale(f, Fraction(1, 2))
+            if fname == 'abs' and args:
+                return form(args[0])
+            if fname in ('max', 'min', 'IF'):
+                branches = args[2:] if fname == 'IF' else args
+                if fname == 'IF' and len(args) == 5:
+                    equal(form(args[0]), form(args[1]))
+                result = _ANY
+                for a in branches:
+                    f = form(a)
+                    if f is _ANY:
+                        continue
+                    if result is _ANY:
+                        result = f
+                    else:
+                        equal(result, f)
+                return result
+            return new_variable()
+        return new_variable()
+
+    for left, right in parsed_eqs:
+        try:
+            equal(form(left), form(right))
+        except Exception:
+            continue
+    if report is not None:
+        report.update(order=unknown_order, pivots={})
+    if not rows:
+        return {}
+
+    # Gauss-Elimination (exakt), Zeile für Zeile; widersprüchliche Zeilen auslassen
+    pivots: Dict[str, Tuple[Dict[str, Fraction], List[Fraction]]] = {}
+    for coeffs, rhs in rows:
+        coeffs, rhs = dict(coeffs), list(rhs)
+        for name in [n for n in coeffs if n in pivots]:
+            factor = coeffs.get(name)
+            if not factor:
+                continue
+            p_coeffs, p_rhs = pivots[name]
+            for n2, c2 in p_coeffs.items():
+                coeffs[n2] = coeffs.get(n2, Fraction(0)) - factor * c2
+            rhs = [x - factor * y for x, y in zip(rhs, p_rhs)]
+            coeffs = {n: c for n, c in coeffs.items() if c != 0}
+        if not coeffs:
+            continue          # redundant oder widersprüchlich (0 = rhs != 0): auslassen
+        pivot = min(coeffs, key=lambda n: unknown_order.get(n, 0))
+        factor = coeffs[pivot]
+        coeffs = {n: c / factor for n, c in coeffs.items()}
+        rhs = [x / factor for x in rhs]
+        for name, (p_coeffs, p_rhs) in list(pivots.items()):
+            f = p_coeffs.get(pivot)
+            if f:
+                new_coeffs = dict(p_coeffs)
+                for n2, c2 in coeffs.items():
+                    new_coeffs[n2] = new_coeffs.get(n2, Fraction(0)) - f * c2
+                pivots[name] = ({n: c for n, c in new_coeffs.items() if c != 0},
+                                [x - f * y for x, y in zip(p_rhs, rhs)])
+        pivots[pivot] = (coeffs, rhs)
+
+    if report is not None:
+        report['pivots'] = pivots
+    result = {}
+    for name, (coeffs, rhs) in pivots.items():
+        if name.startswith('#') or set(coeffs) != {name}:
+            continue      # Hilfsvariable bzw. noch von freien Einheiten abhängig
+        try:
+            q = _quantity_from_vector(rhs)
+        except Exception:
+            continue
+        if q is not None:
+            result[name] = _dim(q)
+    return result
+
+
+# ----------------------------------------------------------------------------
 # Temperatur-Charakter (absolut vs. Differenz)
 # ----------------------------------------------------------------------------
 
@@ -1352,7 +1588,52 @@ def _rev_weight_chain(terms, target_w: float, prio: int, out, known, free: Set[s
         _rev_weight(n, (target_w - total) / s, prio, out, known, free)
 
 
-def _weight_candidates(parsed, known, free: Set[str], out):
+def _product_difference_candidates(side, prio: int, out, known, free: Set[str]):
+    """
+    Eine Temperatur in einem Produkt/Quotienten, dessen Dimension KEINE Temperatur ist,
+    ist eine Temperaturdifferenz (Konvention wie COMSOL): m*c*(T1 - T2) -> (T1 - T2)
+    Differenz, mit T1 absolut also T2 absolut; Q = m*c*theta -> theta Differenz;
+    h*(T_s - T_inf), g*beta*(T_s - T_inf)*L^3/nu^2. Nur Kandidaten, die zu absolut (1)
+    oder Differenz (0) führen (der Mittelwert (T_1 + T_2)/2 im Produkt bleibt absolut).
+    """
+    for node in ast.walk(side):
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Mult, ast.Div))):
+            continue
+        whole = _eval_collect(node, known)[0]
+        if whole.quantity is None or _is_temp_q(whole.quantity):
+            continue
+        for operand in (node.left, node.right):
+            d = _eval_collect(operand, known)[0]
+            if d.literal or d.quantity is None or not _is_temp_q(d.quantity):
+                continue
+            found = defaultdict(list)
+            _rev_weight(operand, 0.0, prio, found, known, free)
+            for name, candidates in found.items():
+                out[name].extend((p, w) for p, w in candidates if w in (0.0, 1.0))
+
+
+def _power_absolute_candidates(side, prio: int, out, known, free: Set[str]):
+    """
+    Eine Temperatur-Variable mit ganzzahligem Exponenten >= 2 (sigma*T^4) ist eine absolute
+    Temperatur (Strahlung braucht die Kelvin-Verhältnisskala). Nur für einzelne Variablen als
+    Basis - gebrochene Exponenten und Summen als Basis bleiben offen ((T_s - T_inf)^(1/3) in
+    Konvektions-Korrelationen ist eine Potenz einer Differenz).
+    """
+    for node in ast.walk(side):
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow)
+                and isinstance(node.left, ast.Name) and node.left.id in free):
+            continue
+        exponent = _eval_collect(node.right, known)[0]
+        if not (exponent.literal and exponent.value is not None and float(exponent.value).is_integer()
+                and exponent.value >= 2):
+            continue
+        base = _eval_collect(node.left, known)[0]
+        if base.quantity is not None and _is_temp_q(base.quantity):
+            out[node.left.id].append((prio, 1.0))
+
+
+def _weight_candidates(parsed, known, free: Set[str], out, products: bool = False,
+                       integral: bool = True):
     left, right = parsed
     # Prio 1: Temperatur-Argumente von Stoffwert-/Strahlungsfunktionen sind absolut
     for side in (left, right):
@@ -1366,22 +1647,65 @@ def _weight_candidates(parsed, known, free: Set[str], out):
                 values = [kw.value for kw in node.keywords if kw.arg and kw.arg.lower() == 't']
             elif fl in _RADIATION_ARGS and node.args:
                 values = [node.args[0]]
+            elif fl == 'value':
+                unit_call = _unit_function_unit(node)
+                if unit_call is not None and unit_call[1].weight == 1.0:
+                    values = [node.args[0]]      # Zahlenwert in °C/°F: absolute Temperatur
             for v in values:
                 _rev_weight(v, 1.0, 1, out, known, free)
     # Prio 2: Gleichung als Summe links - rechts = 0
     terms = _flatten_additive(left, 1) + _flatten_additive(right, -1)
     _rev_weight_chain(terms, 0.0, 2, out, known, free)
+    # Prio 3: mehrere offene Temperaturgrößen in der Summe
+    if integral:
+        _integral_weight_candidates(terms, 3, out, known, free)
+    # Prio 4 (nur für die Anzeige): Temperatur im Produkt ohne Temperatur-Dimension = Differenz
+    if products:
+        for side in (left, right):
+            _product_difference_candidates(side, 4, out, known, free)
+            _power_absolute_candidates(side, 5, out, known, free)
+
+
+def _integral_weight_candidates(terms, prio: int, out, known, free: Set[str]):
+    """
+    Σ s_i·w_i = 0 mit mehreren offenen Temperaturgrößen: jede Temperaturgröße ist
+    entweder absolut (1) oder eine Differenz (0). Ist nur eine Belegung möglich, ist sie
+    bestimmt (T_2 = T_1 + x mit T_1 absolut -> x Differenz, T_2 absolut); sonst bleiben
+    die Größen offen (T_out = T_s - 2: beide absolut oder beide Differenz).
+    """
+    import itertools
+    open_names, rest = [], []
+    for s, n in terms:
+        d = _eval_collect(n, known)[0]
+        if (isinstance(n, ast.Name) and n.id in free and d.weight is None
+                and d.quantity is not None and _is_temp_q(d.quantity)):
+            open_names.append((s, n.id))
+        else:
+            rest.append((s, d))
+    if not 2 <= len(open_names) <= 4:
+        return
+    total = _sum_weights(rest)
+    if total is None:
+        return
+    solutions = [combo for combo in itertools.product((0.0, 1.0), repeat=len(open_names))
+                 if abs(total + sum(s * w for (s, _), w in zip(open_names, combo))) < 1e-9]
+    if len(solutions) == 1:
+        for (_, name), w in zip(open_names, solutions[0]):
+            out[name].append((prio, w))
 
 
 def _resolve_temperature_weights(parsed_eqs, all_dims: Dict[str, DimensionInfo],
                                  user_known: Dict[str, DimensionInfo],
-                                 max_iterations: int = 50) -> Dict[str, Optional[float]]:
+                                 max_iterations: int = 50,
+                                 products: bool = False,
+                                 integral: bool = True) -> Dict[str, Optional[float]]:
     """
     Bestimmt für alle Temperatur-Variablen, ob absolut (1) oder Differenz (0).
 
-    Vorgaben: bekannte Einheiten ('delta_K' vs. 'K') und Namenskonvention
-    (dT..., delta...). Alle übrigen werden per Jacobi-Iteration aus den
-    Gleichungen abgeleitet (reihenfolgeunabhängig); unbestimmt -> absolut.
+    Vorgaben: bekannte Einheiten ('delta_K' = Differenz, 'K' aus °C/°F = absolut;
+    in K eingegebene Größen ohne Vorgabe, weight None). Alle übrigen werden per
+    Jacobi-Iteration aus den Gleichungen abgeleitet (reihenfolgeunabhängig, ohne
+    Namen); nicht bestimmbar -> None.
     """
     fixed: Dict[str, float] = {}
     free: List[str] = []
@@ -1390,8 +1714,6 @@ def _resolve_temperature_weights(parsed_eqs, all_dims: Dict[str, DimensionInfo],
             continue
         if v in user_known and user_known[v].weight is not None:
             fixed[v] = user_known[v].weight
-        elif is_temperature_difference_variable(v):
-            fixed[v] = 0.0
         else:
             free.append(v)
     free_set = set(free)
@@ -1409,7 +1731,7 @@ def _resolve_temperature_weights(parsed_eqs, all_dims: Dict[str, DimensionInfo],
         cands = defaultdict(list)
         for parsed in parsed_eqs:
             try:
-                _weight_candidates(parsed, known, free_set, cands)
+                _weight_candidates(parsed, known, free_set, cands, products, integral)
             except Exception:
                 continue
         new = dict(current)
@@ -1430,21 +1752,282 @@ def _resolve_temperature_weights(parsed_eqs, all_dims: Dict[str, DimensionInfo],
     return {**fixed, **current}
 
 
-def _propagate(parsed_eqs, known_units: Dict[str, str]) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """Kern der Propagation. Liefert (bekannte Einheiten, abgeleitete Einheiten)."""
+def _temperature_label(weight: Optional[float], undetermined: str) -> str:
+    """Anzeige-Label aus dem Temperatur-Charakter: 0 Differenz, 1 absolut, sonst offen."""
+    if weight == 0:
+        return 'delta_K'
+    if weight == 1:
+        return 'K'
+    return undetermined
+
+
+def _propagate(parsed_eqs, known_units: Dict[str, str], open_temperatures=frozenset(),
+               undetermined: str = 'K', products: bool = False) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Kern der Propagation. Liefert (bekannte Einheiten, abgeleitete Einheiten).
+    open_temperatures: bekannte Größen in K, deren Charakter (absolut/Differenz) aus den
+    Gleichungen folgt - sie erscheinen mit dem bestimmten Label in den abgeleiteten.
+    """
     user = {v: _dim_info_from_unit(u, v) for v, u in known_units.items() if u is not None}
+    for v in open_temperatures:
+        if v in user and _is_temp_q(user[v].quantity):
+            user[v] = replace(user[v], weight=None)
     inferred = _infer_dimensions(parsed_eqs, user)
+    # Stufe 2: vollständige Ableitung für alles, was die lokale Propagation offen lässt
+    try:
+        complete = _complete_inference(parsed_eqs, {**user, **inferred})
+    except Exception:
+        complete = {}
+    for v, d in complete.items():
+        if v not in user and (v not in inferred or inferred[v].quantity is None):
+            inferred[v] = d
     all_dims = {**user, **inferred}
-    weights = _resolve_temperature_weights(parsed_eqs, all_dims, user)
+    weights = _resolve_temperature_weights(parsed_eqs, all_dims, user, products=products)
     result = {}
     for v, d in inferred.items():
         label = d.unit if d.unit is not None else ''
         if _is_temp_q(d.quantity):
-            label = 'delta_K' if weights.get(v) == 0 else 'K'
+            label = _temperature_label(weights.get(v), undetermined)
         elif _is_dimless_q(d.quantity):
             label = ''
         result[v] = label
+    for v in open_temperatures:
+        if v in user and _is_temp_q(user[v].quantity):
+            result[v] = _temperature_label(weights.get(v), undetermined)
     return known_units, result
+
+
+def temperature_sum_conflicts(equations: Dict[str, str], known_units: Dict[str, str],
+                              open_temperatures=frozenset()) -> List[Tuple[str, List[str]]]:
+    """
+    Gleichungen, in denen Temperaturen so addiert/subtrahiert werden, dass weder eine
+    absolute Temperatur noch eine Differenz herauskommt - jede Temperaturgröße ist
+    absolut (1) oder Differenz (0), und die Summe geht mit keiner Belegung auf.
+    Typisch: eine Temperaturdifferenz in °C angegeben (T_2 = T_1 + x mit x = 10 °C,
+    also 283.15 K). Generisch aus der Struktur, ohne Namen.
+
+    Returns:
+        [(Originalgleichung, Temperaturgrößen der Summe mit festem Charakter), ...]
+    """
+    if not PINT_AVAILABLE:
+        return []
+    import itertools
+    parsed_eqs, sources = [], []
+    for parsed_key, original_eq in equations.items():
+        source = original_eq if original_eq else parsed_key
+        parsed = _parse_equation(source)
+        if parsed is None and parsed_key and parsed_key != source:
+            parsed = _parse_equation(parsed_key)
+        if parsed is not None:
+            parsed_eqs.append(parsed)
+            sources.append(source)
+    user = {v: _dim_info_from_unit(u, v) for v, u in known_units.items() if u is not None}
+    for v in open_temperatures:
+        if v in user and _is_temp_q(user[v].quantity):
+            user[v] = replace(user[v], weight=None)
+    inferred = _infer_dimensions(parsed_eqs, user)
+    all_dims = {**user, **inferred}
+    weights = _resolve_temperature_weights(parsed_eqs, all_dims, user)
+    known = {v: (replace(d, weight=weights[v]) if v in weights else d) for v, d in all_dims.items()}
+    conflicts = []
+    for (left, right), source in zip(parsed_eqs, sources):
+        terms = _flatten_additive(left, 1) + _flatten_additive(right, -1)
+        evals = [(s, n, _eval_collect(n, known)[0]) for s, n in terms]
+        if not any(d.quantity is not None and _is_temp_q(d.quantity) and not d.literal for _, _, d in evals):
+            continue
+        # offen: unbestimmt oder ein Gewicht, das weder absolut (1) noch Differenz (0) ist
+        # (z.B. 2 = Summe zweier absoluter Temperaturen) - muss hier aufgehen
+        open_names = [(s, n.id) for s, n, d in evals
+                      if isinstance(n, ast.Name) and d.quantity is not None and _is_temp_q(d.quantity)
+                      and (d.weight is None or d.weight not in (0.0, 1.0)) and n.id not in user]
+        rest = [(s, d) for s, n, d in evals
+                if not (isinstance(n, ast.Name) and any(n.id == name for _, name in open_names))]
+        total = _sum_weights(rest)
+        if total is None or len(open_names) > 6:
+            continue
+        if not any(abs(total + sum(s * w for (s, _), w in zip(open_names, combo))) < 1e-9
+                   for combo in itertools.product((0.0, 1.0), repeat=len(open_names))):
+            fixed = [n.id for _, n, d in evals if isinstance(n, ast.Name) and d.weight is not None
+                     and d.quantity is not None and _is_temp_q(d.quantity)]
+            conflicts.append((source, fixed))
+    return conflicts
+
+
+def missing_unit_annotations(equations: Dict[str, str], known_units: Dict[str, str],
+                             open_temperatures=frozenset()) -> List[Tuple[List[str], List[str]]]:
+    """
+    Größen, deren Einheit aus den Gleichungen nicht folgt (nur ihr Zusammenhang, z.B.
+    a*b = X allein), und je Gruppe die Größen, deren Einheit man angeben muss, damit
+    alle übrigen folgen: die freien Größen der exakten Elimination (Stufe 2) - ihre
+    Anzahl ist die Zahl fehlender Angaben (Rang-Defekt). Generisch, ohne Namen.
+
+    Returns:
+        [(unbestimmte Größen der Gruppe, anzugebende Größen), ...] in Blatt-Reihenfolge
+    """
+    if not PINT_AVAILABLE:
+        return []
+    parsed_eqs = []
+    for parsed_key, original_eq in equations.items():
+        source = original_eq if original_eq else parsed_key
+        parsed = _parse_equation(source)
+        if parsed is None and parsed_key and parsed_key != source:
+            parsed = _parse_equation(parsed_key)
+        if parsed is not None:
+            parsed_eqs.append(parsed)
+    user = {v: _dim_info_from_unit(u, v) for v, u in known_units.items() if u is not None}
+    inferred = _infer_dimensions(parsed_eqs, user)
+    known = {**user, **inferred}
+    report: Dict[str, Any] = {}
+    complete = _complete_inference(parsed_eqs, known, report)
+    order = report.get('order', {})
+    pivots = report.get('pivots', {})
+    determined = set(complete) | {v for v, d in known.items() if d.quantity is not None}
+    unknown = [v for v in sorted(order, key=order.get) if not v.startswith('#') and v not in determined]
+    if not unknown:
+        return []
+    parent: Dict[str, str] = {}
+
+    def find(name):
+        while parent.setdefault(name, name) != name:
+            parent[name] = parent[parent[name]]
+            name = parent[name]
+        return name
+
+    for pivot, (coeffs, _) in pivots.items():
+        for name in coeffs:
+            parent[find(name)] = find(pivot)
+    groups: Dict[str, List[str]] = {}
+    for name in unknown:
+        groups.setdefault(find(name), []).append(name)
+    result = []
+    for root, members in groups.items():
+        everything = sorted((n for n in order if find(n) == root), key=order.get)
+        free = [n for n in everything if n not in pivots]
+        suggest = [n for n in free if not n.startswith('#')]
+        if len(suggest) < len(free):
+            # an einer nicht bestimmbaren Hilfsgröße (y = x^n, n Variable): direkt angeben
+            for name in members:
+                if name in pivots and name not in suggest and any(
+                        c.startswith('#') and c not in pivots for c in pivots[name][0]):
+                    suggest.append(name)
+        result.append((members, suggest or members[:1]))
+    return result
+
+
+def scale_origin(unit: str) -> Optional[float]:
+    """Nullpunkt einer Temperatur-Einheit in K (°C 273.15, °F 255.37, K 0) aus pint."""
+    if not PINT_AVAILABLE or not unit:
+        return None
+    try:
+        return float(ureg.Quantity(0.0, normalize_unit(unit.strip())).to('kelvin').magnitude)
+    except Exception:
+        return None
+
+
+def scale_dependent_sums(equations: Dict[str, str], known_units: Dict[str, str],
+                         open_temperatures=frozenset(),
+                         origins: Optional[Dict[str, float]] = None) -> List[Dict[str, Any]]:
+    """
+    Summen absoluter Temperaturen, deren Ergebnis vom Nullpunkt der Skala abhängt
+    (T_3 = T_1 + T_2: in K 606.3 K = 333.15 °C, auf der Celsius-Skala 60 °C). Solche
+    Kombinationen sind in Kelvin physikalisch sinnlos (pint: "ambiguous"); gerechnet
+    wird daher auf der Skala, in der die Temperaturen eingegeben wurden (wie EES).
+    Gültige Kombinationen (Differenz, Temperatur ± Differenz, Mittelwert) sind auf
+    jeder Skala gleich und bleiben unverändert; Temperaturen mit einem Faktor
+    (T_1*r, Isentrope) ebenso (Verhältnisskala Kelvin).
+
+    origins: Nullpunkt (K) der Eingabe-Skala je absoluter Eingabe (°C: 273.15).
+
+    Returns:
+        [{'key': Gleichung, 'source': Original, 'correction': c (zum Residuum addieren),
+          'points': neu als absolute Temperatur bestimmte Größen, 'origin': Nullpunkt}]
+    """
+    if not PINT_AVAILABLE:
+        return []
+    import itertools
+    origins = dict(origins or {})
+    parsed_eqs, keys, sources = [], [], []
+    for parsed_key, original_eq in equations.items():
+        source = original_eq if original_eq else parsed_key
+        parsed = _parse_equation(source)
+        if parsed is None and parsed_key and parsed_key != source:
+            parsed = _parse_equation(parsed_key)
+        if parsed is not None:
+            parsed_eqs.append(parsed)
+            keys.append(parsed_key)
+            sources.append(source)
+    sheet_origins = {round(o, 9) for o in origins.values()}
+    default_origin = next(iter(sheet_origins)) if len(sheet_origins) == 1 else None
+    known_units = dict(known_units)
+    open_temperatures = set(open_temperatures)
+    found: List[Dict[str, Any]] = []
+    handled: Set[int] = set()
+    for _ in range(len(parsed_eqs) + 1):
+        user = {v: _dim_info_from_unit(u, v) for v, u in known_units.items() if u is not None}
+        for v in open_temperatures:
+            if v in user and _is_temp_q(user[v].quantity):
+                user[v] = replace(user[v], weight=None)
+        inferred = _infer_dimensions(parsed_eqs, user)
+        all_dims = {**user, **inferred}
+        # nur eindeutige Bestimmungen (keine Ganzzahl-Auswahl über andere Gleichungen):
+        # eine Größe bekommt ihren Charakter aus der Gleichung, die sie berechnet
+        weights = _resolve_temperature_weights(parsed_eqs, all_dims, user, integral=False)
+        known = {v: (replace(d, weight=weights[v]) if v in weights else d) for v, d in all_dims.items()}
+        new = None
+        for index, (left, right) in enumerate(parsed_eqs):
+            if index in handled:
+                continue
+            terms = _flatten_additive(left, 1) + _flatten_additive(right, -1)
+            evals = [(sgn, n, _eval_collect(n, known)[0]) for sgn, n in terms]
+            if not any(d.quantity is not None and _is_temp_q(d.quantity) and not d.literal
+                       for _, _, d in evals):
+                continue
+            points, open_names, rest, ok = [], [], [], True
+            for sgn, n, d in evals:
+                if d.literal:
+                    continue
+                if isinstance(n, ast.Name) and d.quantity is not None and _is_temp_q(d.quantity):
+                    if d.weight == 1.0:
+                        points.append((sgn, n.id))
+                    elif d.weight == 0.0:
+                        rest.append((sgn, d))
+                    elif n.id not in user:
+                        open_names.append((sgn, n.id))
+                    else:
+                        ok = False
+                elif d.weight == 0.0 or (d.weight is None and d.product):
+                    rest.append((sgn, d))
+                else:
+                    ok = False     # Temperatur mit Faktor (T_1*r) o.ä.: Kelvin-Skala
+            if not ok or not points:
+                continue
+            base = sum(sgn for sgn, _ in points) + (_sum_weights(rest) or 0.0)
+            valid = any(abs(base + sum(sgn * w for (sgn, _), w in zip(open_names, combo))) < 1e-9
+                        for combo in itertools.product((0.0, 1.0), repeat=len(open_names)))
+            if valid:
+                continue
+            point_origins = {round(origins[name], 9) if name in origins else default_origin
+                             for _, name in points}
+            if len(point_origins) != 1 or None in point_origins:
+                continue
+            origin = next(iter(point_origins))
+            if not origin:
+                continue       # Kelvin-Skala: Nullpunkt 0, Ergebnis unverändert
+            count = sum(sgn for sgn, _ in points) + sum(sgn for sgn, _ in open_names)
+            if count == 0:
+                continue
+            new = index
+            found.append({'key': keys[index], 'source': sources[index], 'correction': -origin * count,
+                          'points': [name for _, name in open_names], 'origin': origin})
+            for _, name in open_names:
+                known_units[name] = 'K'
+                open_temperatures.discard(name)
+                origins[name] = origin
+            break
+        if new is None:
+            break
+        handled.add(new)
+    return found
 
 
 # ============================================================================
@@ -1505,7 +2088,7 @@ def _with_temperature_weights(known_dims: Dict[str, DimensionInfo]) -> Dict[str,
     for var, d in known_dims.items():
         if d is not None and d.weight is None and _is_temp_q(d.quantity):
             u = (d.unit or '').lower()
-            w = 0.0 if ('delta' in u or is_temperature_difference_variable(var)) else 1.0
+            w = 0.0 if 'delta' in u else 1.0
             d = replace(d, weight=w)
         result[var] = d
     return result
@@ -1890,12 +2473,7 @@ def propagate_all_units(equations: Dict[str, str], known_units: Dict[str, str],
             break
 
     # Gib nur neue Einheiten zurück (nicht die ursprünglich bekannten)
-    # Post-Processing: Passe Einheiten basierend auf Variablennamen an
-    result = {}
-    for var, unit in all_units.items():
-        if var not in known_units:
-            result[var] = adjust_unit_for_variable(unit, var) if unit else unit
-    return result
+    return {var: unit for var, unit in all_units.items() if var not in known_units}
 
 
 # ============================================================================
@@ -1999,7 +2577,9 @@ def infer_units_from_function_arguments(equation: str, known_units: Dict[str, st
 
 
 def propagate_all_units_complete(equations: Dict[str, str], known_units: Dict[str, str],
-                                  max_iterations: int = 15) -> Dict[str, str]:
+                                  max_iterations: int = 15, open_temperatures=frozenset(),
+                                  undetermined_temperature: str = 'K',
+                                  differences_in_products: bool = False) -> Dict[str, str]:
     """
     Vollständige Einheiten-Propagation mit allen Quellen.
 
@@ -2008,7 +2588,11 @@ def propagate_all_units_complete(equations: Dict[str, str], known_units: Dict[st
     2. Funktionsargumente bidirektional (T=T_1 → T_1: K)
     3. Arithmetische Constraint-Propagation (a + b = c → alle gleiche Einheit,
        Produkte/Quotienten/Potenzen rückwärts, sqrt, abs/max/min)
-    4. Temperatur-Charakter: Differenzen → 'delta_K', absolute Temperaturen → 'K'
+    4. Temperatur-Charakter aus der Struktur, nie aus Namen: Differenzen → 'delta_K',
+       absolute Temperaturen → 'K' (T_1 - T_2 Differenz; T_abs ± Differenz absolut;
+       (T_1 + T_2)/2 absolut). Nicht bestimmbar (nur in Produkten wie Q = m*c*theta)
+       → undetermined_temperature ('K' für Startwerte; die Anzeige verwendet 'delta_K',
+       also K statt °C - richtig für beide Deutungen)
 
     Das Ergebnis ist unabhängig von der Reihenfolge der Gleichungen. Zahlenliterale
     in Summen sind neutral (T_out = T_s - 2 → beide K) und gelten nur dann als
@@ -2019,6 +2603,11 @@ def propagate_all_units_complete(equations: Dict[str, str], known_units: Dict[st
         known_units: Dict von {variable: unit} bekannter Einheiten
         max_iterations: (nur aus Kompatibilitätsgründen; die Iteration läuft bis
             zum Fixpunkt)
+        open_temperatures: bekannte Größen in K (als K eingegeben), deren Charakter aus
+            den Gleichungen folgt; ihr Label im Ergebnis ist das bestimmte ('K'/'delta_K')
+        undetermined_temperature: Label für nicht bestimmbaren Charakter
+        differences_in_products: Temperatur in einem Produkt ohne Temperatur-Dimension
+            als Differenz werten, wo die Summen nichts entscheiden (für die Anzeige)
 
     Returns:
         Dict von ALLEN Einheiten (bekannte + abgeleitete). Einheiten sind
@@ -2041,19 +2630,16 @@ def propagate_all_units_complete(equations: Dict[str, str], known_units: Dict[st
             parsed_eqs.append(parsed)
 
     try:
-        _, inferred = _propagate(parsed_eqs, known_units)
+        _, inferred = _propagate(parsed_eqs, known_units, frozenset(open_temperatures),
+                                 undetermined_temperature, differences_in_products)
     except Exception:
         inferred = {}
 
-    # Post-Processing: Temperaturdifferenzen (dT..., delta...) → delta_K statt K
-    adjusted_units = {}
-    for var, unit in known_units.items():
-        adjusted_units[var] = adjust_unit_for_variable(unit, var) if unit else unit
+    result = dict(known_units)
     for var, unit in inferred.items():
-        if var not in adjusted_units:
-            adjusted_units[var] = adjust_unit_for_variable(unit, var) if unit else unit
-
-    return adjusted_units
+        if var not in known_units or var in open_temperatures:
+            result[var] = unit
+    return result
 
 
 # ============================================================================
@@ -2806,7 +3392,7 @@ def check_equation_dimensions(equation: str, unit_map: Dict[str, str]) -> Option
     if not PINT_AVAILABLE:
         return None
 
-    sides = _split_equation(_remove_comments(equation))
+    sides = _split_equation(_quote_unit_arguments(_remove_comments(equation)))
     if sides is None:
         return None
     left, right = sides

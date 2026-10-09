@@ -43,6 +43,7 @@ equation_solver/
 ├── main.py              # Tkinter GUI (Hauptanwendung)
 ├── parser.py            # Equation syntax → Python conversion
 ├── solver.py            # Block-Dekomposition + Bracket-Suche Solver
+├── optimizer.py         # MINIMIZE/MAXIMIZE ... VARY ... (Raster + Brent/Powell, je Punkt)
 ├── thermodynamics.py    # CoolProp Wrapper mit Einheitenumrechnung
 ├── humid_air.py         # CoolProp HumidAirProp Wrapper für feuchte Luft
 ├── radiation.py         # Schwarzkörper-Strahlungsfunktionen (Planck, vektorisiert)
@@ -56,6 +57,7 @@ equation_solver/
 ├── test_regressions.py  # Regressionstests Parser/Solver/Einheiten
 ├── test_unit_constraints.py  # Tests Einheiten-Propagation/Dimensionsprüfung
 ├── test_berechnungen.py # Berechnungsaufgaben Thermodynamik/Wärmeübertragung
+├── test_optimierung.py  # Optimierung gegen analytische/scipy-Referenzen
 ├── test_gui.py          # GUI-Tests (headless)
 ```
 
@@ -65,6 +67,7 @@ equation_solver/
 python3 test_regressions.py       # Parser, Solver, Einheiten (~15 s)
 python3 test_unit_constraints.py  # Einheiten-Propagation, Dimensionsprüfung
 python3 test_berechnungen.py      # 59 Aufgaben mit/ohne Einheiten gegen Referenzwerte
+python3 test_optimierung.py       # Optimierung (MINIMIZE/MAXIMIZE), unabhängige Referenzen
 python3 test_gui.py               # GUI headless (holt kurz den Fokus - nicht tippen)
 ```
 
@@ -108,8 +111,7 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   - MATLAB-Semantik: Die Schrittweite wird nie verfälscht; der Endwert ist nur
     enthalten, wenn er exakt auf dem Raster liegt (`0:0.3:1` → 0, 0.3, 0.6, 0.9)
   - Sweeps mit Offset-Einheiten (`T = 20:10:50 °C`) werden elementweise korrekt
-    konvertiert (Offset, kein Faktor); bei Temperaturdifferenzen (`dT = 0:5:20 °C`)
-    ohne Offset
+    konvertiert (Offset, kein Faktor); °C ist immer absolut, Differenzen in K
 - **Wertelisten** (Messdaten): `T_a = [-5.2 -4.8 -3.9] °C`, Trennzeichen Leerzeichen,
   Tabulator, Zeilenumbruch, `;` oder `,`; Dezimalpunkt (Dezimalkomma wird gemeldet).
   Eine Liste darf über mehrere Zeilen gehen (Spalte aus Excel/CSV/TXT zwischen `[`
@@ -155,6 +157,20 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   Temperaturen starten beim Mittel der vorgegebenen Temperaturen (statt pauschal 350 K,
   sonst falsches Vorzeichen von Differenzen wie T_Raum - T_Scheibe -> Ra^(1/6) nicht reell).
   Mehrfach-Tearing startet gleichartige Größen mit gleichem Startwert zusätzlich gestaffelt
+  (in der Reihenfolge im Blatt, nicht nach Namen).
+  Ohne Einheit (auch in Blättern ganz ohne Einheiten): Startwert aus der STRUKTUR - Variablen,
+  die als eigene Summanden in derselben Summe/Differenz stehen, bilden ein Netz (gleiche
+  Dimension); Unbekannte eines gekoppelten Blocks starten beim Mittel ihrer Nachbarn im Netz,
+  bekannte Werte fest (Interpolation: `T_R - T_G1`, `T_G1 - T_G2`, `T_G2 - T_G3`, `T_G3 - T_a`
+  -> 285.65 / 278.15 / 270.65 K; nie genau auf einem Randwert, Differenz null wäre singulär).
+  Bekannte zusammengesetzte Summanden zählen als feste Nachbarn (`sigma*T_D^4 - J_2`),
+  Zahlenliterale nicht (`solver._structural_start_hints`). Nur Iterationsstart, nicht Anker
+  der Wurzelauswahl.
+- **Keine Abhängigkeit von Formelzeichen**: Startwerte, Wurzelauswahl, Tearing-Auswahl und
+  Blockbildung hängen nicht von Variablennamen ab (bei Gleichstand entscheidet die Reihenfolge
+  im Blatt, `solver._appearance_order`; keine Startwerte aus Namensähnlichkeit). Geprüft:
+  alle Lehrbeispiele mit neutral umbenannten Variablen liefern dieselben Ergebnisse.
+  Auch Temperaturdifferenzen: keine Namenskonvention (Differenzen in K, Charakter aus der Struktur)
 - **Residuen-Bewertung**: relativ zur Größenordnung der Gleichungsterme - Divergenz
   zur Asymptote (z.B. `1/(x-2) = 0`) wird NICHT als Lösung akzeptiert
 - **Zeitbudget**: max. ~10 s pro Einzelgleichung und `solver.SOLVE_TIME_LIMIT` = 60 s pro
@@ -178,6 +194,33 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - Sweep-Variablen werden als Konstanten für jeden Punkt behandelt
 - Für jeden Sweep-Punkt wird `solve_system` mit Block-Dekomposition aufgerufen
 - Vektorisierte Auswertung für direkte Funktionen ohne Iteration
+
+### Optimierung (optimizer.py)
+
+Anweisung im Blatt (eigene Zeile, nach ',' Fortsetzung in der nächsten Zeile):
+`MINIMIZE ziel VARY x = a .. b Einheit[, y = c .. d Einheit]` bzw. `MAXIMIZE ...`
+(`parser.parse_optimization` -> `OptimizationGoal`, Grenzen in SI; die Zeilen sind für
+`parse_equations` Leerzeilen). Einheit am Ende gilt für beide Grenzen (wie bei Sweeps).
+- Die variierten Größen sind keine Unbekannten (das Blatt hat je Größe eine Gleichung
+  weniger); Struktur-/Einheitenprüfung mit der Bereichsmitte als Platzhalter
+  (`main._check_optimization`: kein fester Wert, keine Sweep-Variable, muss vorkommen)
+- Generisch: für jeden Kandidaten löst `solve_system` das übrige System (Warm-Start);
+  Zielfunktion = Wert der Zielgröße. Raster über den ganzen Bereich (21 Punkte bzw. ~100
+  bei mehreren Größen, Schlangenlinie), dann lokal: Brent beschränkt (1 Größe) bzw. Powell
+  beschränkt (mehrere) in normierten Koordinaten [0, 1]; log. Raster bei > 2 Dekaden.
+  Kandidaten ohne Lösung gelten als schlecht (Strafwert), nicht als Abbruch
+- Meldungen: Minimum/Maximum, "x an der Unter-/Obergrenze", Zahl der Lösungen und der
+  Kandidaten ohne Lösung; Zielgröße konstant -> "ändert sich nicht" (Teillösung)
+- Mehrere Anweisungen: der Reihe nach; Prüfung, ob jede Zielgröße bei den Endwerten ihr
+  Optimum behält (sonst lokale Runden, max. 5), und Kopplungstest durch Verschieben der
+  Größen der anderen Anweisungen -> Hinweis "beeinflussen sich gegenseitig"
+- Mit Parameterstudie/Wertelisten: Optimum je Punkt (`optimize_parametric` ->
+  `solve_parametric(point_solver=..., extra_result_vars=...)`), Optimum des Vorpunkts als
+  zusätzlicher Kandidat
+- Zeitlimit `OPTIMIZE_TIME_LIMIT` = 120 s je Optimierung (je Punkt); danach bestes Ergebnis
+  mit Meldung "Zeitlimit der Optimierung ..."
+- `solver._inferred_units` speichert die Einheiten-Propagation je Gleichungssatz zwischen
+  (sonst ~80 % der Rechenzeit bei vielen Lösungen desselben Systems)
 
 ### Fehleranalyse (diagnostics.py)
 
@@ -334,6 +377,20 @@ Hyperbolische Funktionen (`sinh`, `cosh`, `tanh`) verwenden Radiant.
 - Unterstützte Einheiten: °C, K, bar, Pa, kJ, W, kg/s, m²/s, W/m²K, µm, etc.
 
 ### Unit Constraints Module (unit_constraints.py)
+- **Zweistufige Einheiten-Ableitung** (wie Olsson 2025, "Improved Unit Inference and Checking in
+  Modelica", Dymola): Stufe 1 = lokale Propagation (`_infer_dimensions`, hält lesbare Labels wie
+  kW, kJ/kg); Stufe 2 = vollständige Hindley-Milner-Ableitung nach Kennedy (`_complete_inference`):
+  jede Gleichung/jeder Teilausdruck liefert eine Einheiten-Gleichung (Summe: gleich, Produkt:
+  Exponenten addieren, x^n: n-fach, sqrt: halb, sin/exp/ln: Argument dimensionslos; Zahlen in
+  Produkten dimensionslos, allein in Summen beliebig) - ein lineares System in den Exponenten der
+  SI-Basiseinheiten, gemeinsam exakt (Brüche) eliminiert. Findet gekoppelte Einheiten
+  (a*b = X, a/b = Y; v*x = w, v*v = k). Widersprüchliche Gleichungen werden ausgelassen.
+  Variable Exponenten (y^n): nur Exponent dimensionslos, keine Willkür-Inferenz der Basis
+- **Fehlende Einheitenangaben** (`missing_unit_annotations`): Größen, deren Einheit aus den
+  Gleichungen nicht folgt, und je Gruppe die freien Größen der Elimination (Rang-Defekt) -
+  gibt man deren Einheit an, folgen alle übrigen. GUI-Hinweis "Einheit nicht bestimmbar ...
+  Einheit von q angeben" (nur in Blättern mit Einheiten). Angabe als Startwert mit Einheit
+  (`parser.start_value_units`, wie "Variable Info" in EES)
 - **Einheiten-Propagation**: Leitet Einheiten für berechnete Variablen ab
 - **Dimensionsanalyse**: Verwendet AST-Parsing für algebraische Ausdrücke
 - **Rückwärts-Propagation**: Bei `q = h*dT` wird `h = q/dT` abgeleitet
@@ -346,8 +403,8 @@ Hyperbolische Funktionen (`sinh`, `cosh`, `tanh`) verwenden Radiant.
 - `_infer_from_additive_chain()`: Propagiert Dimensionen in Addition/Subtraktion-Ketten
 - `_collect_additive_terms()`: Sammelt alle Terme aus +/- Ketten (ignoriert numerische Konstanten)
 - `_infer_from_mult_div()`: Rückwärts-Inferenz für Multiplikation/Division
-- `is_temperature_difference_variable()`: Erkennt Temperaturdifferenz-Variablen (dT..., delta...)
-- `adjust_unit_for_variable()`: Passt Einheit basierend auf Variablenname an (K → delta_K)
+- `temperature_sum_conflicts()`: Summen von Temperaturen, die mit keinem Charakter (absolut 1 /
+  Differenz 0) aufgehen - typisch eine Differenz in °C angegeben (Hinweis in der GUI)
 
 ### Einheiten-Syntax
 
@@ -421,7 +478,7 @@ Dimensionslose Zahlen werden automatisch erkannt:
 | Kategorie | Einheiten |
 |-----------|-----------|
 | Temperatur | °C, K, °F |
-| Temperaturdifferenz | delta_K (für Variablen wie dT..., delta...) |
+| Temperaturdifferenz | K (Eingabe), delta_K (Anzeige) - aus der Struktur, nicht aus dem Namen |
 | Druck | bar, Pa, kPa, MPa, atm, psi |
 | Energie | kJ, J, kWh |
 | Leistung | kW, W |
@@ -437,38 +494,58 @@ Dimensionslose Zahlen werden automatisch erkannt:
 | Kinematische Viskosität | m²/s |
 | Wärmeleitfähigkeit | W/mK |
 
-### Temperaturdifferenzen
+### Temperaturdifferenzen (immer in K)
 
-Variablen deren Name mit `dT` oder `delta` beginnt werden automatisch als
-Temperaturdifferenzen erkannt und erhalten die Einheit `delta_K`. Das gilt
-auch für Eingaben in `°C` oder `°F` (`dT = 10 °C` → 10 delta_K, kein Offset).
+**Festlegung:** `°C`/`°F` sind IMMER absolute Temperaturen (Offset); Temperaturdifferenzen
+werden in `K` eingegeben (K hat keinen Offset - der SI-Wert ist für Temperatur und
+Differenz derselbe). Damit ist jeder Zahlenwert ohne Blick auf den Namen richtig; es gibt
+KEINE Namenskonvention mehr (früher: `dT...`/`delta...`).
 
-```
-dT_N = 49.83K            {→ Erkannt als delta_K}
-delta_T = 10K            {→ Erkannt als delta_K}
-dT_1 = 10 °C             {→ 10 delta_K, KEIN +273.15}
-dT_log = (T1-T2)/ln(...) {→ Abgeleitet als delta_K}
-```
-
-Zusätzlich erkennt die Einheiten-Propagation Differenzen zweier Temperaturen
-auch OHNE Namenskonvention: `theta = T_1 - T_2` wird als `delta_K` inferiert
-(Mittelwerte wie `(T_1 + T_2)/2` bleiben absolute Temperaturen in K).
-
-Absolute Temperatur ± Differenz bleibt absolut: `T_si = T_i - q*R_si` → K (Anzeige °C).
-
-Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahieren).
-
-**Grenze:** Eine Temperatur, die nur über ein Produkt bestimmt ist (`Q = m*c_p*theta`,
-`p*v = R*T`), wird als absolute Temperatur (K) angezeigt - für Differenzen daher
-`dT...`/`delta...` als Namen verwenden.
+Ob eine Größe eine absolute Temperatur (Gewicht 1) oder eine Differenz (0) ist, folgt aus
+der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
+- in °C/°F eingegeben: absolut; in K eingegeben: offen (aus den Gleichungen bestimmt,
+  `open_temperatures`)
+- `T_1 - T_2` Differenz; `T_abs ± Differenz` absolut; `(T_1 + T_2)/2` absolut;
+  `T=`-Argumente von Stoffwert-/HumidAir-/Strahlungsfunktionen absolut
+- jede Temperaturgröße ist absolut ODER Differenz: in `T_2 = T_1 + x` (T_1 absolut) ist
+  daher x die Differenz und T_2 absolut (`_integral_weight_candidates`)
+- Anzeige zusätzlich (niedrigste Priorität, `differences_in_products=True`): eine Temperatur
+  in einem Produkt/Quotienten, dessen Dimension KEINE Temperatur ist, ist eine Differenz
+  (Konvention wie COMSOL): `Q = m*c*(T1 - T2)` -> (T1 - T2) Differenz, mit T1 absolut also
+  T2 absolut (°C); `Q = m*c*theta` -> theta Differenz (K). Nur Kandidaten mit Ergebnis 0/1
+  (Mittelwert (T_1 + T_2)/2 im Produkt bleibt absolut). Mathematischer Hintergrund: absolute
+  Temperaturen sind Punkte (Torsor), Differenzen Vektoren (Punkt - Punkt = Vektor,
+  Punkt ± Vektor = Punkt, Punkt + Punkt undefiniert)
+- Anzeige zusätzlich: eine Temperatur-VARIABLE mit ganzzahligem Exponenten >= 2 (`sigma*T^4`)
+  ist absolut (Kelvin-Verhältnisskala); gebrochene Exponenten/Summen als Basis bleiben offen
+  (`(T_s - T_inf)^(1/3)`). Damit: `dT_solar = T_ms - T_s` mit T_ms, T_s aus T^4 -> Differenz
+- nicht bestimmbar: berechnete Größen gelten als absolut (°C nach Settings; Startwerte wie
+  absolut), in K eingegebene Größen werden wie eingegeben in K angezeigt
+  (`main._kelvin_display`) - eine in K eingegebene Differenz erscheint nie als -263 °C
+- Widerspruch (`temperature_sum_conflicts`): Werte in °C so addiert, dass weder Temperatur
+  noch Differenz herauskommt (`T_2 = T_1 + x`, `x = 10 °C`) -> Hinweis "ⓘ HINWEISE"
+- Skalenabhängige Summen (`scale_dependent_sums`, `main._apply_input_scale`): eine Summe
+  absoluter Temperaturen mit Faktor ±1, die in Kelvin weder Temperatur noch Differenz ergibt
+  (T_3 = T_1 + T_2), wird auf der Skala der Eingabe gerechnet (Nullpunkt aus pint: °C 273.15 K,
+  °F 255.37 K; Residuum + Korrektur) -> 20 °C + 40 °C = 60 °C wie EES; Hinweis "ⓘ". Gültige
+  Kombinationen (Differenz, Temperatur ± Differenz, Mittelwert) sind auf jeder Skala gleich;
+  Temperaturen mit Faktor (Isentrope T_1*r) bleiben Kelvin; Eingaben in K: Kelvin-Skala.
+  Charakter dafür nur aus eindeutigen Bestimmungen (Gleichung, die die Größe berechnet)
+- Anzeige: Differenzen in K (`pretty_unit('delta_K')` = 'K', DIN 1345 / ISO 80000-5; die
+  Einheiten-Auswahl rechnet sie ohne Offset in °C/°F um), absolute Temperaturen nach
+  Settings (°C/K)
 
 ## Bekannte Einschränkungen / Design-Entscheidungen
 
-0. **Temperaturskala**: Temperaturen werden intern in Kelvin gerechnet. Physikalische
-   Gesetze (p·v = R·T, σT⁴, Isentrope) funktionieren direkt; Formeln, die in °C
-   definiert sind (Heizkurve T_VL = a + b·ϑ_a, Magnus-Formel, cp(ϑ)-Polynome), müssen
-   mit ϑ = T − T_0 (T_0 = 0 °C) geschrieben werden - sonst falsches Ergebnis ohne
-   Meldung. Mathematisch nicht von Gesetzen in K unterscheidbar, daher keine Warnung.
+0. **Temperaturskala / Zahlenwertgleichungen**: Temperaturen werden intern in Kelvin
+   gerechnet. Physikalische Gesetze (p·v = R·T, σT⁴, Isentrope) funktionieren direkt;
+   Formeln, die nur für Zahlenwerte in bestimmten Einheiten gelten (Heizkurve in °C,
+   Magnus-Formel, cp(ϑ)-Polynome, h = 5.7 + 3.8·v), werden mit `value(x, Einheit)` und
+   `quantity(z, Einheit)` geschrieben (units.unit_number/unit_quantity, Nullpunkt und Faktor
+   aus pint, Winkel bezogen auf Grad). Ohne diese Funktionen: falsches Ergebnis ohne Meldung -
+   eine Zahlenwertgleichung ist strukturell nicht von einem Gesetz in K unterscheidbar.
+   Die Einheiten-Ableitung kennt beide Funktionen (Argument von value hat die Dimension der
+   Einheit, quantity liefert sie; °C/°F -> absolute Temperatur; falsche Einheit -> Warnung).
 
 1. **Quality-Clamping**: Dampfqualität x wird auf [0, 1] begrenzt (thermodynamics.py), damit der iterative Solver nicht mit ungültigen Werten abstürzt.
 
@@ -485,8 +562,8 @@ Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahi
 4. **Manuelle Startwerte**: Bei sehr speziellen Gleichungssystemen kann der Dialog "Solve → Initial Values..." zur manuellen Anpassung verwendet werden. Die Werte stehen danach als Block `{$Startwerte ... $}` im Blatt und werden mit der Datei gespeichert.
 
 5. **Mehrdeutige Wurzeln**: Bei mehreren Lösungen wird die dem Startwert nächstgelegene
-   gewählt. Ein Startwert kann auch von ähnlich benannten bekannten Variablen kommen
-   (`r_2` startet nahe `r_1`) - bei Bedarf Startwert im Dialog setzen.
+   gewählt (Startwert manuell bzw. aus der Einheit, sonst 1) - bei Bedarf Startwert im
+   Dialog setzen (wird als Block `{$Startwerte ... $}` im Blatt gespeichert).
 
 ## GUI-Features
 

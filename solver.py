@@ -14,6 +14,14 @@ from numpy import sinh, cosh, tanh
 import time as _time
 
 from parser import if_function
+try:
+    from units import unit_number, unit_quantity
+except ImportError:  # ohne pint: Zahlenwertgleichungen nicht verfügbar
+    def unit_number(x, unit):
+        raise ValueError('value() benötigt das Einheiten-Modul (pint)')
+
+    def unit_quantity(z, unit):
+        raise ValueError('quantity() benötigt das Einheiten-Modul (pint)')
 
 # Gesamtzeitlimit eines Lösungslaufs (solve_system): verschachtelte Versuche
 # (Zerlegung, Tearing, simultan, Startvarianten) dürfen sich nicht zu Minuten
@@ -53,6 +61,189 @@ except ImportError:
         return {}
     def propagate_all_units_complete(equations, known_units, max_iterations=15):
         return known_units.copy() if known_units else {}
+
+
+# Ergebnis der Einheiten-Propagation je Gleichungssatz: hängt nur von den Gleichungen
+# ab, nicht von den Zahlenwerten - Parameterstudien und Optimierung lösen dasselbe
+# System sehr oft (die Propagation wäre sonst der größte Teil der Rechenzeit)
+_UNIT_CACHE: Dict[tuple, Dict[str, str]] = {}
+
+
+def _inferred_units(original_equations: Dict[str, str]) -> Dict[str, str]:
+    key = tuple(original_equations.items())
+    cached = _UNIT_CACHE.get(key)
+    if cached is None:
+        cached = propagate_all_units_complete(original_equations, {})
+        if len(_UNIT_CACHE) >= 8:
+            _UNIT_CACHE.clear()
+        _UNIT_CACHE[key] = cached
+    return dict(cached)
+
+
+# Startwerte aus der Struktur (generisch, ohne Namen und ohne Einheiten): Summanden
+# derselben Summe/Differenz haben dieselbe Dimension (wie bei der Einheiten-Propagation).
+# Die Variablen, die so verbunden sind, bilden ein Netz (T_R - T_G1, T_G1 - T_G2,
+# T_G2 - T_G3, T_G3 - T_a: T_R - T_G1 - T_G2 - T_G3 - T_a). Unbekannte eines gekoppelten
+# Blocks ohne anderen Startwert starten beim Mittel ihrer Nachbarn im Netz, die bekannten
+# Werte bleiben fest (Interpolation zwischen den bekannten Werten: 285.65 / 278.15 /
+# 270.65 K) - verschiedene Startwerte, nicht genau auf einem Randwert (eine Differenz null
+# ist ein typischer singulärer Punkt: Ra = 0, ln(dT_1/dT_2), 1/dT). Bekannte
+# zusammengesetzte Summanden zählen als feste Nachbarn (sigma*T_D^4 - J_2 -> J_2).
+# Zahlenliterale zählen nicht (1 in (1 - eps) ist keine Größenordnung von eps).
+# Nur Iterationsstart - NICHT für die Auswahl unter mehreren Wurzeln.
+_start_hints = None
+_START_HINT_CACHE: Dict[tuple, tuple] = {}
+
+
+def _additive_chains(expr: str) -> list:
+    """Alle Summen/Differenzen eines Ausdrucks: je Kette die Summanden (AST-Knoten)."""
+    import ast
+    try:
+        tree = ast.parse(expr, mode='eval').body
+    except SyntaxError:
+        return []
+    chains = []
+
+    def terms(node, out):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
+            terms(node.left, out)
+            terms(node.right, out)
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            terms(node.operand, out)
+        else:
+            out.append(node)
+
+    def visit(node):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
+            out = []
+            terms(node, out)
+            chains.append(out)
+            for term in out:
+                visit(term)
+        else:
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+
+    visit(tree)
+    return chains
+
+
+def _structural_start_hints(equations: List[str]) -> tuple:
+    """(Nachbarn je Variable, zusammengesetzte Nachbar-Summanden je Variable, Klasse je Variable)."""
+    key = tuple(equations)
+    cached = _START_HINT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    import ast
+    neighbors: Dict[str, Set[str]] = {}
+    composite: Dict[str, list] = {}
+    for eq in equations:
+        for terms in _additive_chains(eq):
+            names = [t.id for t in terms if isinstance(t, ast.Name)]
+            if not names:
+                continue
+            others = []
+            for term in terms:
+                if isinstance(term, (ast.Name, ast.Constant)):
+                    continue
+                called = {n.func.id for n in ast.walk(term)
+                          if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+                term_names = frozenset({n.id for n in ast.walk(term) if isinstance(n, ast.Name)} - called)
+                if term_names:
+                    others.append((compile(ast.Expression(body=term), '<summand>', 'eval'), term_names))
+            for name in names:
+                neighbors.setdefault(name, set()).update(n for n in names if n != name)
+                composite.setdefault(name, []).extend(others)
+    classes: Dict[str, int] = {}
+    for start_name in neighbors:
+        if start_name in classes:
+            continue
+        stack, label = [start_name], len(classes)
+        while stack:
+            name = stack.pop()
+            if name not in classes:
+                classes[name] = label
+                stack.extend(neighbors[name] - classes.keys())
+    hints = (neighbors, composite, classes)
+    if len(_START_HINT_CACHE) >= 8:
+        _START_HINT_CACHE.clear()
+    _START_HINT_CACHE[key] = hints
+    return hints
+
+
+def _structural_start(var: str, known_values: Optional[Dict[str, float]]) -> Optional[float]:
+    """Startwert durch Interpolation im Netz der über Summen verbundenen Größen oder None."""
+    if _start_hints is None or not known_values:
+        return None
+    neighbors, composite, classes = _start_hints
+    if var not in classes:
+        return None
+    label = classes[var]
+    nodes = [n for n, c in classes.items() if c == label]
+
+    def known(name):
+        value = known_values.get(name)
+        return value is not None and np.isscalar(value) and np.isfinite(value)
+
+    unknown = [n for n in nodes if not known(n)]
+    if var not in unknown:
+        return None
+    context = None
+    fixed: Dict[str, List[float]] = {}         # feste Nachbarwerte je Unbekannte
+    for name in unknown:
+        values = [float(known_values[n]) for n in neighbors[name] if known(n)]
+        for code, term_names in composite[name]:
+            if not term_names <= known_values.keys():
+                continue
+            if context is None:
+                context = _get_eval_context()
+            try:
+                value = float(_as_real(eval(code, {"__builtins__": {}},
+                                            {**context, **{n: known_values[n] for n in term_names}})))
+            except Exception:
+                continue
+            if np.isfinite(value):
+                values.append(value)
+        fixed[name] = values
+    all_fixed = [v for values in fixed.values() for v in values]
+    if not all_fixed:
+        return None
+    # Laplace im Netz: (Zahl der Nachbarn) * x_u - Summe unbekannter Nachbarn = Summe fester
+    # Nachbarn; schwache Bindung an das Mittel, damit Teile ohne festen Nachbarn bestimmt sind
+    index = {n: i for i, n in enumerate(unknown)}
+    mean = float(np.mean(all_fixed))
+    A = np.zeros((len(unknown), len(unknown)))
+    b = np.zeros(len(unknown))
+    for name, i in index.items():
+        unknown_neighbors = [index[n] for n in neighbors[name] if n in index]
+        A[i, i] = len(unknown_neighbors) + len(fixed[name]) + 1e-9
+        for j in unknown_neighbors:
+            A[i, j] -= 1.0
+        b[i] = sum(fixed[name]) + 1e-9 * mean
+    try:
+        x = np.linalg.solve(A, b)
+    except np.linalg.LinAlgError:
+        return mean
+    value = float(x[index[var]])
+    return value if np.isfinite(value) else mean
+
+
+def _appearance_order(equations: List[str], names) -> Dict[str, Tuple[int, int]]:
+    """
+    Reihenfolge des ersten Auftretens im Blatt (Gleichung, Position) - für Entscheidungen
+    bei Gleichstand statt der alphabetischen Reihenfolge: Ergebnisse dürfen nicht von den
+    Formelzeichen abhängen.
+    """
+    import re
+    names = set(names)
+    order: Dict[str, Tuple[int, int]] = {}
+    for i, eq in enumerate(equations):
+        for match in re.finditer(r'[A-Za-z_][A-Za-z0-9_]*', eq):
+            name = match.group(0)
+            if name in names and name not in order:
+                order[name] = (i, match.start())
+    big = (len(equations), 0)
+    return {name: order.get(name, big) for name in names}
 
 
 # ============================================================================
@@ -253,7 +444,8 @@ def create_equation_function(equations: List[str], variables: List[str],
             'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
             'exp': exp, 'log': log, 'log10': log10,
             'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
-            'max': max, 'min': min, 'IF': if_function
+            'max': max, 'min': min, 'IF': if_function,
+            'value': unit_number, 'quantity': unit_quantity
         })
 
         # Füge Thermodynamik-Funktionen hinzu
@@ -299,11 +491,16 @@ def solve_system(
     Returns:
         success, solution, message[, analysis] wie _solve_system_impl
     """
-    global _deadline
+    global _deadline, _start_hints
     own_deadline = _deadline is None
     if own_deadline:
         _deadline = _time.monotonic() + SOLVE_TIME_LIMIT
     state = {}
+    previous_hints = _start_hints
+    try:
+        _start_hints = _structural_start_hints(equations)
+    except Exception:
+        _start_hints = None
     try:
         return _solve_system_impl(equations, variables, initial_values, initial_guess, constants,
                                   original_equations, return_analysis, _state=state)
@@ -320,6 +517,7 @@ def solve_system(
             return False, result, msg, state['analysis']
         return False, result, msg
     finally:
+        _start_hints = previous_hints
         if own_deadline:
             _deadline = None
 
@@ -375,7 +573,7 @@ def _solve_system_impl(
     #   - p hat Einheit Pa (weil p_tot-Argument)
     inferred_units = {}
     if UNIT_INFERENCE_AVAILABLE and original_equations:
-        inferred_units = propagate_all_units_complete(original_equations, {})
+        inferred_units = _inferred_units(original_equations)
 
     # Phase 1: Starte mit Konstanten
     known_values = constants.copy()
@@ -843,7 +1041,8 @@ def create_equation_function_with_sweep(
             'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
             'exp': exp, 'log': log, 'log10': log10,
             'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
-            'max': max, 'min': min, 'IF': if_function
+            'max': max, 'min': min, 'IF': if_function,
+            'value': unit_number, 'quantity': unit_quantity
         })
 
         # Füge Thermodynamik-Funktionen hinzu
@@ -880,7 +1079,8 @@ def _get_eval_context():
         'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
         'exp': exp, 'log': log, 'log10': log10,
         'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
-        'max': max, 'min': min, 'IF': if_function
+        'max': max, 'min': min, 'IF': if_function,
+        'value': unit_number, 'quantity': unit_quantity
     }
     if THERMO_AVAILABLE:
         context.update(THERMO_FUNCTIONS)
@@ -935,6 +1135,7 @@ def _find_minimal_coupled_core(
             if var not in var_to_eqs:
                 var_to_eqs[var] = []
             var_to_eqs[var].append(eq)
+    appearance = _appearance_order(equations, variables)
 
     def is_independently_solvable(block_eqs: List[str], block_vars: Set[str]) -> bool:
         """Prüft ob ein Block unabhängig lösbar ist."""
@@ -977,7 +1178,7 @@ def _find_minimal_coupled_core(
                 best_eq = None
                 best_new_vars = float('inf')
 
-                for var in sorted(block_vars):
+                for var in sorted(block_vars, key=lambda v: appearance[v]):
                     if var in known_vars:
                         continue
                     for eq in var_to_eqs.get(var, []):
@@ -1163,8 +1364,9 @@ def _find_tear_candidates(
                 direct[eq] = (parts[0], parts[1], expr_unknowns)
 
     counts = {v: sum(1 for eq in equations if v in eq_unknowns[eq]) for v in variables}
+    appearance = _appearance_order(equations, variables)
     candidates = []
-    for tear in sorted(variables, key=lambda v: (-counts[v], v)):
+    for tear in sorted(variables, key=lambda v: (-counts[v], appearance[v])):
         determined = {tear}
         sequence = []
         unused = list(equations)
@@ -1255,6 +1457,7 @@ def _find_tear_set(
     has_direct = {var for var, _, _ in direct.values()}
     counts = {v: sum(1 for eq in equations if v in _get_equation_unknowns(eq, known_vars, {v}))
               for v in variables}
+    appearance = _appearance_order(equations, variables)
 
     tears, determined, sequence, used = [], set(), [], set()
 
@@ -1275,7 +1478,7 @@ def _find_tear_set(
     propagate()
     while determined != variables:
         open_vars = variables - determined
-        tear = min(open_vars, key=lambda v: (v in has_direct, -counts[v], v))
+        tear = min(open_vars, key=lambda v: (v in has_direct, -counts[v], appearance[v]))
         tears.append(tear)
         determined.add(tear)
         propagate()
@@ -1362,13 +1565,14 @@ def _solve_block_by_multi_tearing(
                   dtype=float)
     scales = np.maximum(np.abs(x0), 1e-10)
     starts = [x0 / scales]
-    # Gleichartige Größen mit identischem Startwert (z.B. drei Scheibentemperaturen):
-    # zusätzlich gestaffelt starten (in Namensreihenfolge ab- und aufsteigend), sonst
-    # sind Differenzen wie T_1 - T_2 am Start exakt null (Ra = 0, (9000/Ra) -> inf)
+    # Gleichartige Größen mit identischem Startwert: zusätzlich gestaffelt starten (in der
+    # Reihenfolge im Blatt ab- und aufsteigend, nicht nach Namen), sonst sind Differenzen
+    # wie T_1 - T_2 am Start exakt null (Ra = 0, (9000/Ra) -> inf)
+    appearance = _appearance_order(equations, tears)
     for direction in (-1.0, 1.0):
         staggered = x0.copy()
         for value in set(x0.tolist()):
-            same = sorted((i for i in range(len(tears)) if x0[i] == value), key=lambda i: tears[i])
+            same = sorted((i for i in range(len(tears)) if x0[i] == value), key=lambda i: appearance[tears[i]])
             if len(same) > 1:
                 for rank, i in enumerate(same):
                     staggered[i] = value * (1.0 + direction * 0.003 * rank)
@@ -1702,7 +1906,8 @@ def _solve_block_simultaneously(
     if not equations or not variables:
         return True, {}, "Leerer Block"
 
-    var_list = sorted(list(variables))
+    appearance = _appearance_order(equations, variables)
+    var_list = sorted(variables, key=lambda v: appearance[v])
     n_vars = len(var_list)
     n_eqs = len(equations)
 
@@ -1865,7 +2070,8 @@ def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = No
     1. Manuelle Startwerte (höchste Priorität)
     2. Einheiten aus Funktionskontext (z.B. HumidAir(h, T=T_1, rF=rF_1) → T_1: K, rF_1: dimensionslos)
     3. Einheiten aus User-Definition (z.B. T = 20°C → T: K)
-    4. Ähnliche bereits bekannte Variablen (z.B. h_5 bekommt Startwert ähnlich h_4)
+    4. Über Summen verbundene bekannte Größen (T_R - T_G1 -> T_G1 nahe T_R), siehe
+       _start_hints (nur Iterationsstart, nicht für die Wurzelauswahl)
     5. Geometrisches Mittel bekannter Werte
     6. Ultimativer Fallback: 1.0
 
@@ -1882,35 +2088,14 @@ def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = No
         if unit is not None:
             return get_initial_from_unit(unit)
 
-    var_lower = var.lower()
-
-    # PRIORITÄT 2: Suche nach ähnlich benannten bekannten Variablen
-    # z.B. für h_5 schaue nach h_4, h_5s, h_1 etc.
-    if known_values:
-        # Extrahiere Basisnamen (z.B. "h" aus "h_5" oder "h_5s")
-        var_base = var_lower.rstrip('0123456789')
-        if var_base.endswith('_'):
-            var_base = var_base[:-1]
-        if var_base.endswith('s'):  # z.B. h_5s -> h_5 -> h
-            var_base = var_base[:-1].rstrip('0123456789_')
-
-        similar_vals = []
-        for kv_name, kv_val in known_values.items():
-            if isinstance(kv_val, (int, float)) and np.isfinite(kv_val):
-                kv_lower = kv_name.lower()
-                kv_base = kv_lower.rstrip('0123456789')
-                if kv_base.endswith('_'):
-                    kv_base = kv_base[:-1]
-                if kv_base.endswith('s'):
-                    kv_base = kv_base[:-1].rstrip('0123456789_')
-
-                if kv_base == var_base and abs(kv_val) > 0.001:
-                    similar_vals.append(kv_val)
-
-        if similar_vals:
-            # Verwende den Durchschnitt der ähnlichen Werte
-            avg = sum(similar_vals) / len(similar_vals)
-            return avg
+    # PRIORITÄT 2: Über Summen verbundene bekannte Größen (Struktur, siehe _start_hints) -
+    # nur als Iterationsstart, nicht als Anker für die Wahl unter mehreren Wurzeln.
+    # Bewusst KEINE Namensähnlichkeit (h_5 wie h_4): Startwerte und damit die Wahl unter
+    # mehreren Wurzeln dürfen nicht von Formelzeichen abhängen
+    if use_geometric_mean:
+        structural = _structural_start(var, known_values)
+        if structural is not None:
+            return structural
 
     # KEINE Variablennamen-Heuristik mehr!
     # Die Einheit wird NUR aus dem Funktionskontext oder User-Definition abgeleitet,
@@ -2448,10 +2633,17 @@ def solve_parametric(
     initial_values: Optional[Dict[str, float]] = None,
     progress_callback=None,
     constants: Optional[Dict[str, float]] = None,
-    original_equations: Optional[Dict[str, str]] = None
+    original_equations: Optional[Dict[str, str]] = None,
+    point_solver=None,
+    extra_result_vars: Optional[Set[str]] = None
 ) -> Tuple[bool, Dict[str, Union[float, np.ndarray]], str]:
     """
     Löst das Gleichungssystem für jeden Wert der Sweep-Variablen.
+
+    point_solver: Löser je Punkt mit der Signatur von solve_system (Standard:
+    solve_system; Optimierung: optimizer.optimize_system). extra_result_vars:
+    weitere Größen, die der Punkt-Löser liefert (z.B. variierte Größen) - sie
+    werden wie Sweep-Variablen als je Punkt verschieden behandelt.
 
     Args:
         equations: Liste von Gleichungen in Python-Syntax
@@ -2475,9 +2667,15 @@ def solve_parametric(
     if constants is None:
         constants = {}
 
+    extra_result_vars = set(extra_result_vars or ())
+    solve_point = point_solver or solve_system
+
     # Versuche zuerst vektorisierte direkte Auswertung (mit Konstanten,
     # NICHT mit Startwerten - siehe _try_vectorized_evaluation)
-    success, results, msg = _try_vectorized_evaluation(equations, variables, sweep_vars, constants)
+    if point_solver is None:
+        success, results, msg = _try_vectorized_evaluation(equations, variables, sweep_vars, constants)
+    else:
+        success, results, msg = False, {}, ""
     # Nicht definierte Werte (0/0, ln(-1), ...) entstehen vektorisiert still als NaN -
     # dann punktweise lösen, damit die betroffenen Punkte mit Grund gemeldet werden
     if success and any(isinstance(results.get(var), np.ndarray) and not np.all(np.isfinite(results[var]))
@@ -2501,7 +2699,7 @@ def solve_parametric(
     var_list = sorted(list(variables))
 
     # Initialisiere Ergebnis-Arrays
-    results = {var: np.full(n_points, np.nan) for var in var_list}
+    results = {var: np.full(n_points, np.nan) for var in var_list + sorted(extra_result_vars)}
     # Füge auch die Sweep-Variablen zum Ergebnis hinzu
     for name, arr in sweep_vars.items():
         results[name] = arr.copy()
@@ -2530,7 +2728,7 @@ def solve_parametric(
 
         try:
             # Verwende solve_system für jeden Punkt (nutzt Block-Dekomposition und Bracket-Suche)
-            success, solution, msg = solve_system(
+            success, solution, msg = solve_point(
                 equations, variables, point_initial, constants=combined_constants,
                 original_equations=original_equations
             )
@@ -2539,7 +2737,7 @@ def solve_parametric(
 
         # Auch bei einem gescheiterten Punkt alle Größen übernehmen, die gelöst
         # wurden - sonst stünde dort z.B. C = m*c als NaN, obwohl wohldefiniert
-        for var in var_list:
+        for var in var_list + sorted(extra_result_vars):
             value = solution.get(var)
             if value is not None and np.isfinite(value):
                 results[var][i] = value
@@ -2566,7 +2764,8 @@ def solve_parametric(
         if progress_callback:
             progress_callback(i + 1, n_points)
 
-    _collapse_sweep_independent(results, equations, variables, sweep_vars)
+    _collapse_sweep_independent(results, equations, variables,
+                                {**sweep_vars, **{name: None for name in extra_result_vars}})
 
     # Füge Konstanten zum Ergebnis hinzu
     results.update(constants)

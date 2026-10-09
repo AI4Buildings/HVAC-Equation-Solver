@@ -816,6 +816,57 @@ def check_unit_dimension(unit_value: 'UnitValue', expected_unit: str, context: s
             f"Einheit '{unit_value.original_unit}' passt nicht (erwartet: {expected_unit}){where}")
 
 
+# ---------------------------------------------------------------------------
+# Zahlenwertgleichungen: value(x, Einheit) und quantity(z, Einheit)
+# Empirische Formeln gelten oft nur für Zahlenwerte in bestimmten Einheiten
+# (Heizkurve in °C, h = 5.7 + 3.8*v mit v in m/s). Intern ist alles SI; diese
+# Funktionen rechnen ausdrücklich in die genannte Einheit bzw. zurück - generisch
+# für jede Einheit (Nullpunkt und Faktor aus pint, auch °C, °F, bar, kW, m3/h).
+# Winkel sind intern Grad (Trigonometrie in Grad), daher Bezug auf Grad.
+# ---------------------------------------------------------------------------
+_AFFINE_CACHE: Dict[str, Tuple[float, float]] = {}
+_ANGLE_UNITS = {'degree', 'radian', 'arcminute', 'arcsecond', 'gradian', 'turn', 'revolution'}
+
+
+def unit_affine(unit_str: str) -> Tuple[float, float]:
+    """
+    (Nullpunkt, Faktor) einer Einheit bezogen auf den internen SI-Wert:
+    SI = Nullpunkt + Faktor * Zahlenwert (°C: 273.15, 1; bar: 0, 1e5; °F: 255.37, 5/9).
+    Unbekannte Einheit -> UnknownUnitError.
+    """
+    key = unit_str.strip()
+    cached = _AFFINE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        normalized = normalize_unit(key)
+        one = ureg.Quantity(1.0, normalized)
+        if one.dimensionless and str(one.units) in _ANGLE_UNITS:
+            result = (0.0, float(one.to('degree').magnitude))
+        else:
+            zero_si = float(ureg.Quantity(0.0, normalized).to_base_units().magnitude)
+            one_si = float(one.to_base_units().magnitude)
+            result = (zero_si, one_si - zero_si)
+    except Exception:
+        raise UnknownUnitError(f"Unbekannte Einheit '{key}'") from None
+    if result[1] == 0:
+        raise UnknownUnitError(f"Einheit '{key}' hat keinen Umrechnungsfaktor")
+    _AFFINE_CACHE[key] = result
+    return result
+
+
+def unit_number(x, unit_str: str):
+    """value(x, Einheit): Zahlenwert der Größe x (SI) in der Einheit - dimensionslos."""
+    zero, scale = unit_affine(unit_str)
+    return (x - zero) / scale
+
+
+def unit_quantity(z, unit_str: str):
+    """quantity(z, Einheit): Größe (SI) aus dem Zahlenwert z in der Einheit."""
+    zero, scale = unit_affine(unit_str)
+    return zero + z * scale
+
+
 def normalize_unit(unit_str: str) -> str:
     """
     Normalisiert eine Einheit zu pint-kompatiblem Format.
