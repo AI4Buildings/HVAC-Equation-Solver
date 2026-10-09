@@ -1070,7 +1070,17 @@ check("HumidAir mit Taupunkt als Eingabe (T_dp=)",
 check("HumidAir mit Feuchtkugeltemperatur als Eingabe (T_wb=)",
       abs(HumidAir('w', T=303.15, T_wb=293.15, p_tot=1e5) - 0.0107726) < 1e-6)
 check("HumidAir: Meldung nennt T, rF, T_dp wie dokumentiert",
-      "T, p_tot, w, rh, rF" in parse_error("x = HumidAir(w, T=12 °C, phi=0.5, p_tot=1 bar)"))
+      "T, p_tot, w, rh, rF" in parse_error("x = HumidAir(w, T=12 °C, feuchte=0.5, p_tot=1 bar)"))
+# Deutsche Notation in HumidAir: x (Wassergehalt), phi (rel. Feuchte), p (Gesamtdruck), v (spez. Volumen)
+check("HumidAir-Aliase x, phi, p, v",
+      abs(HumidAir('x', T=299.15, phi=0.4, p=95000) - HumidAir('w', T=299.15, rh=0.4, p_tot=95000)) < 1e-15
+      and abs(HumidAir('v', T=299.15, x=0.009, p=95000) - 1 / HumidAir('rho_a', T=299.15, w=0.009, p_tot=95000)) < 1e-12)
+check("AirH2O -> Verweis auf HumidAir", "HumidAir(" in parse_error("h = enthalpy(AirH2O, T=300 K, p=1 bar)"))
+# Namen nur aus a-z, A-Z, 0-9, _ - Griechisch/Umlaute klar gemeldet (Einheiten wie µm erlaubt)
+for text in ("Φ = 0.6\nx = 2*Φ", "eta = 0.8\nQ = 5 kW\nQ_zu = Q/η", "Q_wärme = 5 kW"):
+    check(f"Nicht-ASCII-Name gemeldet: {text.splitlines()[-1]}", "außerhalb von a-z" in parse_error(text),
+          parse_error(text))
+check("Einheit µm und Umlaut im Kommentar erlaubt", parse_error("L = 5 µm {Länge}\ny = 2*L") == "")
 
 # Dampfgehalt außerhalb 0 ... 1: Meldung statt stillschweigender Begrenzung
 from thermodynamics import enthalpy
@@ -1089,6 +1099,59 @@ for text, ok_expected in (("x = 2\ny = x + 1\ny = 3", True), ("x = 2\ny = x + 1\
     s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
     check(f"Nur Prüfgleichungen: {text.splitlines()[-1]} -> {'erfüllt' if ok_expected else 'Widerspruch'}",
           valid and s_ == ok_expected and (ok_expected or "Widerspr" in msg), msg)
+
+# Blockzerlegung: der lösbare Kern bleibt erhalten, wenn eine Folgegleichung nicht auswertbar ist
+# (auch bei kleinen und überbestimmten Blöcken - kein Scheinwiderspruch)
+for text in ("x + y = 5\nx - y = 1\nz = ln(-y)", "x + y = 5\nx*y = 6\nz = ln(-y)",
+             "x + y = 5\nx - y = 1\nx + 2*y = 7\nz = ln(-y)"):
+    eqs, variables, consts, _, orig, _ = parse_equations(text)
+    s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    check(f"Kern gelöst, Folgegleichung gemeldet: {text.splitlines()[-1]}",
+          not s_ and 'x' in sol and 'y' in sol and abs(sol['x'] + sol['y'] - 5) < 1e-9
+          and "ln(-y)" in msg and "Widerspr" not in msg, msg)
+eqs, variables, consts, _, orig, _ = parse_equations("x + y = 5\nx - y = 1\nx + 2*y = 8\nz = ln(y)")
+s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Überbestimmt mit Folgegleichung, echter Widerspruch bleibt erkannt", not s_ and "x + 2*y = 8" in msg, msg)
+
+# Nassdampf unterhalb des Tripelpunkts (Wasser unter 0 °C: Eis) wird gemeldet
+try:
+    enthalpy('water', T=269.15, x=0)
+    check("enthalpy(water, T=-4 °C, x=0) -> Meldung Tripelpunkt", False)
+except ValueError as exc:
+    check("enthalpy(water, T=-4 °C, x=0) -> Meldung Tripelpunkt", "Tripelpunkt" in str(exc), str(exc))
+check("Nassdampf knapp über dem Tripelpunkt rechnet", abs(enthalpy('water', T=273.16, x=0)) < 10)
+
+# Gescheiterter Kern sperrt nur seine Größen - unabhängige Kerne werden weiter gelöst
+eqs, variables, consts, _, orig, _ = parse_equations("x + y = 5\nx - y = 1\na = 2\nb = 2\nz = 1/(a - b)\nq = x*z")
+s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Unabhängiger Kern trotz gescheiterter Gleichung gelöst", not s_ and abs(sol.get('x', 0) - 3) < 1e-9
+      and abs(sol.get('y', 0) - 2) < 1e-9 and 'z' not in sol, msg)
+# Implizite Gleichung ohne Lösung: Meldung am Rand des Definitionsbereichs
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "p = 950 mbar\nh_P = 34.15 kJ/kg\nw_P = 9.3 g/kg\nh_P = HumidAir(h, T=T_P, w=w_P, p_tot=p)")
+s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Implizit im Nebelgebiet -> 'Zustand übersättigt'", not s_ and "übersättigt" in msg, msg)
+# Gekoppelte HumidAir-Gleichungen mit automatischen Startwerten (w kg/kg, Start nicht genau auf T_6)
+from unit_constraints import propagate_all_units_complete
+from units import initial_values_from_units
+text = ("p = 950 mbar\nT_6 = 19.2 °C\nh_1 = 64.9 kJ/kg\nh_4 = 46.4 kJ/kg\neta = 0.6\n"
+        "h_1 = HumidAir(h, T=T_2, w=w_2, p_tot=p)\nh_4 = HumidAir(h, T=T_3, w=w_2, p_tot=p)\n"
+        "eta = (T_2 - T_3)/(T_2 - T_6)")
+eqs, variables, consts, _, orig, uv = parse_equations(text)
+units_ = propagate_all_units_complete(orig, {v: u.calc_unit for v, u in uv.items()})
+init = initial_values_from_units(variables, units_, consts)
+s_, sol, msg = solve_system(eqs, variables, init, constants=consts, original_equations=orig)
+check("Gekoppelte HumidAir-Gleichungen mit Einheiten-Startwerten", s_ and abs(sol['T_2'] - 322.645) < 0.01
+      and init.get('w_2') == 0.01, f"{msg} {init}")
+# Rundungsfunktionen
+eqs, variables, consts, _, orig, _ = parse_equations("Q = 61.5\nn_1 = ceil(Q/5)\nn_2 = floor(Q/5)\nn_3 = round(Q/5)")
+s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("ceil/floor/round", s_ and (sol['n_1'], sol['n_2'], sol['n_3']) == (13, 12, 12), str(sol))
+try:
+    HumidAir('w', T=293.15, rh=50, p_tot=1e5)
+    check("rh = 50 -> Meldung 0 ... 1", False)
+except ValueError as exc:
+    check("rh = 50 -> Meldung 0 ... 1", "außerhalb von 0 ... 1" in str(exc) and "50 %" in str(exc), str(exc))
 
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")

@@ -34,7 +34,7 @@ except ImportError:
 MATH_FUNCTIONS = {
     'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
     'sinh', 'cosh', 'tanh',
-    'exp', 'ln', 'lg', 'log10', 'sqrt', 'abs',
+    'exp', 'ln', 'lg', 'log10', 'sqrt', 'abs', 'ceil', 'floor', 'round',
     'pi', 'max', 'min', 'IF', 'value', 'quantity'
 }
 
@@ -309,7 +309,7 @@ ARG_EXPECTED_UNITS = {
     'h': 'J/kg', 'u': 'J/kg', 's': 'J/(kg*K)',
     'rho': 'kg/m^3', 'd': 'kg/m^3', 'v': 'm^3/kg',
     'x': 'dimensionless', 'rh': 'dimensionless', 'rf': 'dimensionless', 'w': 'dimensionless',
-    't_dp': 'K', 't_wb': 'K',
+    't_dp': 'K', 't_wb': 'K', 'phi': 'dimensionless',
 }
 
 # Erwartete Einheiten der Positionsargumente der Strahlungsfunktionen (nach T)
@@ -644,7 +644,7 @@ def _get_const_eval_context() -> dict:
         'sin': _sin, 'cos': _cos, 'tan': _tan,
         'asin': _asin, 'acos': _acos, 'atan': _atan,
         'sqrt': np.sqrt, 'log': np.log, 'log10': np.log10,
-        'exp': np.exp, 'abs': abs,
+        'exp': np.exp, 'abs': abs, 'ceil': np.ceil, 'floor': np.floor, 'round': np.round,
         'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,
         'max': max, 'min': min, 'IF': if_function,
         'value': unit_number, 'quantity': unit_quantity,
@@ -761,7 +761,7 @@ def _excerpt(equation: str, offset: int) -> str:
 
 # Anzahl der Positionsargumente der Funktionen (Signaturprüfung beim Einlesen)
 _ONE_ARGUMENT = {'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
-                 'exp', 'log', 'log10', 'sqrt', 'abs'}
+                 'exp', 'log', 'log10', 'sqrt', 'abs', 'ceil', 'floor', 'round'}
 _RADIATION_ARGS = {'eb': 2, 'blackbody': 3, 'blackbody_cumulative': 2, 'wien': 1, 'stefan_boltzmann': 1}
 
 
@@ -824,8 +824,10 @@ def _check_call_signature(node, func_name: str, text: str, offset: int) -> None:
         if n_args != 1 or first_text is None:
             raise EquationSyntaxError(f"{lower}(fluid, ...) braucht als erstes Argument den Stoff, {where}")
         if not _known_fluid(first_text):
+            humid = (" - feuchte Luft: HumidAir(Eigenschaft, T=..., rh=..., p_tot=...)"
+                     if first_text.lower() in ('airh2o', 'humidair', 'feuchteluft', 'moistair') else "")
             raise EquationSyntaxError(
-                f"Unbekanntes Fluid '{first_text}' (siehe Help > Fluid List), {where}")
+                f"Unbekanntes Fluid '{first_text}' (siehe Help > Fluid List){humid}, {where}")
         bad = [k for k in keywords if k is None or k.lower() not in THERMO_INPUTS]
         if bad:
             raise EquationSyntaxError(
@@ -1002,6 +1004,28 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
         raise type(exc)(f"Zeile {position[0]}: {exc}") from None
 
 
+def _check_ascii_names(line: str) -> None:
+    """
+    Namen dürfen nur a-z, A-Z, 0-9 und _ enthalten. Griechische Buchstaben oder Umlaute
+    (Φ, η, Q_wärme) würden sonst stillschweigend aus den Gleichungen fallen bzw. zu
+    irreführenden Meldungen führen - Einheiten mit solchen Zeichen (µm) sind erlaubt.
+    """
+    for match in re.finditer(r'[^\W\d]\w*', line):
+        token = match.group(0)
+        if not any(ch.isalpha() and ord(ch) > 127 for ch in token):
+            continue
+        if UNITS_AVAILABLE:
+            try:
+                unit_affine(token)
+                continue                      # Einheit (µm, µs, ...)
+            except Exception:
+                pass
+        raise EquationSyntaxError(
+            f"Name '{token}' enthält Zeichen außerhalb von a-z, A-Z, 0-9 und _ - griechische "
+            f"Buchstaben ausschreiben (Phi, eta, lambda), Umlaute als ae, oe, ue, ss "
+            f"(bei: {_excerpt(line.strip(), max(0, match.start() - (len(line) - len(line.lstrip()))))})")
+
+
 def _parse_equations(text: str, parse_units: bool, position: List[int]
                      ) -> Tuple[List[str], Set[str], dict, dict, dict, dict]:
     """
@@ -1039,6 +1063,9 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
     # Einheiten-Analyse dieselben Namen sieht. Anzeige: display_name()/unmangle()
     lines = [_mangle_line(line) for line in _join_bracket_lines(text.split('\n'))]
     original_lines = [mangle_keywords(line) for line in original_text.split('\n')]
+    for line_index, line in enumerate(lines):
+        position[0] = line_index + 1
+        _check_ascii_names(line)
 
     equations = []
     all_variables = set()

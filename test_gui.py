@@ -650,6 +650,18 @@ check("quality() = -1 (überhitzt) -> Hinweis 'nicht im Nassdampfgebiet'",
       any("nicht im Nassdampfgebiet" in h for h in app.last_analysis.hints), str(app.last_analysis.hints))
 solve("p = 1 bar\nh = 1500 kJ/kg\nx = quality(water, p=p, h=h)")
 check("quality() im Nassdampfgebiet -> kein Hinweis", app.hints_label.cget("text") == "")
+# Dimensionslose Ergebnisse umschaltbar (-, %, ‰, g/kg); Faktor/Summe behält die Eingabe-Einheit
+solve("T = 26 °C\nphi_R = 40 %\np = 950 mbar\nx_R = HumidAir(x, T=T, phi=phi_R, p=p)\n"
+      "n_P = 40\nV_dot_P = 35 m3/h\nV_dot = n_P*V_dot_P\nV_dot_2 = V_dot + V_dot_P")
+app.unit_dropdowns["x_R"].set("g/kg"); app._on_unit_changed("x_R", "g/kg")
+check("Wassergehalt in g/kg umschaltbar", abs(float(app.value_labels["x_R"].cget("text")) - 8.9725) < 1e-3,
+      app.value_labels["x_R"].cget("text"))
+check("n*V_dot_P und Summe behalten m3/h", shown("V_dot") == (1400.0, "m3/h") and shown("V_dot_2") == (1435.0, "m3/h"),
+      f"{shown('V_dot')} {shown('V_dot_2')}")
+solve("x_1 = 7 g/kg\nx_3 = x_1 + 0.001\neta = 80 %\neta_2 = eta*0.5\neta_3 = eta*eta")
+check("Dimensionslose Einheiten bleiben (g/kg, %), Produkt zweier % ist eine Zahl",
+      shown("x_3") == (8.0, "g/kg") and shown("eta_2") == (40.0, "%") and shown("eta_3")[1] == "-",
+      f"{shown('x_3')} {shown('eta_2')} {shown('eta_3')}")
 app._on_unit_changed("T2", "K")
 solve("T1=10°C\nT2=20°C\nT1=T2+x")
 app._on_unit_changed("x", "°C")

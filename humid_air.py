@@ -39,6 +39,9 @@ OUTPUT_MAP = {
     't_wb': ('Twb', lambda x: x),                   # K -> K
     'cp': ('cp', lambda x: x),                      # J/(kg_dry_air K), wie cp(AirH2O) in EES
     'cp_ha': ('cp_ha', lambda x: x),                # J/(kg_humid_air K)
+    'v': ('Vda', lambda x: x),                      # m³/kg trockene Luft (EES: Volume(AirH2O))
+    'x': ('W', lambda x: x),                        # Wassergehalt x (deutsche Notation) = w
+    'phi': ('R', lambda x: x),                      # relative Feuchte φ = rh
 }
 
 # Mapping of input parameters
@@ -54,6 +57,9 @@ INPUT_MAP = {
     'h': ('Hda', lambda x: x),                      # J/kg -> J/kg (bereits SI)
     't_dp': ('Tdp', lambda x: x),                   # Taupunkt K (EES: D=)
     't_wb': ('Twb', lambda x: x),                   # Feuchtkugeltemperatur K (EES: B=)
+    'x': ('W', lambda x: x),                        # Wassergehalt x (deutsche Notation) = w
+    'phi': ('R', lambda x: x),                      # relative Feuchte φ = rh
+    'p': ('P', lambda x: x),                        # Gesamtdruck = p_tot
 }
 
 # Schreibweise in Meldungen und Hilfe (die Schlüssel oben sind klein geschrieben)
@@ -235,7 +241,7 @@ def HumidAir(output_prop: str, **kwargs) -> float:
                 inputs[cp_key] = value
 
             # Store total pressure
-            if key_lower == 'p_tot':
+            if key_lower in ('p_tot', 'p'):
                 p_tot_pa = inputs[cp_key]
 
     # Convert p_w to psi_w if p_w was given as input
@@ -245,6 +251,11 @@ def HumidAir(output_prop: str, **kwargs) -> float:
             raise ValueError("When using p_w as input, p_tot must also be specified")
         # psi_w = p_w / p_tot
         inputs['psi_w'] = p_w_pa / p_tot_pa
+
+    # Relative Feuchte als Anteil 0 ... 1 (rh = 50 statt 50 % ist ein typischer Eingabefehler)
+    if 'R' in inputs and not -1e-9 <= inputs['R'] <= 1 + 1e-9:
+        raise ValueError(f"Relative Feuchte rh = {inputs['R']:g} liegt außerhalb von 0 ... 1 - "
+                         f"als Anteil (0.5) oder mit Einheit (50 %) angeben")
 
     # Check that exactly 3 independent parameters are given
     # (CoolProp HumidAirProp requires 3 inputs: typically T, P, and one humidity property)

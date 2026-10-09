@@ -293,7 +293,7 @@ _THERMO_OUT = {
 # HumidAir: Ausgabe-Label abhängig vom ersten Argument
 _HUMID_OUT = {
     'h': 'J/kg',
-    'w': '',          # kg/kg ist dimensionslos
+    'w': 'kg/kg',     # dimensionslos; Label kg/kg -> Startwert 0.01 (nicht 0.5, weit übersättigt)
     'rh': '',
     't': 'K',
     't_dp': 'K',
@@ -305,6 +305,9 @@ _HUMID_OUT = {
     'cp': 'J/(kg*K)',
     'cp_ha': 'J/(kg*K)',
     'p_tot': 'Pa',
+    'v': 'm^3/kg',
+    'x': 'kg/kg',
+    'phi': '',
 }
 
 # Strahlungsfunktionen: (Ausgabe-Label, Dimension für die Rechnung)
@@ -545,7 +548,10 @@ def _eval_chain(terms, ctx: _Ctx) -> DimensionInfo:
         weight = _sum_weights(nonlit)
     if len(nonlit) == 1 and len(evals) == 1:
         return ref
-    d = _dim(ref.quantity, weight)
+    # Alle Terme mit derselben Einheit (m3/h + m3/h): Ergebnis behält sie (nicht Temperaturen)
+    labels = {d.unit for _, d in known}
+    same = labels.pop() if len(labels) == 1 and not _is_temp_q(ref.quantity) else None
+    d = _dim(ref.quantity, weight, same or None)
     if weight is None and len(nonlit) == 1 and ref.product:
         d = replace(d, product=True)
     return d
@@ -584,6 +590,28 @@ def _scale_weight(w: Optional[float], factor: DimensionInfo, divide: bool = Fals
     return 0.0 if w == 0 else None
 
 
+def _scaled_label(l: DimensionInfo, r: DimensionInfo, q, divide: bool = False) -> Optional[str]:
+    """
+    Einheit eines Produkts mit einer dimensionslosen Größe (bzw. Quotient durch eine): die des
+    anderen Faktors (V_dot = n_P*V_dot_P mit V_dot_P in m^3/h -> m^3/h statt m^3/s). Sonst
+    None (Label aus der Dimension). Temperaturen: Label aus dem Temperatur-Charakter.
+    """
+    if q is None or _is_temp_q(q):
+        return None
+    if _is_dimless_q(q):
+        # dimensionslos: nur mit einer reinen Zahl (eta*0.5 bleibt %, eta*eta ist eine Zahl)
+        if r.literal and l.unit:
+            return l.unit
+        if not divide and l.literal and r.unit:
+            return r.unit
+        return None
+    if _is_dimless_q(r.quantity) and l.unit:
+        return l.unit
+    if not divide and _is_dimless_q(l.quantity) and r.unit:
+        return r.unit
+    return None
+
+
 def _mul(l: DimensionInfo, r: DimensionInfo) -> DimensionInfo:
     if l.quantity is None or r.quantity is None:
         return DimensionInfo(None)
@@ -602,7 +630,7 @@ def _mul(l: DimensionInfo, r: DimensionInfo) -> DimensionInfo:
             product = l.product and weight is None
         else:
             product = True
-    d = _dim(q, weight)
+    d = _dim(q, weight, _scaled_label(l, r, q))
     if product:
         d = replace(d, product=True)
     if l.literal and r.literal:
@@ -626,7 +654,7 @@ def _div(l: DimensionInfo, r: DimensionInfo) -> DimensionInfo:
             product = l.product and weight is None
         else:
             product = True
-    d = _dim(q, weight)
+    d = _dim(q, weight, _scaled_label(l, r, q, divide=True))
     if product:
         d = replace(d, product=True)
     if l.literal and r.literal:
@@ -784,12 +812,13 @@ def _eval_call(node, ctx: _Ctx) -> DimensionInfo:
             d = replace(d, literal=True, value=val, weight=0.0)
         return d
 
-    if fname == 'abs':
+    if fname in ('abs', 'ceil', 'floor', 'round'):
         if not args:
             return DimensionInfo(None)
         a = _eval(args[0], ctx)
         if a.literal and a.value is not None:
-            return replace(a, value=abs(a.value))
+            op = {'abs': abs, 'ceil': math.ceil, 'floor': math.floor, 'round': round}[fname]
+            return replace(a, value=float(op(a.value)))
         return a
 
     if fname == 'IF':
@@ -1024,7 +1053,7 @@ def _rev(node, target: DimensionInfo, known, rank: int, out):
 
     if isinstance(node, ast.Call):
         fname = _func_name(node)
-        if fname == 'abs' and node.args:
+        if fname in ('abs', 'ceil', 'floor', 'round') and node.args:
             _rev(node.args[0], target, known, rank, out)
         elif fname in ('max', 'min') or (fname == 'IF' and len(node.args) == 5):
             for a in (node.args[2:] if fname == 'IF' else node.args):
@@ -1190,8 +1219,8 @@ def _definition_candidates(left, right, known, out):
                 label = d.unit
                 if label is None or _is_temp_q(d.quantity):
                     label = None
-                elif _is_dimless_q(d.quantity):
-                    label = ''
+                elif _is_dimless_q(d.quantity) and label in ('dimensionless', '-', '1'):
+                    label = ''               # %, ‰, g/kg aus den Eingaben bleiben erhalten
                 cand = _dim(d.quantity, d.weight, label)
                 _add_cand(out, var, _RANK_STRUCTURE if miss else _RANK_DEFINITION, cand)
         elif (isinstance(var_node, ast.BinOp) and isinstance(var_node.op, ast.Pow)
@@ -1250,8 +1279,8 @@ def _select(cands: List[DimensionInfo]) -> DimensionInfo:
     q = group[0].quantity
     if _is_temp_q(q):
         label = 'K'
-    elif _is_dimless_q(q):
-        label = ''
+    elif _is_dimless_q(q) and label in ('dimensionless', '-', '1'):
+        label = ''                       # %, ‰, g/kg aus den Eingaben bleiben erhalten
     return DimensionInfo(label, q)
 
 
@@ -1448,7 +1477,7 @@ def _complete_inference(parsed_eqs, known: Dict[str, DimensionInfo],
             if fname == 'sqrt' and args:
                 f = form(args[0])
                 return _ANY if f is _ANY else scale(f, Fraction(1, 2))
-            if fname == 'abs' and args:
+            if fname in ('abs', 'ceil', 'floor', 'round') and args:
                 return form(args[0])
             if fname in ('max', 'min', 'IF'):
                 branches = args[2:] if fname == 'IF' else args
@@ -1566,7 +1595,7 @@ def _rev_weight(node, w: float, prio: int, out, known, free: Set[str]):
         return
     if isinstance(node, ast.Call):
         fname = _func_name(node)
-        if fname == 'abs' and node.args:
+        if fname in ('abs', 'ceil', 'floor', 'round') and node.args:
             _rev_weight(node.args[0], w, prio, out, known, free)
         elif fname in ('max', 'min'):
             for a in node.args:
@@ -1851,7 +1880,8 @@ def _propagate(parsed_eqs, known_units: Dict[str, str], open_temperatures=frozen
         if _is_temp_q(d.quantity):
             label = _temperature_label(weights.get(v), undetermined)
         elif _is_dimless_q(d.quantity):
-            label = ''
+            # %, ‰, g/kg aus den Eingaben bleiben (x_3 = x_1 + 0.001 mit x_1 in g/kg), sonst Zahl
+            label = d.unit if d.unit and d.unit not in ('dimensionless', '-', '1') else ''
         result[v] = label
     for v in open_temperatures:
         if v in user and _is_temp_q(user[v].quantity):
@@ -2609,7 +2639,8 @@ FUNCTION_ARGUMENT_UNITS = {
     'p_tot': 'Pa',      # Gesamtdruck
     'rh': '',           # Relative Feuchte (dimensionslos)
     'rf': '',           # Relative Feuchte (German: rF = relative Feuchte, dimensionslos)
-    'w': '',            # Feuchtebeladung (kg/kg, oft als dimensionslos behandelt)
+    'phi': '',          # Relative Feuchte (HumidAir, deutsche Notation)
+    'w': 'kg/kg',       # Feuchtebeladung (dimensionslos, Label kg/kg für Startwert/Anzeige)
     'p_w': 'Pa',        # Partialdruck Wasserdampf
     't_dp': 'K',        # Taupunkt (Eingabe)
     't_wb': 'K',        # Feuchtkugeltemperatur (Eingabe)

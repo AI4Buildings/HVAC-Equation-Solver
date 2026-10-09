@@ -161,6 +161,7 @@ ln(x)                       Natural logarithm
 log10(x), lg(x)             Base 10 logarithm
 sqrt(x)                     Square root
 abs(x)                      Absolute value
+ceil(x), floor(x), round(x) Round up / down / to nearest integer
 max(a, b), min(a, b)        Maximum / minimum
 IF(a, b, x, y, z)           Case distinction: x if a < b,
                             y if a = b, z if a > b (see below)
@@ -298,11 +299,13 @@ Examples:
 HUMID AIR FUNCTIONS:
 --------------------
 Syntax: HumidAir(property, T=..., rh=..., p_tot=...)  (3 inputs)
-Outputs: T, T_dp, T_wb [K], h [J/kg dry air], w [kg/kg],
-         rh [-], p_w [Pa], rho_tot, rho_a, rho_w [kg/m3],
-         cp [J/(kg K), per kg dry air], cp_ha [per kg humid air]
-Inputs:  T [K], p_tot [Pa], rh (or rF) [-], w [kg/kg], p_w [Pa],
-         h [J/kg], T_dp [K] (dew point), T_wb [K] (wet bulb)
+Outputs: T, T_dp, T_wb [K], h [J/kg dry air], w (or x) [kg/kg],
+         rh (or phi) [-], p_w [Pa], rho_tot, rho_a, rho_w [kg/m3],
+         v [m3/kg dry air], cp [J/(kg K), per kg dry air],
+         cp_ha [per kg humid air]
+Inputs:  T [K], p_tot (or p) [Pa], rh (or rF, phi) [-],
+         w (or x) [kg/kg], p_w [Pa], h [J/kg],
+         T_dp [K] (dew point), T_wb [K] (wet bulb)
 
   h = HumidAir(h, T=298.15 K, rh=0.5, p_tot=1 bar)   {25°C}
   h = HumidAir(h, T=25 °C, rh=0.5, p_tot=1 bar)      {also valid}
@@ -341,6 +344,7 @@ Variables without unit are SI: L = 5 is 5 m - write L = 5 µm.
 VARIABLE NAMES:
 ---------------
 Letters, digits and _ (not starting with a digit), case-sensitive.
+No Greek letters or umlauts (reported): Phi, eta, lambda, Q_waerme.
 Python keywords can be used: lambda = 0.04 W/mK works.
 Not usable: and, or, not, True, False, None.
 e is a normal variable; Euler's number: exp(1).
@@ -1720,7 +1724,11 @@ class EquationSolverApp(ctk.CTk):
                     if not any(f"'{unmangle(src)}'" in h for src in handled)]
 
                 # Leite Startwerte aus Einheiten ab (nur für Variablen ohne manuellen Startwert)
-                unit_initial = initial_values_from_units(variables, start_units, {**constants, **optimized})
+                # Vorgaben inkl. Sweep-/Listenwerte (erster Punkt) für das Temperatur-Mittel
+                sweep_first = {name: float(np.asarray(values).ravel()[0]) for name, values in sweep_vars.items()
+                               if np.asarray(values).size}
+                unit_initial = initial_values_from_units(variables, start_units,
+                                                         {**sweep_first, **constants, **optimized})
                 self.auto_initial_values = unit_initial  # Anzeige im Initial-Values-Dialog
                 for var, value in unit_initial.items():
                     if var not in solver_initial:
@@ -2074,6 +2082,15 @@ class EquationSolverApp(ctk.CTk):
             # ohne Temperatur-Dimension = Differenz). Zwei Durchläufe unterscheiden
             # "bestimmt" von "nicht bestimmbar".
             zero_point = self._zero_point_evaluator(solution)
+            # Anzeige-Labels: eingegebene Einheiten statt SI (V_dot = n*V_dot_P mit m^3/h
+            # bleibt m^3/h); Temperaturen behalten K/delta_K für den Temperatur-Charakter, und wo
+            # die Settings die Einheit bestimmen (Leistung, Energie, Druck, J/kg, J/(kg K)), gelten sie
+            settings_controlled = (self._POWER_UNITS | self._ENERGY_UNITS | self._PRESSURE_UNITS
+                                   | self._SPECIFIC_ENERGY_UNITS | self._SPECIFIC_HEAT_UNITS)
+            for var, uv in unit_values.items():
+                if (uv.original_unit and var in known_units and uv.calc_unit not in ('K', 'delta_K')
+                        and uv.calc_unit not in settings_controlled and not scale_origin(uv.original_unit)):
+                    known_units[var] = uv.original_unit.strip()
             units = propagate_all_units_complete(original_equations, known_units,
                                                  open_temperatures=open_k,
                                                  undetermined_temperature='K',
@@ -2313,14 +2330,24 @@ class EquationSolverApp(ctk.CTk):
                 )
                 unit_label.pack(side="right", padx=2)
             elif UNITS_AVAILABLE and not isinstance(val, np.ndarray):
-                # Platzhalter für dimensionslose Werte (für Spaltenausrichtung)
-                unit_placeholder = ctk.CTkLabel(
-                    row, text="-",
+                # Dimensionslos: Zahl, %, ‰ oder g/kg (relative Feuchte, Wassergehalt, Wirkungsgrad)
+                self.current_unit_values[var] = UnitValue.from_si_base(float(display_val), '')
+                unit_dropdown = ctk.CTkOptionMenu(
+                    row,
+                    values=get_compatible_units(''),
+                    width=80,
+                    height=24,
                     font=ctk.CTkFont(size=11),
-                    text_color=COLORS["text_dim"],
-                    width=80, anchor="center"
+                    fg_color=COLORS["bg_input"],
+                    button_color=COLORS["bg_frame"],
+                    button_hover_color=COLORS["accent"],
+                    dropdown_fg_color=COLORS["bg_frame"],
+                    dropdown_hover_color=COLORS["accent"],
+                    command=lambda u, v=var: self._on_unit_changed(v, u)
                 )
-                unit_placeholder.pack(side="right", padx=2)
+                unit_dropdown.set('-')
+                unit_dropdown.pack(side="right", padx=2)
+                self.unit_dropdowns[var] = unit_dropdown
 
             # Value Label
             val_label = ctk.CTkLabel(
@@ -2342,8 +2369,11 @@ class EquationSolverApp(ctk.CTk):
 
         unit_value = self.current_unit_values[var]
         try:
-            # Konvertiere zum neuen Unit
-            new_val = unit_value.to(new_unit)
+            # Konvertiere zum neuen Unit ('-' = dimensionslose Zahl)
+            if new_unit == '-':
+                new_val = unit_value.to('dimensionless')
+            else:
+                new_val = unit_value.to(new_unit)
 
             # Formatiere Wert
             if abs(new_val) >= 1e6 or (abs(new_val) < 1e-4 and new_val != 0):

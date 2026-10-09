@@ -444,6 +444,7 @@ def create_equation_function(equations: List[str], variables: List[str],
             'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
             'exp': exp, 'log': log, 'log10': log10,
             'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
+            'ceil': np.ceil, 'floor': np.floor, 'round': np.round,
             'max': max, 'min': min, 'IF': if_function,
             'value': unit_number, 'quantity': unit_quantity
         })
@@ -679,6 +680,8 @@ def _solve_system_impl(
                     success, value = _solve_single_unknown(
                         eq, unknown, known_values, context, initial_values, inferred_units
                     )
+                    if not success and eq in _LAST_SEARCH_ERROR and eq not in evaluation_errors:
+                        evaluation_errors[eq] = f"{unknown}: {_LAST_SEARCH_ERROR[eq]}"
                     if success:
                         known_values[unknown] = value
                         remaining_vars.discard(unknown)
@@ -716,7 +719,10 @@ def _solve_system_impl(
                             block_eqs, block_vars, known_values, context, initial_values,
                             original_equations, inferred_units)
                         if success:
+                            # nur der überbestimmte Kern ist gelöst; Prüf- und Folgegleichungen
+                            # bleiben offen (Constraints bzw. nächste Runde)
                             block_eqs = solved_eqs
+                            block_vars = set(block_solution)
                     if not success:
                         failed_blocks.add(block_key)
                         if block_solution:
@@ -790,7 +796,15 @@ def _solve_system_impl(
                                 block_solution, block_residuals
                             )
 
-                        stats['blocks'].append(len(block_vars))
+                        if block_analysis is not None and (block_analysis.sub_blocks
+                                                           or block_analysis.direct_evals
+                                                           or block_analysis.single_unknowns):
+                            # intern zerlegt: nur die echten gekoppelten Kerne zählen als Block
+                            stats['blocks'].extend(len(sb.variables) for sb in block_analysis.sub_blocks)
+                            stats['direct'] += len(block_analysis.direct_evals)
+                            stats['single'] += len(block_analysis.single_unknowns)
+                        else:
+                            stats['blocks'].append(len(block_vars))
                         made_progress = True
                         break  # Nach gelöstem Block: zurück zu den sequentiellen Phasen
 
@@ -832,8 +846,10 @@ def _solve_system_impl(
         if stats['single'] > 0:
             parts.append(f"{stats['single']} iterativ")
         if stats['blocks']:
-            block_info = '+'.join(str(b) for b in stats['blocks'])
-            parts.append(f"Blöcke: {block_info}")
+            n_blocks = len(stats['blocks'])
+            sizes = '+'.join(str(b) for b in stats['blocks'])
+            parts.append(f"{n_blocks} {'Block' if n_blocks == 1 else 'Blöcke'} "
+                         f"({sizes} {'Größe' if stats['blocks'] == [1] else 'Größen'})")
 
         msg = "Lösung gefunden"
         if parts:
@@ -1074,6 +1090,7 @@ def create_equation_function_with_sweep(
             'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
             'exp': exp, 'log': log, 'log10': log10,
             'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
+            'ceil': np.ceil, 'floor': np.floor, 'round': np.round,
             'max': max, 'min': min, 'IF': if_function,
             'value': unit_number, 'quantity': unit_quantity
         })
@@ -1112,6 +1129,7 @@ def _get_eval_context():
         'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
         'exp': exp, 'log': log, 'log10': log10,
         'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
+            'ceil': np.ceil, 'floor': np.floor, 'round': np.round,
         'max': max, 'min': min, 'IF': if_function,
         'value': unit_number, 'quantity': unit_quantity
     }
@@ -1860,6 +1878,44 @@ def _non_unique_solution(equations: List[str], variables: Set[str], values: Dict
     return dependent, free
 
 
+def _overdetermined_part(equations: List[str], variables: Set[str], known: Set[str]
+                         ) -> Tuple[List[str], Set[str]]:
+    """
+    Überbestimmter Teil eines Blocks (Dulmage-Mendelsohn): Gleichungen, die von nicht
+    zugeordneten Gleichungen über alternierende Pfade (Gleichung -> Unbekannte -> deren
+    zugeordnete Gleichung) erreichbar sind, und deren Unbekannte. Leer, wenn alle zugeordnet sind.
+    """
+    unknowns = {eq: _get_equation_unknowns(eq, known, variables) for eq in equations}
+    owner: Dict[str, str] = {}
+
+    def augment(eq, seen):
+        for var in sorted(unknowns[eq]):
+            if var in seen:
+                continue
+            seen.add(var)
+            if var not in owner or augment(owner[var], seen):
+                owner[var] = eq
+                return True
+        return False
+
+    for eq in equations:
+        augment(eq, set())
+    matched = set(owner.values())
+    queue = [eq for eq in equations if eq not in matched]
+    part_eqs, part_vars = set(queue), set()
+    while queue:
+        eq = queue.pop()
+        for var in unknowns[eq]:
+            if var in part_vars:
+                continue
+            part_vars.add(var)
+            other = owner.get(var)
+            if other is not None and other not in part_eqs:
+                part_eqs.add(other)
+                queue.append(other)
+    return [eq for eq in equations if eq in part_eqs], part_vars
+
+
 def _square_subsets(equations: List[str], variables: Set[str], known: Set[str], limit: int = 8):
     """
     Quadratische Teilsysteme eines überbestimmten Blocks: Auswahlen von so vielen Gleichungen
@@ -1915,6 +1971,12 @@ def _solve_overdetermined_block(equations, variables, known_values, context, man
     Returns:
         (success, solution, message, analysis, solved_equations)
     """
+    # Nur der überbestimmte Teil (von überzähligen Gleichungen über alternierende Pfade
+    # erreichbar, Dulmage-Mendelsohn): nachgelagerte Gleichungen kommen danach an die Reihe -
+    # eine dort nicht erfüllbare Gleichung darf den Kern nicht verfälschen
+    core_eqs, core_vars = _overdetermined_part(equations, variables, set(known_values))
+    if core_eqs and len(core_eqs) < len(equations):
+        equations, variables = core_eqs, core_vars
     fallback = None
     for subset in _square_subsets(equations, variables, set(known_values)):
         success, solution, msg, analysis = _solve_equation_block(
@@ -1967,8 +2029,9 @@ def _solve_equation_block(
 
     attempted = set()  # bereits versuchte Kerne (kein teurer Doppelversuch)
 
-    # Bei größeren Blöcken: Versuche iterative Zerlegung
-    if n_vars > 3:
+    # Zerlegung in den gekoppelten Kern und nachgelagerte Gleichungen (auch kleine Blöcke:
+    # eine nicht auswertbare Folgegleichung darf den lösbaren Kern nicht mitreißen)
+    if n_vars > 2:
         success, solution, msg, block_analysis = _solve_block_iteratively(
             equations, variables, known_values, context, manual_initial, original_equations,
             inferred_units, attempted
@@ -2104,45 +2167,53 @@ def _solve_block_iteratively(
         if made_progress:
             continue
 
-        # Phase 3: Finde und löse den minimalen gekoppelten Kern
-        if remaining_eqs:
-            core_eqs, core_vars = _find_minimal_coupled_core(
-                remaining_eqs, remaining_vars, set(local_known.keys())
+        # Phase 3: Finde und löse den minimalen gekoppelten Kern. Scheitert ein Kern, werden
+        # seine Größen gesperrt und der nächste Kern unter den übrigen Gleichungen gesucht -
+        # ein nicht lösbarer Teil (z = 1/(a - b) mit a = b) darf unabhängige Kerne nicht mitreißen
+        blocked: Set[str] = set()
+        while remaining_eqs and not made_progress:
+            known_now = set(local_known.keys())
+            open_eqs = [eq for eq in remaining_eqs
+                        if not (_get_equation_unknowns(eq, known_now, remaining_vars) & blocked)]
+            open_vars = remaining_vars - blocked
+            if not open_eqs or not open_vars:
+                break
+            core_eqs, core_vars = _find_minimal_coupled_core(open_eqs, open_vars, known_now)
+            if not core_vars or len(core_eqs) != len(core_vars):
+                break
+            success, sub_solution, _ = _solve_core(
+                core_eqs, core_vars, local_known, context, manual_initial, inferred_units,
+                attempted
             )
+            if not success:
+                blocked |= set(core_vars)
+                continue
+            solved_values.update(sub_solution)
+            local_known.update(sub_solution)
+            remaining_vars -= core_vars
 
-            if core_vars and len(core_eqs) == len(core_vars):
-                success, sub_solution, _ = _solve_core(
-                    core_eqs, core_vars, local_known, context, manual_initial, inferred_units,
-                    attempted
-                )
+            # Residuen für Sub-Block berechnen
+            sub_residuals = []
+            for eq in core_eqs:
+                res = _calculate_residual(eq, local_known, context)
+                sub_residuals.append(res)
+                if eq in remaining_eqs:
+                    remaining_eqs.remove(eq)
 
-                if success:
-                    solved_values.update(sub_solution)
-                    local_known.update(sub_solution)
-                    remaining_vars -= core_vars
+            # Sub-Block zur BlockAnalysis hinzufügen
+            orig_eqs = [original_equations.get(eq, eq) for eq in core_eqs]
+            block_analysis.sub_blocks.append(BlockInfo(
+                equations=orig_eqs,
+                parsed_equations=list(core_eqs),
+                variables=list(core_vars),
+                values=sub_solution,
+                residuals=sub_residuals,
+                max_residual=max(abs(r) for r in sub_residuals) if sub_residuals else 0.0,
+                block_number=len(block_analysis.sub_blocks) + 1
+            ))
 
-                    # Residuen für Sub-Block berechnen
-                    sub_residuals = []
-                    for eq in core_eqs:
-                        res = _calculate_residual(eq, local_known, context)
-                        sub_residuals.append(res)
-                        if eq in remaining_eqs:
-                            remaining_eqs.remove(eq)
-
-                    # Sub-Block zur BlockAnalysis hinzufügen
-                    orig_eqs = [original_equations.get(eq, eq) for eq in core_eqs]
-                    block_analysis.sub_blocks.append(BlockInfo(
-                        equations=orig_eqs,
-                        parsed_equations=list(core_eqs),
-                        variables=list(core_vars),
-                        values=sub_solution,
-                        residuals=sub_residuals,
-                        max_residual=max(abs(r) for r in sub_residuals) if sub_residuals else 0.0,
-                        block_number=len(block_analysis.sub_blocks) + 1
-                    ))
-
-                    stats['subblocks'].append(len(core_vars))
-                    made_progress = True
+            stats['subblocks'].append(len(core_vars))
+            made_progress = True
 
         if not made_progress:
             break
@@ -2213,6 +2284,10 @@ def _solve_block_simultaneously(
     # Residuen-Funktion (nicht normalisiert, für Auswertung)
     def block_func(x):
         _check_deadline()
+        if time.monotonic() > deadline:
+            # Zeitbudget des Blocks auch INNERHALB eines least_squares-/fsolve-Laufs: der
+            # Versuch bricht ab (Exception), die Teillösung des Lösungslaufs bleibt erhalten
+            raise RuntimeError("Zeitbudget des Blocks überschritten")
         local_ctx = context.copy()
         local_ctx.update(known_values)
         local_ctx.update({var: val for var, val in zip(var_list, x)})
@@ -2241,8 +2316,15 @@ def _solve_block_simultaneously(
     # Startwert-Strategien
     x0_norm = x0 / scales  # Sollte ~1.0 sein für alle Variablen
 
+    # Kleine, je Größe gestaffelte relative Verschiebungen: ein Start genau auf einem
+    # gegebenen Wert (T_2 = T_6 -> (T_2 - T_3)/(T_2 - T_6) = 0/0) wird so verlassen, ohne den
+    # Gültigkeitsbereich zu verlassen (Faktoren 0.1 ... 3 führen absolute Temperaturen hinaus)
+    stagger = np.arange(n_vars) - (n_vars - 1) / 2.0
     start_variations = [
         x0_norm,
+        x0_norm * (1 + 0.02 + 0.01 * stagger),
+        x0_norm * (1 - 0.02 - 0.01 * stagger),
+        x0_norm * (1 + 0.06 + 0.02 * stagger),
         # Neutrale Startpunkte unabhängig von der Heuristik (der Fallback
         # "geometrisches Mittel bekannter Werte" kann weit danebenliegen, z.B.
         # m = 24000 als Exponent in N = C*Re^m -> Überlauf, keine Suchrichtung)
@@ -2413,10 +2495,41 @@ def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = No
     return 1.0  # Ultimativer Fallback
 
 
+# Auswertungsfehler der letzten erfolglosen 1-D-Suche je Gleichung (für die Meldung)
+_SEARCH_LOG: Dict[str, list] = {'ok': [], 'err': []}
+_LAST_SEARCH_ERROR: Dict[str, str] = {}
+
+
 def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, float],
-                           context: dict, manual_initial: Optional[Dict[str, float]] = None,
-                           inferred_units: Optional[Dict[str, str]] = None,
-                           chain=None) -> Tuple[bool, float]:
+                          context: dict, manual_initial: Optional[Dict[str, float]] = None,
+                          inferred_units: Optional[Dict[str, str]] = None,
+                          chain=None) -> Tuple[bool, float]:
+    """
+    Wie _solve_single_unknown_search; findet die Suche keine Wurzel, wird die Fehlermeldung
+    des ungültigen Testpunkts gemerkt, der dem besten gültigen Punkt am nächsten liegt - dort
+    endet der Definitionsbereich (z.B. "Zustand übersättigt" bei impliziter HumidAir-Gleichung).
+    """
+    _SEARCH_LOG['ok'], _SEARCH_LOG['err'] = [], []
+    result = _solve_single_unknown_search(equation, unknown, known_values, context, manual_initial,
+                                          inferred_units, chain)
+    if result[0]:
+        _LAST_SEARCH_ERROR.pop(equation, None)
+    elif _SEARCH_LOG['err']:
+        if _SEARCH_LOG['ok']:
+            best = min(_SEARCH_LOG['ok'], key=lambda item: item[1])[0]
+        else:
+            best = _get_initial_value(unknown, manual_initial, known_values, inferred_units)
+        _LAST_SEARCH_ERROR[equation] = min(_SEARCH_LOG['err'], key=lambda item: abs(item[0] - best))[1]
+        if len(_LAST_SEARCH_ERROR) > 1000:
+            _LAST_SEARCH_ERROR.clear()
+    _SEARCH_LOG['ok'], _SEARCH_LOG['err'] = [], []
+    return result
+
+
+def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict[str, float],
+                                 context: dict, manual_initial: Optional[Dict[str, float]] = None,
+                                 inferred_units: Optional[Dict[str, str]] = None,
+                                 chain=None) -> Tuple[bool, float]:
     """
     Löst eine Gleichung mit einer einzelnen Unbekannten.
 
@@ -2456,9 +2569,14 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
         try:
             local_ctx = context.copy()
             local_ctx.update(values_at(x))
-            return _as_real(eval(equation, {"__builtins__": {}}, local_ctx))
-        except Exception:
+            value = _as_real(eval(equation, {"__builtins__": {}}, local_ctx))
+        except Exception as exc:
+            if len(_SEARCH_LOG['err']) < 20000:
+                _SEARCH_LOG['err'].append((x, str(exc)))
             return float('inf')
+        if np.isfinite(value) and len(_SEARCH_LOG['ok']) < 20000:
+            _SEARCH_LOG['ok'].append((x, abs(value)))
+        return value
 
     def rel_residual_at(x):
         """Residuum relativ zur Termgröße der Gleichung (skalenunabhängig)."""

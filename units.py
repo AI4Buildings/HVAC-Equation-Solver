@@ -275,7 +275,12 @@ def get_initial_from_unit(unit_str: str) -> float:
 
 
 # Kompatible Einheiten für Dropdown-Menüs
+# Dimensionslose Anzeige: reine Zahl, Prozent, Promille, Massenverhältnis (Wassergehalt)
+DIMENSIONLESS_UNITS = ['-', '%', '‰', 'g/kg']
+
 COMPATIBLE_UNITS = {
+    '%': DIMENSIONLESS_UNITS,
+    '‰': DIMENSIONLESS_UNITS,
     # Temperatur
     'degC': ['degC', 'K', 'degF'],
     'K': ['K', 'degC', 'degF'],
@@ -348,6 +353,7 @@ COMPATIBLE_UNITS = {
 
     # Volumenstrom
     'm^3/s': ['m^3/s', 'm^3/h', 'L/s', 'L/min', 'L/h'],
+    '1/s': ['1/s', '1/h', '1/min'],      # Frequenz, Luftwechselzahl
     'm^3/h': ['m^3/h', 'm^3/s', 'L/s', 'L/min', 'L/h'],
     'L/s': ['L/s', 'L/min', 'L/h', 'm^3/s', 'm^3/h'],
     'L/min': ['L/min', 'L/s', 'L/h', 'm^3/h'],
@@ -972,8 +978,8 @@ def get_compatible_units(unit_str: str) -> List[str]:
     Returns:
         Liste kompatibler Einheiten (inkl. aktueller)
     """
-    if not unit_str:
-        return ['-']
+    if not unit_str or unit_str == '-':
+        return list(DIMENSIONLESS_UNITS)
 
     # Normalisiere für Lookup
     normalized = normalize_unit(unit_str)

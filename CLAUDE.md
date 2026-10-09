@@ -120,6 +120,10 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   Warnung; `main._dimensionless_constants`)
 - Signaturprüfung beim Einlesen: Fluidname, Eigenschafts-/Parameternamen und
   Argumentanzahl aller Funktionen (enthalpy, HumidAir, Eb, sqrt, max, ...)
+- **Namen nur aus a-z, A-Z, 0-9 und _** (`parser._check_ascii_names`): griechische Buchstaben und
+  Umlaute (Φ, η, Q_wärme) werden beim Einlesen mit Zeile gemeldet (sonst fielen sie still aus den
+  Gleichungen); Einheiten wie µm sind erlaubt
+- `ceil`, `floor`, `round` (z.B. Anzahl Geräte); Einheit wie das Argument
 - **Python-Schlüsselwörter als Variablennamen** (`lambda` für λ, `in`, `is`, ...) sind
   erlaubt: intern umbenannt (`lambda` → `_kw_lambda`), angezeigt wieder als `lambda`
   (`parser.display_name()` / `parser.unmangle()`)
@@ -169,8 +173,20 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
    - sonst simultan mit `least_squares` (Levenberg-Marquardt) / `fsolve`, Zeitbudget ~20 s
    - gescheiterte Blöcke werden nicht erneut versucht; unabhängig gelöste Teilblöcke bleiben
      in der (Teil-)Lösung
+   - **Zerlegung vor dem Lösen** (auch Blöcke ab 3 Größen): minimaler gekoppelter Kern zuerst,
+     nachgelagerte Gleichungen danach. Scheitert ein Kern, werden seine Größen gesperrt und der
+     nächste Kern unter den übrigen Gleichungen gesucht (`_solve_block_iteratively`) - eine nicht
+     auswertbare Folgegleichung (`z = ln(-y)`, übersättigte Mischung) reißt den lösbaren Kern nicht
+     mit; die Meldung nennt die Ursache
+   - Zeitbudget eines simultanen Versuchs (~20 s) gilt auch INNERHALB eines least_squares-Laufs
+     (Residuenfunktion bricht ab) - ein unlösbarer Punkt einer Parameterstudie verliert so nicht
+     alle Werte durch das Gesamtlimit
+   - Startvarianten: zusätzlich kleine, je Größe gestaffelte relative Verschiebungen (±2-6 %) -
+     ein Start genau auf einem gegebenen Wert (0/0 in `(T_2 - T_3)/(T_2 - T_6)`) wird verlassen
    - **Überbestimmter Block** (mehr Gleichungen als Unbekannte, z.B. eine redundante Bilanz):
-     ein strukturell lösbares quadratisches Teilsystem lösen (`_square_subsets`: perfekte
+     nur der überbestimmte Kern nach Dulmage-Mendelsohn (`_overdetermined_part`: von überzähligen
+     Gleichungen über alternierende Pfade erreichbar; Folgegleichungen danach) - darin ein
+     strukturell lösbares quadratisches Teilsystem lösen (`_square_subsets`: perfekte
      Zuordnung, Blatt-Reihenfolge; bei singulärer Auswahl Varianten), die übrigen Gleichungen
      bleiben als Constraints offen und werden geprüft -> Lösung oder "Widersprüchliches System"
      mit der verletzten Gleichung. Unabhängig von der Schreibweise (`a = x + y` / `x + y = a`);
@@ -212,6 +228,11 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   Auch Temperaturdifferenzen: keine Namenskonvention (Differenzen in K, Charakter aus der Struktur)
 - **Residuen-Bewertung**: relativ zur Größenordnung der Gleichungsterme - Divergenz
   zur Asymptote (z.B. `1/(x-2) = 0`) wird NICHT als Lösung akzeptiert
+- **Meldung bei erfolgloser 1-D-Suche**: die Fehlermeldung des ungültigen Testpunkts, der dem besten
+  gültigen am nächsten liegt (Rand des Definitionsbereichs), wird als Auswertungsfehler gemeldet -
+  implizit `h = HumidAir(h, T=T_P, w=…)` im Nebelgebiet -> "Zustand übersättigt" (`_LAST_SEARCH_ERROR`)
+- Statuszeile: "Lösung gefunden (14 direkt, 4 iterativ, 2 Blöcke (3+5 Größen))" - intern zerlegte
+  Komponenten zählen mit ihren echten gekoppelten Kernen
 - **Zeitbudget**: max. ~10 s pro Einzelgleichung und `solver.SOLVE_TIME_LIMIT` = 60 s pro
   Lösungslauf (bzw. pro Punkt einer Parameterstudie). Bei Überschreitung: Teillösung +
   Meldung "Abbruch nach Zeitlimit" mit den offenen Unbekannten (`SolveTimeout` ist
@@ -314,6 +335,10 @@ zusätzlichen Gleichungen); bei Widerspruch nennt die Meldung beide Seiten.
   - `T_dp` - Dew point [K] (EES: D=), `T_wb` - Wet bulb temperature [K] (EES: B=)
 - Case-insensitive: `HumidAir` = `humidair`; Meldungen nennen die Namen wie dokumentiert
   (`humid_air.display_names`: T, rF, T_dp)
+- Deutsche Notation: `x` = w (Wassergehalt; in HumidAir eindeutig), `phi` = rh, `p` = p_tot, Ausgabe
+  `v` (m³/kg trockene Luft); `AirH2O` (EES) in Stoffwertfunktionen -> Verweis auf HumidAir; w/x tragen
+  das Label kg/kg (Startwert 0.01, Anzeige umschaltbar auf g/kg); rh außerhalb 0…1 -> Meldung
+  ("als Anteil (0.5) oder mit Einheit (50 %)")
 - **Sättigung** (`humid_air._saturation`, für jede Eingabekombination): w > w_s(T, p)·(1 + 1e-6)
   -> Meldung "Zustand übersättigt: w = … > w_s = … bei T, p" (Nebel/Kondensat in der Bilanz
   vergessen) statt stiller Werte; gesättigte Luft ergibt rh = 1 (CoolProp lehnt rh = 1 + ε ab)
@@ -607,7 +632,9 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
    Die Einheiten-Ableitung kennt beide Funktionen (Argument von value hat die Dimension der
    Einheit, quantity liefert sie; °C/°F -> absolute Temperatur; falsche Einheit -> Warnung).
 
-1. **Dampfgehalt x**: nur Rundungsfehler (±1e-6) werden auf [0, 1] begrenzt; x deutlich
+1. **Nassdampf unterhalb des Tripelpunkts** (T < T_triple bzw. p < p_triple mit x gegeben) wird gemeldet
+   (Wasser: Eis) - Grenzen aus CoolProp je Fluid.
+   **Dampfgehalt x**: nur Rundungsfehler (±1e-6) werden auf [0, 1] begrenzt; x deutlich
    außerhalb (x = 2, x = quality(...) = -1 eines einphasigen Zustands) ist eine Meldung
    "Dampfgehalt x = … liegt außerhalb von 0 ... 1" (thermodynamics.py) - für den Solver ein
    ungültiger Iterationspunkt. `quality()` liefert außerhalb des Nassdampfgebiets -1
@@ -645,6 +672,12 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
   Warnungen im Residuals-Tab (Variable, Gleichung, links/rechts in SI-Einheiten)
 - Widersprüchliches (überbestimmtes) System: Meldung nennt vorgegebenen und berechneten
   Wert, z.B. "q_dot ist vorgegeben (50), aus 'q_dot=...' folgt 29.06"
+- Anzeige-Einheiten berechneter Größen: Vielfache bzw. Summen gleichartiger Eingaben behalten deren
+  Einheit (`V_dot = n*V_dot_P` mit m3/h -> m3/h, `d_i = d_a - 2*s` in mm, `x_3 = x_1 + 0.001` in g/kg,
+  `eta*0.5` in %; `unit_constraints._scaled_label`, `main._assign_result_units` übergibt die eingegebenen
+  Einheiten als Labels) - außer wo die Settings bestimmen (Leistung, Energie, Druck, J/kg, J/(kg·K),
+  Temperatur: `x = 2*P_el` mit P_el in MW erscheint in kW); dimensionslose Ergebnisse umschaltbar
+  (-, %, ‰, g/kg), Feuchtebeladung mit Label kg/kg, 1/s auch in 1/h
 - Ergebnisanzeige: Wert und Einheit stammen immer aus derselben Einheit. Die Settings
   (°C/K, bar/Pa, kJ/J, kW/W) gelten für Temperaturen, Drücke, J/kJ, J/kg, J/(kg·K), W/kW;
   andere Einheiten (MW, kWh, W/(m²K), W/K, ...) bleiben wie eingegeben bzw. abgeleitet.

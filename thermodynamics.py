@@ -269,6 +269,21 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
     if len(inputs) != 2:
         raise ValueError(f"Genau 2 Zustandsgrößen erforderlich, {len(inputs)} gegeben")
 
+    # Nassdampf (x gegeben) gibt es nur oberhalb des Tripelpunkts - darunter Sublimation
+    # (Wasser: Eis); CoolProp extrapoliert sonst still in den metastabilen Bereich
+    if 'Q' in inputs and ('T' in inputs or 'P' in inputs):
+        try:
+            limit_key, limit = (('T', CP.PropsSI('Ttriple', coolprop_fluid)) if 'T' in inputs
+                                else ('P', CP.PropsSI('ptriple', coolprop_fluid)))
+        except Exception:
+            limit_key, limit = None, None
+        if limit_key and inputs[limit_key] < limit * (1 - 1e-9):
+            name = 'T' if limit_key == 'T' else 'p'
+            unit_text = (f"{inputs['T'] - 273.15:.4g} °C < {limit - 273.15:.4g} °C" if limit_key == 'T'
+                         else f"{inputs['P']:.4g} Pa < {limit:.4g} Pa")
+            raise ValueError(f"{coolprop_fluid}: {name} unterhalb des Tripelpunkts ({unit_text}) - "
+                             f"dort gibt es kein Nassdampfgebiet (Wasser: Eis)")
+
     # Erstelle CoolProp-Aufruf
     keys = list(inputs.keys())
     values = list(inputs.values())

@@ -361,11 +361,13 @@ unit has to be given (as a start value with unit) so that all others follow.
 Output: `T`, `h`, `rh`, `w`, `p_w`, `rho_tot`, `rho_a`, `rho_w`, `T_dp`, `T_wb`
 Input: `T`, `p_tot`, `rh`, `w`, `p_w`, `h`, `T_dp` (dew point), `T_wb` (wet bulb)
 
+German notation works as well: `x` for the humidity ratio, `phi` for the relative humidity, `p` for
+the total pressure, and `v` (specific volume per kg dry air) as output.
 A state with more water vapour than saturated air can hold (w > w_s at T, p) is reported
 ("Zustand übersättigt") instead of returning values - the condensate belongs into the balance.
 
 ### Mathematics
-`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log10`, `lg`, `sqrt`, `abs`, `max`, `min`, `IF`, `value`, `quantity`, `pi`
+`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log10`, `lg`, `sqrt`, `abs`, `ceil`, `floor`, `round`, `max`, `min`, `IF`, `value`, `quantity`, `pi`
 
 ### Radiation
 `Eb`, `Blackbody`, `Blackbody_cumulative`, `Wien`, `Stefan_Boltzmann`

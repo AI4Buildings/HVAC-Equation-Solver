@@ -326,7 +326,7 @@ func_cases = [
     ('Pr = prandtl(water, T=T_1, p=p)', 'Pr', ''),
     ('c = soundspeed(air, T=T_1, p=p)', 'c', 'm/s'),
     ('h_a = HumidAir(h, T=T_1, rh=rh_1, p_tot=p)', 'h_a', 'J/kg'),
-    ('w_a = HumidAir(w, T=T_1, rh=rh_1, p_tot=p)', 'w_a', ''),
+    ('w_a = HumidAir(w, T=T_1, rh=rh_1, p_tot=p)', 'w_a', 'kg/kg'),   # dimensionslos, Label kg/kg
     ('T_dp = HumidAir(T_dp, T=T_1, rh=rh_1, p_tot=p)', 'T_dp', 'K'),
     ('T_wb = HumidAir(T_wb, T=T_1, rh=rh_1, p_tot=p)', 'T_wb', 'K'),
     ('rho_a = HumidAir(rho_tot, T=T_1, rh=rh_1, p_tot=p)', 'rho_a', 'kg/m^3'),
@@ -374,7 +374,7 @@ humid_known = {'T_1': 'K', 'rh_1': '', 'p': 'Pa', 'T_2': 'K', 'rh_2': '', 'm_dot
 r = propagate(humid, humid_known)
 check("Feuchte Luft: Einheiten",
       same_dim(r.get('Q_dot_cool'), 'W') and same_dim(r.get('m_dot_condensate'), 'kg/s')
-      and r.get('T_dp_1') == 'K' and r.get('w_1') == '', str(r))
+      and r.get('T_dp_1') == 'K' and r.get('w_1') == 'kg/kg', str(r))
 w = warnings_for(humid, humid_known)
 check("Feuchte Luft: keine Unit-Warnungen", w == [], str([x.explanation for x in w]))
 
