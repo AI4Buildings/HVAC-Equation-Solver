@@ -111,6 +111,13 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   Solve > Initial Values schreibt ihn (ein Undo-Schritt; mit Einheit eingegebene Werte bleiben
   wie geschrieben, reine Zahlen sind SI). Fehler im Block mit Zeilennummer
 - Einheiten-Kehrwerte nach Leerzeichen: `n = 0.3 1/h`, `1/K`, `h^-1`
+- `%` und `‰` sind Einheiten (pint): `eta = 89.2 %` -> 0.892, auch in Sweeps, Wertelisten,
+  Funktionsargumenten (`rh=50 %`) und zusammengesetzt (`%/K`); `a % b` zwischen Variablen
+  bleibt der Modulo-Operator
+- Konstanten OHNE Einheit gelten in Blättern mit Einheiten als dimensionslos - außer dem
+  Wert 0: null ist in jeder Einheit null (wie die Zahl 0 in einer Summe), ihre Einheit folgt
+  aus den Gleichungen (`Q_12 = 0` neben `Q_12 + W_12 = m*c_v*(T_2 - T_1)` -> kJ, keine
+  Warnung; `main._dimensionless_constants`)
 - Signaturprüfung beim Einlesen: Fluidname, Eigenschafts-/Parameternamen und
   Argumentanzahl aller Funktionen (enthalpy, HumidAir, Eb, sqrt, max, ...)
 - **Python-Schlüsselwörter als Variablennamen** (`lambda` für λ, `in`, `is`, ...) sind
@@ -534,6 +541,16 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
 - Anzeige zusätzlich: eine Temperatur-VARIABLE mit ganzzahligem Exponenten >= 2 (`sigma*T^4`)
   ist absolut (Kelvin-Verhältnisskala); gebrochene Exponenten/Summen als Basis bleiben offen
   (`(T_s - T_inf)^(1/3)`). Damit: `dT_solar = T_ms - T_s` mit T_ms, T_s aus T^4 -> Differenz
+- Anzeige, vor der Produktregel: **Nullpunkt-Test** mit der Lösung (`_zero_point_candidates`,
+  `main._zero_point_evaluator`): eine Gleichung bleibt gültig, wenn der Nullpunkt der
+  Temperaturskala verschoben wird - absolute Temperaturen verschieben sich mit, Differenzen
+  nicht. Je freier Temperaturgröße (übrige mit Charakter 0/1) numerisch: `dT = Q/(m*c)`,
+  `x = q*R_si`, `y = (dT/dt)*t` -> Differenz (K); Mischung `m_3*T_3 = m_1*T_1 + m_2*T_2` mit
+  m_3 = m_1 + m_2 -> absolut (°C). Nur für Gleichungen, die in allen Temperaturen linear sind
+  (nicht sigma*T^4, Korrelationen, Stoffwertfunktionen), nur Ergebnis genau 0 oder 1;
+  physikalische Gesetze in Kelvin (`p*v = R*T`, `T = p*v/R`) ergeben wie die Produktregel K.
+  Umgestellte Formen derselben Gleichung (`Q = m*c*dT` / `dT = Q/(m*c)`) erhalten denselben
+  Charakter
 - nicht bestimmbar: berechnete Größen gelten als absolut (°C nach Settings; Startwerte wie
   absolut), in K eingegebene Größen werden wie eingegeben in K angezeigt
   (`main._kelvin_display`) - eine in K eingegebene Differenz erscheint nie als -263 °C

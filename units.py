@@ -375,15 +375,15 @@ COMPATIBLE_UNITS = {
 
 
 # Regex für Wert mit Einheit
-# Matches: "15", "15.5", "-3.14", "1.5e-3", "15°C", "100kJ/kg", "4.18kJ/(kg*K)"
-_UNIT_BODY = r'(?:[a-zA-Z0-9²³µ°/*()·⋅]|\^-?)*'   # Zeichen einer Einheit, auch h^-1
+# Matches: "15", "15.5", "-3.14", "1.5e-3", "15°C", "100kJ/kg", "4.18kJ/(kg*K)", "89.2 %"
+_UNIT_BODY = r'(?:[a-zA-Z0-9²³µ°/*()·⋅%‰]|\^-?)*'   # Zeichen einer Einheit, auch h^-1
 VALUE_WITH_UNIT_PATTERN = re.compile(
     r'^'
     r'(-?\d+\.?\d*(?:[eE][+-]?\d+)?)'  # Zahl (inkl. wissenschaftliche Notation)
     r'(?:'
     # Einheit, beginnend mit Buchstabe/°/µ (auch W/(m²·K), h^-1). Darf nicht mit
     # einem Exponenten beginnen: sonst zerlegt Backtracking "1e5*y" in 1 und e5*y
-    r'\s*((?![eE][+-]?\d)°?[a-zA-Z²³µ]' + _UNIT_BODY + r')'
+    r'\s*((?![eE][+-]?\d)°?[a-zA-Z²³µ%‰]' + _UNIT_BODY + r')'
     # oder Kehrwert-Einheit "1/h", "1/K" - nur NACH einem Leerzeichen
     # (sonst wäre "0.51/h" mehrdeutig)
     r'|\s+(1/(?:\(|°?[a-zA-Z²³µ])' + _UNIT_BODY + r')'

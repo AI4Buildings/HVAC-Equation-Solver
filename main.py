@@ -132,6 +132,10 @@ Values with units only in assignments 'name = number unit':
   T_1 = 20 °C    p = 1 bar    A = 20 cm2    V_dot = 500 m3/h
   U = 0.3 W/(m²·K)   (m2 = m^2 = m², · or * between units)
   n = 0.3 1/h        (reciprocal units after a space; also h^-1)
+  eta = 89.2 %       (% and ‰ are units: eta = 0.892; rh=50 %)
+A constant WITHOUT unit is dimensionless (eta = 0.8) - except 0:
+zero is zero in every unit, its unit follows from the equations
+(Q_12 = 0 next to Q_12 + W_12 = m*c_v*(T_2 - T_1) is in kJ).
 Not allowed: units inside equations (T_2 - 20 °C) - define a
 variable instead (T_0 = 20 °C, then T_2 - T_0).
 
@@ -356,7 +360,13 @@ steps between them):
                          a temperature is a difference: T_1 - T_2;
                          with T_1 absolute, T_2 is absolute}
   Q = m*c*theta         {theta difference}
+  theta = Q/(m*c)       {the same equation: theta difference}
+  m_3*T_3 = m_1*T_1 + m_2*T_2   {mixing, m_3 = m_1 + m_2:
+                         T_3 absolute like T_1, T_2}
   sigma*T^4             {T absolute (radiation needs Kelvin)}
+For the display, each equation is also checked with the solution:
+it must stay valid when the zero point of the temperature scale
+is shifted (absolute temperatures shift, differences do not).
 Absolute temperatures are shown in °C (Settings), differences
 in K (the unit selector converts them without offset).
 Values entered in K whose meaning cannot be decided are shown
@@ -1690,8 +1700,8 @@ class EquationSolverApp(ctk.CTk):
                 start_units = {**all_units, **{v: definite.get(v) for v in open_k}}
                 if any(uv.original_unit for uv in unit_values.values()):
                     temperature_hints += self._missing_unit_hints(
-                        original_equations, {**known_units, **{c: '' for c in list(constants) + list(sweep_vars)
-                                                               if c not in known_units}}, open_k)
+                        original_equations, {**known_units, **{c: '' for c in self._dimensionless_constants(
+                            constants, sweep_vars) if c not in known_units}}, open_k)
                 handled = {h_source for h_source, _ in scale_hints}
                 temperature_hints += [text for _, text in scale_hints] + [
                     h for h in self._celsius_difference_hints(
@@ -1753,7 +1763,7 @@ class EquationSolverApp(ctk.CTk):
                     known_units = {var: uv.calc_unit for var, uv in self.current_unit_values.items()
                                    if uv.calc_unit is not None}
                     # Füge Konstanten ohne Einheit als dimensionslos hinzu
-                    for var in constants:
+                    for var in self._dimensionless_constants(constants):
                         if var not in known_units:
                             known_units[var] = ''
                     unit_warnings = check_all_unit_consistency(solution, original_equations, known_units)
@@ -1900,6 +1910,36 @@ class EquationSolverApp(ctk.CTk):
         return equations, original_equations, points, hints
 
     @staticmethod
+    def _zero_point_evaluator(solution: dict):
+        """
+        (Werte, residual) für den Nullpunkt-Test des Temperatur-Charakters: Werte der Lösung
+        in SI (Parameterstudie: erster Punkt) und die Auswertung einer Gleichung wie im Solver.
+        """
+        try:
+            from solver import _calculate_residual, _get_eval_context
+            context = _get_eval_context()
+        except Exception:
+            return None
+        values = {}
+        for name, value in solution.items():
+            try:
+                values[name] = float(value[0]) if isinstance(value, np.ndarray) else float(value)
+            except (TypeError, ValueError, IndexError):
+                continue
+        return values, lambda equation, trial: _calculate_residual(equation, trial, context)
+
+    @staticmethod
+    def _dimensionless_constants(constants, sweep_vars=()) -> List[str]:
+        """
+        Konstanten ohne Einheit, die in einem Blatt mit Einheiten als dimensionslos gelten.
+        Ausgenommen ist der Wert 0: null ist in jeder Einheit null (wie die Zahl 0 in einer
+        Summe), seine Einheit folgt aus den Gleichungen (Q_12 = 0 neben Q_12 + W_12 = dU).
+        """
+        names = [name for name, value in constants.items()
+                 if not (np.ndim(value) == 0 and float(value) == 0.0)]
+        return names + list(sweep_vars)
+
+    @staticmethod
     def _missing_unit_hints(original_equations, known_units, open_k) -> List[str]:
         """
         Hinweise für Größen, deren Einheit aus den Gleichungen nicht folgt, mit den
@@ -1968,7 +2008,7 @@ class EquationSolverApp(ctk.CTk):
         for var in getattr(self, '_scale_points', ()):
             known_units.setdefault(var, 'K')
         if any(uv.original_unit for uv in unit_values.values()):
-            for var in constants:
+            for var in self._dimensionless_constants(constants):
                 known_units.setdefault(var, '')
         open_k, _ = self._temperature_inputs(unit_values)
         for name, uv in getattr(self, '_start_units', {}).items():
@@ -1979,16 +2019,20 @@ class EquationSolverApp(ctk.CTk):
         self._kelvin_display = set()
         try:
             # Temperatur-Charakter aus der Struktur (Summen, Funktionsargumente; für die
-            # Anzeige zusätzlich: Temperatur im Produkt ohne Temperatur-Dimension =
-            # Differenz). Zwei Durchläufe unterscheiden "bestimmt" von "nicht bestimmbar".
+            # Anzeige zusätzlich: Nullpunkt-Test mit der Lösung und Temperatur im Produkt
+            # ohne Temperatur-Dimension = Differenz). Zwei Durchläufe unterscheiden
+            # "bestimmt" von "nicht bestimmbar".
+            zero_point = self._zero_point_evaluator(solution)
             units = propagate_all_units_complete(original_equations, known_units,
                                                  open_temperatures=open_k,
                                                  undetermined_temperature='K',
-                                                 differences_in_products=True)
+                                                 differences_in_products=True,
+                                                 zero_point=zero_point)
             safe = propagate_all_units_complete(original_equations, known_units,
                                                 open_temperatures=open_k,
                                                 undetermined_temperature='delta_K',
-                                                differences_in_products=True)
+                                                differences_in_products=True,
+                                                zero_point=zero_point)
         except Exception:
             return
         for var, val in solution.items():

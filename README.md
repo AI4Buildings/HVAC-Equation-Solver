@@ -318,8 +318,11 @@ Whether a quantity is a temperature or a difference follows from the equations, 
 its name: `theta = T_1 - T_2` is a difference, `T_2 = T_1 + dT` makes `dT` a difference and
 `T_2` absolute, `(T_1 + T_2)/2` is absolute, and a temperature inside a product whose
 dimension is not a temperature is a difference (as in COMSOL): in `Q = m*c*(T_1 - T_2)` with
-`T_1` absolute, `T_2` is absolute. Absolute temperatures are shown in °C (Settings),
-differences in K. Sums of absolute temperatures depend on the zero point of the scale (in
+`T_1` absolute, `T_2` is absolute. For the display, the solution is also checked against a
+shift of the temperature zero point (absolute temperatures shift, differences do not):
+`dT = Q/(m*c)` or `dT = q*R` is a difference, a mixing temperature
+`m_3*T_3 = m_1*T_1 + m_2*T_2` with `m_3 = m_1 + m_2` is absolute. Absolute temperatures are
+shown in °C (Settings), differences in K. Sums of absolute temperatures depend on the zero point of the scale (in
 Kelvin they are no temperature); they are calculated on the scale of the input, as in EES:
 `T_1 = 20 °C`, `T_2 = 40 °C`, `T_3 = T_1 + T_2` gives 60 °C.
 
@@ -393,7 +396,8 @@ V = 200 L
 
 Every unit is converted to SI for the calculation (also cm², L, kW/m², kW/(m²K),
 mPa·s, mm²/s, µm). Exponents may be written without `^` (`20 cm2`, `500 m3/h`,
-`10 W/m2K`), and `·` is accepted as multiplication (`W/(m²·K)`). Unknown units are
+`10 W/m2K`), and `·` is accepted as multiplication (`W/(m²·K)`). `%` and `‰` are units
+(`eta = 89.2 %` is 0.892, also `rh=50 %` in function arguments). Unknown units are
 reported as an error instead of being silently ignored, and units in function
 arguments are checked against the expected dimension (`T=` temperature, `p=`
 pressure, ...). Python keywords may be used as variable names, e.g.

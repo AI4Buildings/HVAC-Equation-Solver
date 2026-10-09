@@ -610,6 +610,28 @@ check("Einheit nicht bestimmbar -> Hinweis mit anzugebender Größe",
 solve("L_0 = 5 m\nn = 0.4\ny = L_0^n\nq = 2*y\n{$Startwerte q = 2 m $}")
 check("Startwert mit Einheit legt die Einheit fest (kein Hinweis)",
       shown("q")[1] == "m" and app.hints_label.cget("text") == "", str(shown("q")))
+# Konstante 0 ohne Einheit: Einheit folgt aus den Gleichungen (null ist in jeder Einheit null)
+solve("Q_12 = 0\nm = 2 kg\nc = 4.19 kJ/(kg*K)\nT_1 = 20 °C\nQ_12 + W_12 = m*c*(T_2 - T_1)\nW_12 = 10 kJ")
+check("Konstante 0 ohne Einheit: keine Einheitenwarnung, Einheit kJ",
+      app.unit_warning_label.cget("text") == "" and shown("Q_12") == (0.0, "kJ"), str(shown("Q_12")))
+solve("x = 3\ny = 5 m\nz = y + x")
+check("Konstante 3 ohne Einheit bleibt dimensionslos (Warnung bei y + x)", app.unit_warning_label.cget("text") != "")
+# Nullpunkt-Test: Gleichung bleibt bei verschobenem Temperatur-Nullpunkt gültig
+# (absolute Temperaturen verschieben sich mit, Differenzen nicht) - generisch, numerisch
+for text, name, expected in (
+        ("Q = 1 kJ\nm = 1 kg\nc = 0.1 kJ/(kg*K)\ndT = Q/(m*c)", "dT", (10.0, "K")),
+        ("q = 50 W/m^2\nR_si = 0.13 m^2*K/W\nx = q*R_si", "x", (6.5, "K")),
+        ("P = 100 W\nm = 500 kg\nc = 0.714 kJ/(kg*K)\nt = 1 h\nm*c*r = P\ny = r*t", "y", (1.0084, "K")),
+        ("m_1 = 1 kg/s\nm_2 = 3 kg/s\nT_1 = 20 °C\nT_2 = 60 °C\nm_3 = m_1 + m_2\nm_3*T_3 = m_1*T_1 + m_2*T_2",
+         "T_3", (50.0, "°C")),
+        ("m_1 = 1 kg/s\nm_2 = 3 kg/s\nT_1 = 20 °C\nT_2 = 60 °C\nm_3 = 5 kg/s\nm_3*T_3 = m_1*T_1 + m_2*T_2",
+         "T_3", (258.52, "K")),
+        ("T_1 = 20 °C\nT_2 = T_1*5^0.286", "T_2", (191.3603, "°C")),
+        ("sigma = 5.67e-8 W/(m^2*K^4)\nq = 500 W/m^2\nT_u = 20 °C\nq = sigma*(T_s^4 - T_u^4)", "T_s", (83.6314, "°C"))):
+    solve(text)
+    value, unit = shown(name)
+    check(f"Nullpunkt-Test: {text.splitlines()[-1][:40]} -> {expected[0]} {expected[1]}",
+          unit == expected[1] and abs(value - expected[0]) < 1e-3, f"{value} {unit}")
 app._on_unit_changed("T2", "K")
 solve("T1=10°C\nT2=20°C\nT1=T2+x")
 app._on_unit_changed("x", "°C")

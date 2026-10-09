@@ -1008,6 +1008,21 @@ for text, expected in (("X = 6 m^2\nX = a*b", [(['a', 'b'], ['b'])]),
     check(f"Fehlende Einheiten: {text.splitlines()[-1][:30]} -> {expected}", found == expected, str(found))
 
 
+# Prozent und Promille als Einheit (Wirkungsgrade, relative Feuchte) - über pint wie jede Einheit
+for text, name, expected, unit in (("eta = 89.2 %", 'eta', 0.892, '%'), ("eta = 89.2%", 'eta', 0.892, '%'),
+                                   ("eta = 100*0.892 %", 'eta', 0.892, '%'), ("w = 1.5 ‰", 'w', 0.0015, '‰'),
+                                   ("beta = 0.4 %/K", 'beta', 0.004, '%/K')):
+    _, _, consts, _, _, uv = parse_equations(text)
+    check(f"Einheit in Zuweisung: {text}", abs(consts.get(name, -1) - expected) < 1e-12
+          and uv[name].original_unit == unit, f"{consts} {uv}")
+_, _, _, sweeps, _, _ = parse_equations("rh = 40:20:80 %\nx = [10 20 30] %")
+check("Prozent in Sweep und Werteliste", list(sweeps['rh']) == [0.4, 0.6, 0.8]
+      and np.allclose(sweeps['x'], [0.1, 0.2, 0.3]), str(sweeps))
+eqs, _, _, _, _, _ = parse_equations("a = 5\nb = a % 3")
+check("% zwischen Variablen bleibt der Modulo-Operator", eqs == ['(b) - (a % 3)'], str(eqs))
+eqs, _, _, _, _, _ = parse_equations("w = HumidAir(w, T=25 °C, rh=50 %, p_tot=1 bar)")
+check("Prozent in Funktionsargumenten (rh=50 %)", "rh=0.5" in eqs[0], str(eqs))
+
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")
 if FAILED:

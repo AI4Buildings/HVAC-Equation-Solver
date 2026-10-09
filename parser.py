@@ -693,8 +693,8 @@ def _split_expression_with_unit(right: str) -> Optional[Tuple[float, str]]:
     unit_part = tokens[-1]
     expr_part = ' '.join(tokens[:-1]).strip()
 
-    # Einheit muss mit Buchstabe/°/µ (oder 1/ für Kehrwerte) beginnen und darf kein Operator-Rest sein
-    if not re.match(r'^(?:[a-zA-Z°µ]|1/)', unit_part):
+    # Einheit muss mit Buchstabe/°/µ/% (oder 1/ für Kehrwerte) beginnen und darf kein Operator-Rest sein
+    if not re.match(r'^(?:[a-zA-Z°µ%‰]|1/)', unit_part):
         return None
     # Ausdruck muss mindestens eine Ziffer enthalten
     if not re.search(r'\d', expr_part):

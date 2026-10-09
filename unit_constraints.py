@@ -21,6 +21,7 @@ Konventionen:
 """
 
 import ast
+import numpy as np
 import math
 import re
 from collections import defaultdict
@@ -1695,11 +1696,62 @@ def _integral_weight_candidates(terms, prio: int, out, known, free: Set[str]):
             out[name].append((prio, w))
 
 
+def _zero_point_candidates(parsed, key: str, known, free: Set[str], out, zero_point, prio: float):
+    """
+    Nullpunkt-Test (nur für die Anzeige, mit den Werten der Lösung): eine Gleichung zwischen
+    Temperaturen bleibt gültig, wenn der Nullpunkt der Temperaturskala verschoben wird -
+    absolute Temperaturen verschieben sich mit, Differenzen nicht. Mit genau einer offenen
+    Temperaturgröße und sonst bekanntem Charakter folgt deren Charakter numerisch:
+    dT = Q/(m*c) -> Differenz; m_2*c*T_2 = m_1*c*T_1 + m_E*c*T_E (T_1, T_E absolut,
+    m_2 = m_1 + m_E) -> absolut. Nur für Gleichungen, die in allen beteiligten Temperaturen
+    linear sind (nicht sigma*T^4, (T_s - T_inf)^(1/4), Stoffwertfunktionen), und nur wenn das
+    Ergebnis genau absolut (1) oder Differenz (0) ist. Generisch, ohne Namen und Gleichungsform.
+    """
+    values, residual = zero_point
+    temps = [n for n in sorted(_names_in(parsed[0]) | _names_in(parsed[1]))
+             if n in known and n in values and known[n].quantity is not None
+             and _is_temp_q(known[n].quantity) and not known[n].literal]
+    if not any(n in free for n in temps):
+        return
+
+    def shifted(amounts):
+        trial = dict(values)
+        for name, amount in amounts.items():
+            trial[name] = values[name] + amount
+        return residual(key, trial)
+
+    step = 1.0
+    base = residual(key, values)
+    if not np.isfinite(base):
+        return
+    for name in temps:
+        d1, d2 = shifted({name: step}) - base, shifted({name: 2 * step}) - base
+        if not (np.isfinite(d1) and np.isfinite(d2)) or d1 == 0:
+            return
+        if abs(d2 - 2 * d1) > 1e-6 * abs(d1):
+            return                       # nicht linear in dieser Temperatur
+    # jede freie Größe der Reihe nach, die übrigen mit ihrem (aktuellen) Charakter
+    for target in temps:
+        if target not in free:
+            continue
+        others = [n for n in temps if n != target]
+        if any(known[n].weight not in (0.0, 1.0) for n in others):
+            continue
+        movers = [n for n in others if known[n].weight == 1.0]
+        a = shifted({name: step for name in movers}) - base if movers else 0.0
+        b = shifted({target: step}) - base
+        w = -a / b
+        for candidate in (0.0, 1.0):
+            if abs(w - candidate) < 1e-6:
+                out[target].append((prio, candidate))
+
+
 def _resolve_temperature_weights(parsed_eqs, all_dims: Dict[str, DimensionInfo],
                                  user_known: Dict[str, DimensionInfo],
                                  max_iterations: int = 50,
                                  products: bool = False,
-                                 integral: bool = True) -> Dict[str, Optional[float]]:
+                                 integral: bool = True,
+                                 zero_point=None, keys=None) -> Dict[str, Optional[float]]:
     """
     Bestimmt für alle Temperatur-Variablen, ob absolut (1) oder Differenz (0).
 
@@ -1735,6 +1787,12 @@ def _resolve_temperature_weights(parsed_eqs, all_dims: Dict[str, DimensionInfo],
                 _weight_candidates(parsed, known, free_set, cands, products, integral)
             except Exception:
                 continue
+        if zero_point is not None and keys is not None:
+            for parsed, key in zip(parsed_eqs, keys):
+                try:
+                    _zero_point_candidates(parsed, key, known, free_set, cands, zero_point, 3.5)
+                except Exception:
+                    continue
         new = dict(current)
         for v in free:
             lst = cands.get(v)
@@ -1763,7 +1821,8 @@ def _temperature_label(weight: Optional[float], undetermined: str) -> str:
 
 
 def _propagate(parsed_eqs, known_units: Dict[str, str], open_temperatures=frozenset(),
-               undetermined: str = 'K', products: bool = False) -> Tuple[Dict[str, str], Dict[str, str]]:
+               undetermined: str = 'K', products: bool = False,
+               zero_point=None, keys=None) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
     Kern der Propagation. Liefert (bekannte Einheiten, abgeleitete Einheiten).
     open_temperatures: bekannte Größen in K, deren Charakter (absolut/Differenz) aus den
@@ -1783,7 +1842,8 @@ def _propagate(parsed_eqs, known_units: Dict[str, str], open_temperatures=frozen
         if v not in user and (v not in inferred or inferred[v].quantity is None):
             inferred[v] = d
     all_dims = {**user, **inferred}
-    weights = _resolve_temperature_weights(parsed_eqs, all_dims, user, products=products)
+    weights = _resolve_temperature_weights(parsed_eqs, all_dims, user, products=products,
+                                           zero_point=zero_point, keys=keys)
     result = {}
     for v, d in inferred.items():
         label = d.unit if d.unit is not None else ''
@@ -2580,7 +2640,8 @@ def infer_units_from_function_arguments(equation: str, known_units: Dict[str, st
 def propagate_all_units_complete(equations: Dict[str, str], known_units: Dict[str, str],
                                   max_iterations: int = 15, open_temperatures=frozenset(),
                                   undetermined_temperature: str = 'K',
-                                  differences_in_products: bool = False) -> Dict[str, str]:
+                                  differences_in_products: bool = False,
+                                  zero_point=None) -> Dict[str, str]:
     """
     Vollständige Einheiten-Propagation mit allen Quellen.
 
@@ -2609,6 +2670,8 @@ def propagate_all_units_complete(equations: Dict[str, str], known_units: Dict[st
         undetermined_temperature: Label für nicht bestimmbaren Charakter
         differences_in_products: Temperatur in einem Produkt ohne Temperatur-Dimension
             als Differenz werten, wo die Summen nichts entscheiden (für die Anzeige)
+        zero_point: (Werte der Lösung in SI, residual(gleichung, werte)) - Nullpunkt-Test
+            für den Temperatur-Charakter (nur Anzeige, `_zero_point_candidates`)
 
     Returns:
         Dict von ALLEN Einheiten (bekannte + abgeleitete). Einheiten sind
@@ -2617,7 +2680,7 @@ def propagate_all_units_complete(equations: Dict[str, str], known_units: Dict[st
     if not PINT_AVAILABLE:
         return known_units.copy()
 
-    parsed_eqs = []
+    parsed_eqs, keys = [], []
     seen = set()
     for parsed_key, original_eq in equations.items():
         source = original_eq if original_eq else parsed_key
@@ -2629,10 +2692,12 @@ def propagate_all_units_complete(equations: Dict[str, str], known_units: Dict[st
             parsed = _parse_equation(parsed_key)
         if parsed is not None:
             parsed_eqs.append(parsed)
+            keys.append(parsed_key)
 
     try:
         _, inferred = _propagate(parsed_eqs, known_units, frozenset(open_temperatures),
-                                 undetermined_temperature, differences_in_products)
+                                 undetermined_temperature, differences_in_products,
+                                 zero_point=zero_point, keys=keys)
     except Exception:
         inferred = {}
 
