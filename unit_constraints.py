@@ -732,6 +732,31 @@ def _special_call_dim(node) -> Optional[DimensionInfo]:
     return None
 
 
+def _same_dimension_result(dims, ctx: _Ctx) -> DimensionInfo:
+    """
+    Ergebnis einer Funktion, deren Argumente alle dieselbe Dimension haben und
+    die eines davon zurückgibt (max, min, Zweige von IF). Zahlenliterale sind
+    dimensionsneutral; bei strenger Prüfung ist eine abweichende Dimension ein Fehler.
+    """
+    nonlit = [d for d in dims if not d.literal]
+    known = [d for d in nonlit if d.quantity is not None]
+    if not known:
+        return DimensionInfo(None)
+    ref = known[0]
+    if ctx.strict:
+        for d in known[1:]:
+            if d.quantity.dimensionality != ref.quantity.dimensionality:
+                raise _DimMismatch()
+    weight = None
+    if len(known) == len(nonlit):
+        ws = {d.weight for d in nonlit}
+        if len(ws) == 1:
+            weight = ws.pop()
+    if len(dims) == 1:
+        return ref
+    return _dim(ref.quantity, weight)
+
+
 def _eval_call(node, ctx: _Ctx) -> DimensionInfo:
     fname = _func_name(node)
     if fname is None:
@@ -772,6 +797,26 @@ def _eval_call(node, ctx: _Ctx) -> DimensionInfo:
             return replace(a, value=abs(a.value))
         return a
 
+    if fname == 'IF':
+        # IF(a, b, x, y, z): a und b werden verglichen (gleiche Dimension), das
+        # Ergebnis hat die Dimension der Zweige x, y, z (wie max/min)
+        if len(args) != 5:
+            return DimensionInfo(None)
+        compared = [d for d in (_eval(a, ctx) for a in args[:2])
+                    if not d.literal and d.quantity is not None]
+        if (ctx.strict and len(compared) == 2
+                and compared[0].quantity.dimensionality != compared[1].quantity.dimensionality):
+            raise _DimMismatch()
+        dims = [_eval(a, ctx) for a in args[2:]]
+        if all(d.literal for d in dims):
+            cmp = [_eval(a, ctx) for a in args[:2]]
+            values = [d.value for d in cmp + dims]
+            if all(d.literal for d in cmp) and None not in values:
+                a, b, x, y, z = values
+                return _literal(x if a < b else (y if a == b else z))
+            return _literal(None)
+        return _same_dimension_result(dims, ctx)
+
     if fname in ('max', 'min'):
         dims = [_eval(a, ctx) for a in args]
         if not dims:
@@ -782,22 +827,7 @@ def _eval_call(node, ctx: _Ctx) -> DimensionInfo:
             if None in vals:
                 return _literal(None)
             return _literal(max(vals) if fname == 'max' else min(vals))
-        known = [d for d in nonlit if d.quantity is not None]
-        if not known:
-            return DimensionInfo(None)
-        ref = known[0]
-        if ctx.strict:
-            for d in known[1:]:
-                if d.quantity.dimensionality != ref.quantity.dimensionality:
-                    raise _DimMismatch()
-        weight = None
-        if len(known) == len(nonlit):
-            ws = {d.weight for d in nonlit}
-            if len(ws) == 1:
-                weight = ws.pop()
-        if len(dims) == 1:
-            return ref
-        return _dim(ref.quantity, weight)
+        return _same_dimension_result(dims, ctx)
 
     # Unbekannte Funktion
     return DimensionInfo(None)
@@ -989,11 +1019,18 @@ def _rev(node, target: DimensionInfo, known, rank: int, out):
         fname = _func_name(node)
         if fname == 'abs' and node.args:
             _rev(node.args[0], target, known, rank, out)
-        elif fname in ('max', 'min'):
-            for a in node.args:
+        elif fname in ('max', 'min') or (fname == 'IF' and len(node.args) == 5):
+            for a in (node.args[2:] if fname == 'IF' else node.args):
                 d, miss = _eval_collect(a, known)
                 if miss and not d.literal:
                     _rev(a, target, known, rank, out)
+            if fname == 'IF':
+                # Verglichene Größen a, b haben dieselbe Dimension
+                (da, ma), (db, mb) = (_eval_collect(a, known) for a in node.args[:2])
+                if ma and not mb and not db.literal and db.quantity is not None:
+                    _rev(node.args[0], db, known, rank, out)
+                elif mb and not ma and not da.literal and da.quantity is not None:
+                    _rev(node.args[1], da, known, rank, out)
         elif fname == 'sqrt' and node.args:
             a, miss = _eval_collect(node.args[0], known)
             try:
@@ -1296,6 +1333,9 @@ def _rev_weight(node, w: float, prio: int, out, known, free: Set[str]):
         elif fname in ('max', 'min'):
             for a in node.args:
                 _rev_weight(a, w, prio, out, known, free)
+        elif fname == 'IF' and len(node.args) == 5:
+            for a in node.args[2:]:
+                _rev_weight(a, w, prio, out, known, free)
 
 
 def _rev_weight_chain(terms, target_w: float, prio: int, out, known, free: Set[str]):
@@ -1421,7 +1461,7 @@ class DimensionInferrer(ast.NodeVisitor):
     - Multiplikation/Division/Potenz: Dimensionen werden verrechnet, symbolische
       Exponenten nur bei dimensionsloser Basis
     - Funktionen: sin, cos, exp, ln ... -> dimensionslos; sqrt -> halbe Dimension;
-      abs/max/min -> Dimension der Argumente; CoolProp/HumidAir/Strahlung -> SI
+      abs/max/min, Zweige von IF -> Dimension der Argumente; CoolProp/HumidAir/Strahlung -> SI
     - 'e' ist eine normale Variable (keine Euler-Konstante), 'pi' eine Zahl
     """
 

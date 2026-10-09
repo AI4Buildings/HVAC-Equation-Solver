@@ -6,7 +6,7 @@ Unterstützte Syntax:
 - Zuweisungen: T1 = 300
 - Vektoren: T = 0:10:100 (start:step:end) oder T = 0:100 (start:end, step=1)
 - Operatoren: +, -, *, /, ^ (Potenz)
-- Funktionen: sin, cos, tan, exp, ln, log10, sqrt, abs, max, min
+- Funktionen: sin, cos, tan, exp, ln, log10, sqrt, abs, max, min, IF(a, b, x, y, z)
 - Thermodynamik: enthalpy(water, T=100, p=1), density(R134a, T=25, x=1)
 - Kommentare: "..." oder {...}
 """
@@ -34,7 +34,7 @@ MATH_FUNCTIONS = {
     'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
     'sinh', 'cosh', 'tanh',
     'exp', 'ln', 'lg', 'log10', 'sqrt', 'abs',
-    'pi', 'max', 'min'
+    'pi', 'max', 'min', 'IF'
 }
 
 # Thermodynamik-Funktionen (CoolProp)
@@ -76,8 +76,14 @@ _KEYWORD_PATTERN = re.compile(r'\b(' + '|'.join(_MANGLED_KEYWORDS) + r')\b')
 _MANGLED_PATTERN = re.compile(r'\b' + KEYWORD_PREFIX + r'(' + '|'.join(_MANGLED_KEYWORDS) + r')\b')
 
 
+# IF( in jeder Schreibweise (if, If, IF) ist die Fallunterscheidung - ein Name
+# direkt vor '(' kann keine Variable sein
+_IF_CALL_PATTERN = re.compile(r'\bif(?=\s*\()', re.IGNORECASE)
+
+
 def mangle_keywords(text: str) -> str:
     """Benennt Python-Schlüsselwörter als Bezeichner um (lambda -> _kw_lambda)."""
+    text = _IF_CALL_PATTERN.sub('IF', text)
     return _KEYWORD_PATTERN.sub(lambda m: KEYWORD_PREFIX + m.group(1), text)
 
 
@@ -89,6 +95,28 @@ def unmangle(text: str) -> str:
 def display_name(name: str) -> str:
     """Anzeigename einer Variable (_kw_lambda -> lambda)."""
     return unmangle(name)
+
+
+def if_function(a, b, x, y, z):
+    """
+    Fallunterscheidung wie in EES: IF(a, b, x, y, z) ist x für a < b, y für
+    a = b und z für a > b. Alle Argumente sind beim Aufruf bereits ausgewertet
+    (wie in EES). Elementweise für Arrays (vektorisierte Parameterstudien).
+    Ist a oder b ungültig (NaN, komplex), ist auch das Ergebnis ungültig -
+    sonst würde stillschweigend der Zweig z gewählt.
+    """
+    def real(v):
+        if np.iscomplexobj(v):
+            return np.where(np.imag(v) == 0, np.real(v), np.nan)
+        return v
+
+    a, b = real(a), real(b)
+    if np.ndim(a) == 0 and np.ndim(b) == 0:
+        if np.isnan(a) or np.isnan(b):
+            return float('nan')
+        return x if a < b else (y if a == b else z)
+    result = np.where(np.less(a, b), x, np.where(np.equal(a, b), y, z))
+    return np.where(np.isnan(a) | np.isnan(b), np.nan, result)
 
 
 def parse_vector(value_str: str) -> Union[np.ndarray, None]:
@@ -592,7 +620,7 @@ def _get_const_eval_context() -> dict:
         'sqrt': np.sqrt, 'log': np.log, 'log10': np.log10,
         'exp': np.exp, 'abs': abs,
         'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,
-        'max': max, 'min': min,
+        'max': max, 'min': min, 'IF': if_function,
     }
 
 
@@ -741,6 +769,12 @@ def _check_call_signature(node, func_name: str, text: str, offset: int) -> None:
         if n_args < 2 or keywords:
             raise EquationSyntaxError(f"{func_name}() erwartet mindestens 2 Argumente, {where}")
         return
+    if func_name == 'IF':
+        if n_args != 5 or keywords:
+            raise EquationSyntaxError(
+                f"IF(a, b, x, y, z) erwartet 5 Argumente (x für a < b, y für a = b, z für a > b), "
+                f"gegeben {n_args}, {where}")
+        return
     if lower in _RADIATION_ARGS:
         if n_args != _RADIATION_ARGS[lower] or keywords:
             raise EquationSyntaxError(
@@ -800,9 +834,10 @@ _UNSUPPORTED_NODES = {
     'List': "Wertelisten [..] nur als eigene Zeile 'x = [v1 v2 ...] Einheit' (Parameterstudie)",
     'Subscript': "Indizes wie x[1] werden nicht unterstützt",
     'Attribute': "Punkt-Zugriff (a.b) ist nicht erlaubt - Dezimalzahlen ohne Ziffer vor dem Punkt? (0.5 statt .5)",
-    'Compare': "Vergleiche (<, >, ==) werden nicht unterstützt (keine Fallunterscheidung)",
+    'Compare': "Vergleiche (<, >, ==) werden nicht unterstützt - Fallunterscheidung mit "
+               "IF(a, b, x, y, z): x für a < b, y für a = b, z für a > b",
     'BoolOp': "Logische Verknüpfungen (and/or) werden nicht unterstützt",
-    'IfExp': "Fallunterscheidungen (if/else) werden nicht unterstützt",
+    'IfExp': "if/else wird nicht unterstützt - Fallunterscheidung mit IF(a, b, x, y, z)",
     'Dict': "Ausdruck { } wird nicht unterstützt - Kommentare in {...} müssen geschlossen sein",
     'Set': "Ausdruck { } wird nicht unterstützt - Kommentare in {...} müssen geschlossen sein",
     'Lambda': "lambda als Funktion ist nicht erlaubt",
@@ -1196,6 +1231,113 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
     all_variables -= set(initial_values.keys())
 
     return equations, all_variables, initial_values, sweep_vars, original_equations, unit_values
+
+
+# ---------------------------------------------------------------------------
+# Startwerte im Blatt: Kommentarblock {$Startwerte ... $} (Solve > Initial Values
+# schreibt ihn, beim Lösen wird er gelesen). Als Kommentar stört er weder das
+# Gleichungssystem noch ältere Programmversionen und bleibt beim Speichern,
+# Kopieren und Weitergeben des Blatts erhalten.
+# ---------------------------------------------------------------------------
+START_VALUES_KEYWORD = '$Startwerte'
+_START_BLOCK_PATTERN = re.compile(r'\{\s*\$\s*Startwerte\b', re.IGNORECASE)
+
+
+def find_start_values_block(text: str) -> Optional[Tuple[int, Optional[int]]]:
+    """
+    Zeichenbereich [start, end) des Startwerte-Blocks einschließlich der
+    Klammern, end = None bei fehlender schließender Klammer. None ohne Block.
+    Gesucht wird nur auf oberster Ebene (nicht in anderen Kommentaren).
+    """
+    if not _START_BLOCK_PATTERN.search(text):
+        return None
+    depth, start, in_quote = 0, None, False
+    for i, char in enumerate(text):
+        if in_quote:
+            in_quote = char != '"'
+        elif char == '"' and depth == 0:
+            in_quote = True
+        elif char == '{':
+            if depth == 0 and _START_BLOCK_PATTERN.match(text, i):
+                start = i
+            depth += 1
+        elif char == '}' and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                return start, i + 1
+    return (start, None) if start is not None else None
+
+
+def parse_start_value(line: str) -> Tuple[str, float]:
+    """
+    Liest einen Startwert 'Name = Wert [Einheit]' (wie eine Zuweisung im Blatt:
+    T_2 = 15 °C, p = 2 bar, x = 0.5). Liefert (interner Name, SI-Wert).
+    """
+    try:
+        equations, _, constants, sweeps, _, _ = _parse_equations(line, True, [0])
+    except (EquationSyntaxError, UnknownUnitError) as exc:
+        raise type(exc)(f"{exc} (Startwert: {line.strip()})") from None
+    if len(constants) != 1 or equations or sweeps:
+        raise EquationSyntaxError(
+            f"Startwert als 'Name = Wert Einheit' angeben (z.B. T_2 = 15 °C), nicht: {line.strip()}")
+    return next(iter(constants.items()))
+
+
+def parse_start_values(text: str) -> Dict[str, float]:
+    """
+    Startwerte aus dem Block {$Startwerte ... $} des Blatts {Name: SI-Wert}.
+    Eine Angabe je Zeile (oder durch ';' getrennt); Fehler mit Zeilennummer.
+    """
+    return {name: value for name, (value, _) in start_value_entries(text).items()}
+
+
+def start_value_entries(text: str) -> Dict[str, Tuple[float, str]]:
+    """Wie parse_start_values, je Name zusätzlich die Angabe im Blatt ('T_2 = 15 °C')."""
+    span = find_start_values_block(text)
+    if span is None:
+        return {}
+    start, end = span
+    first_line = text.count('\n', 0, start) + 1
+    if end is None:
+        raise EquationSyntaxError(
+            f"Zeile {first_line}: Startwerte-Block nicht geschlossen - am Ende '$}}' ergänzen")
+    header = _START_BLOCK_PATTERN.match(text, start)
+    inner = remove_comments(text[header.end():end - 1])
+    inner = re.sub(r'\$\s*$', '', inner)  # '$' vor der schließenden Klammer
+    values = {}
+    for offset, line in enumerate(inner.split('\n')):
+        for part in line.split(';'):
+            if not part.strip():
+                continue
+            try:
+                name, value = parse_start_value(part)
+            except (EquationSyntaxError, UnknownUnitError) as exc:
+                raise type(exc)(f"Zeile {first_line + offset}: {exc}") from None
+            values[name] = (value, part.strip())
+    return values
+
+
+def start_values_edit(text: str, lines: List[str]) -> Tuple[int, int, str]:
+    """
+    Änderung, die den Startwerte-Block durch 'lines' ersetzt: (start, end, neu)
+    = ersetze text[start:end] durch neu. Ohne Zeilen wird der Block entfernt,
+    ohne vorhandenen Block wird er am Ende angehängt.
+    """
+    span = find_start_values_block(text)
+    block = '\n'.join(['{' + START_VALUES_KEYWORD] + lines + ['$}']) if lines else ''
+    if span is None or span[1] is None:
+        if not lines:
+            return len(text), len(text), ''
+        if not text.strip():
+            return 0, len(text), block + '\n'
+        separator = ('' if text.endswith('\n\n') else '\n' if text.endswith('\n') else '\n\n')
+        return len(text), len(text), separator + block + '\n'
+    start, end = span
+    if not lines and not text[end:].strip():
+        # Block am Ende entfernen: auch die Leerzeilen davor
+        before = text[:start].rstrip()
+        return len(before), len(text), '\n' if before else ''
+    return start, end, block
 
 
 def validate_system(equations: List[str], variables: Set[str], constants: Optional[Dict[str, float]] = None) -> Tuple[bool, str]:

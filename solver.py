@@ -13,6 +13,8 @@ from numpy import exp, log, log10, sqrt, pi
 from numpy import sinh, cosh, tanh
 import time as _time
 
+from parser import if_function
+
 # Gesamtzeitlimit eines Lösungslaufs (solve_system): verschachtelte Versuche
 # (Zerlegung, Tearing, simultan, Startvarianten) dürfen sich nicht zu Minuten
 # aufsummieren - die GUI wäre so lange eingefroren.
@@ -251,7 +253,7 @@ def create_equation_function(equations: List[str], variables: List[str],
             'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
             'exp': exp, 'log': log, 'log10': log10,
             'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
-            'max': max, 'min': min
+            'max': max, 'min': min, 'IF': if_function
         })
 
         # Füge Thermodynamik-Funktionen hinzu
@@ -841,7 +843,7 @@ def create_equation_function_with_sweep(
             'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
             'exp': exp, 'log': log, 'log10': log10,
             'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
-            'max': max, 'min': min
+            'max': max, 'min': min, 'IF': if_function
         })
 
         # Füge Thermodynamik-Funktionen hinzu
@@ -878,7 +880,7 @@ def _get_eval_context():
         'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
         'exp': exp, 'log': log, 'log10': log10,
         'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
-        'max': max, 'min': min
+        'max': max, 'min': min, 'IF': if_function
     }
     if THERMO_AVAILABLE:
         context.update(THERMO_FUNCTIONS)

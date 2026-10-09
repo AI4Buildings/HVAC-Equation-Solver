@@ -82,6 +82,16 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - Converts equation syntax to Python: `^` → `**`, `ln` → `log`
 - Comments: `"..."` and `{...}` (auch verschachtelt und mehrzeilig)
 - Dezimalkomma wird als Fehler gemeldet (Punkt verwenden); `·` als Malzeichen; `lg` = `log10`
+- **Fallunterscheidung** `IF(a, b, x, y, z)` wie EES: x für a < b, y für a = b, z für a > b
+  (`parser.if_function`, elementweise für Arrays; NaN/komplexes a oder b -> NaN). Jede
+  Schreibweise `if(`/`If(` wird in `mangle_keywords` zu `IF(` (sonst Python-Schlüsselwort);
+  `if` ohne Klammer bleibt Variablenname. Alle Argumente werden ausgewertet (auch der nicht
+  gewählte Zweig - Division durch null dort ist ein Auswertungsfehler). Einheiten: a, b gleiche
+  Dimension, Ergebnis = Dimension der Zweige (`unit_constraints._same_dimension_result`)
+- **Startwerte im Blatt**: Kommentarblock `{$Startwerte ... $}` (`parser.parse_start_values`,
+  `start_values_edit`). Der Text ist die einzige Quelle: Solve liest den Block, der Dialog
+  Solve > Initial Values schreibt ihn (ein Undo-Schritt; mit Einheit eingegebene Werte bleiben
+  wie geschrieben, reine Zahlen sind SI). Fehler im Block mit Zeilennummer
 - Einheiten-Kehrwerte nach Leerzeichen: `n = 0.3 1/h`, `1/K`, `h^-1`
 - Signaturprüfung beim Einlesen: Fluidname, Eigenschafts-/Parameternamen und
   Argumentanzahl aller Funktionen (enthalpy, HumidAir, Eb, sqrt, max, ...)
@@ -472,7 +482,7 @@ Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahi
    h_berechnet = h_ziel
    ```
 
-4. **Manuelle Startwerte**: Bei sehr speziellen Gleichungssystemen kann der Dialog "Solve → Initial Values..." zur manuellen Anpassung verwendet werden.
+4. **Manuelle Startwerte**: Bei sehr speziellen Gleichungssystemen kann der Dialog "Solve → Initial Values..." zur manuellen Anpassung verwendet werden. Die Werte stehen danach als Block `{$Startwerte ... $}` im Blatt und werden mit der Datei gespeichert.
 
 5. **Mehrdeutige Wurzeln**: Bei mehreren Lösungen wird die dem Startwert nächstgelegene
    gewählt. Ein Startwert kann auch von ähnlich benannten bekannten Variablen kommen
@@ -482,7 +492,7 @@ Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahi
 
 - File: New, Open, Save, Save As (.hes, .txt)
 - View: Schriftgröße 6-36pt (Standard: 16pt)
-- Solve: F5 oder Button, Initial Values Dialog
+- Solve: F5 oder Button, Initial Values Dialog (Werte auch mit Einheit; schreibt den Block `{$Startwerte ... $}` ins Blatt)
 - Zwischenablage: Kopieren/Ausschneiden im Editor schreibt zusätzlich fest in die
   System-Zwischenablage (macOS `pbcopy`, Linux `wl-copy`/`xclip`/`xsel`) - Tk stellt
   Inhalte sonst nur bereit, solange das Programm läuft (nach Neustart wäre er weg)
@@ -498,7 +508,7 @@ Dies vermeidet falsche Offset-Konvertierungen (K → °C würde -273.15 subtrahi
   - New Plot Window: Mehrere Y-Variablen, Labels, Titel, Optionen
   - Quick Plot X-Y: Schneller einfacher Plot
   - **Interaktive Toolbar**: Zoom, Pan, Home, Save (oben im Plot-Fenster)
-- Help: Function Reference (Syntax, Einheiten, Funktionen, Meldungen), Fluid List
+- Help: Function Reference (Syntax, Einheiten, Funktionen inkl. IF, Startwerte, Meldungen), Fluid List
   (aus `thermodynamics.FLUID_ALIASES` und der CoolProp-Fluidliste erzeugt - alle 124 Fluide)
 - Settings: Anzeige-Einheiten (°C/K, bar/Pa, kJ/J, kW/W) wirken sofort auf die Ergebnisse
 - Einheiten werden als °C, °F, µm angezeigt (intern pint-Namen degC, degF, um)

@@ -318,24 +318,36 @@ app.withdraw()
 app.update()
 
 # ---------------------------------------------------------------------------
-print("\n=== #13 Manuelle Startwerte ===")
+print("\n=== #13 Manuelle Startwerte (Block {$Startwerte ... $} im Blatt) ===")
 app.new_file()
-solve("x^2 = 9")
-app.manual_initial_values = {"x": -3.0}
-solve("x^2 = 9")
-check("Manueller Startwert wirkt (x = -3)", abs(app.last_solution["x"] + 3) < 1e-6)
+solve("x^2 = 9\n{$Startwerte\nx = -3\n$}")
+check("Startwert aus dem Block wirkt (x = -3)", abs(app.last_solution["x"] + 3) < 1e-6)
 app.new_file()
 check("New löscht manuelle Startwerte", app.manual_initial_values == {})
 solve("x^2 = 16")
 check("Nach New: Standard-Wurzel x = +4", abs(app.last_solution["x"] - 4) < 1e-6)
+app.manual_initial_values = {"x": -3.0}
+app.solve()
+check("Ohne Block keine Startwerte aus dem Speicher (Text ist die Quelle)",
+      abs(app.last_solution["x"] - 4) < 1e-6 and app.manual_initial_values == {})
 
 app.manual_initial_values = {"x": -3.0}
-_next_open_path[0] = write_file("C.hes", b"x^2 = 16\n")
+_next_open_path[0] = write_file("C.hes", "x^2 = 16\n\n{$Startwerte\nx = -3\n$}\n".encode("utf-8"))
 app.open_file()
-check("Open löscht manuelle Startwerte", app.manual_initial_values == {})
+check("Open löscht manuelle Startwerte des vorigen Blatts", app.manual_initial_values == {})
+app.solve()
+check("Startwert aus der geöffneten Datei wirkt (x = -4)", abs(app.last_solution["x"] + 4) < 1e-6)
+
+# Fehler im Block: Meldung mit Zeilennummer
+MESSAGES.clear()
+solve("x^2 = 9\n{$Startwerte\nx = 2*y\n$}")
+check("Fehler im Startwerte-Block mit Zeilennummer",
+      "Zeile 3" in app.info_label.cget("text") and "Startwert" in app.info_label.cget("text"),
+      app.info_label.cget("text"))
 
 # Dialog: OK ohne Eingabe speichert KEINE grauen Auto-Werte
-solve("T_1 = 20 °C\np = 1 bar\nh_x = 100 kJ/kg\nh_x = enthalpy(water, T=T_x, p=p)")
+SHEET = "T_1 = 20 °C\np = 1 bar\nh_x = 100 kJ/kg\nh_x = enthalpy(water, T=T_x, p=p)"
+solve(SHEET)
 dlg = open_dialog(app.show_initial_values_dialog)
 entries = value_entries(dlg)
 # Auto-Startwert unbekannter Temperatur = Mittel der vorgegebenen Temperaturen (T_1 = 20 °C)
@@ -347,7 +359,7 @@ check("Keine editierbare Einheiten-ComboBox mehr (manual_units entfernt)",
       not any(isinstance(w, ctk.CTkComboBox) for w in all_children(dlg)))
 dialog_button(dlg, "OK").invoke()
 app.update_idletasks()
-check("OK ohne Eingabe speichert nichts", app.manual_initial_values == {},
+check("OK ohne Eingabe speichert nichts", app.manual_initial_values == {} and get_text() == SHEET,
       str(app.manual_initial_values))
 check("Kein manual_units-Attribut", not hasattr(app, "manual_units"))
 
@@ -358,6 +370,12 @@ entry.insert(0, "300")
 dialog_button(dlg, "OK").invoke()
 app.update_idletasks()
 check("Eingetippter Wert wird gespeichert", app.manual_initial_values == {"T_x": 300.0})
+check("Wert steht als Block im Blatt (SI-Wert mit Einheit)",
+      get_text() == SHEET + "\n\n{$Startwerte\nT_x = 300 K\n$}\n", repr(get_text()))
+app.equations_text._textbox.edit_undo()
+check("Undo entfernt den Block in einem Schritt", get_text() == SHEET, repr(get_text()))
+app.equations_text._textbox.edit_redo()
+check("Redo stellt ihn wieder her", "T_x = 300 K" in get_text())
 
 dlg = open_dialog(app.show_initial_values_dialog)
 entry = value_entries(dlg)[0]
@@ -365,13 +383,57 @@ check("Gespeicherter Wert wird wieder angezeigt", entry.get() == "300")
 entry.delete(0, "end")
 entry.insert(0, "abc")
 MESSAGES.clear()
+before = get_text()
 dialog_button(dlg, "OK").invoke()
 app.update_idletasks()
 check("Ungültige Eingabe: Fehler + alte Werte bleiben",
       any(m[0] == "showerror" for m in MESSAGES)
-      and app.manual_initial_values == {"T_x": 300.0})
-dialog_button(dlg, "Cancel").invoke()
+      and app.manual_initial_values == {"T_x": 300.0} and get_text() == before)
+entry.delete(0, "end")
+entry.insert(0, "30 °C")
+dialog_button(dlg, "OK").invoke()
 app.update_idletasks()
+check("Wert mit Einheit: bleibt im Blatt wie eingegeben",
+      abs(app.manual_initial_values["T_x"] - 303.15) < 1e-9
+      and "{$Startwerte\nT_x = 30 °C\n$}" in get_text() and get_text().count("$Startwerte") == 1,
+      repr(get_text()))
+
+# Von Hand geänderter Block wird im Dialog angezeigt und beim Lösen verwendet
+set_text(get_text().replace("T_x = 30 °C", "T_x = 40 °C"))
+dlg = open_dialog(app.show_initial_values_dialog)
+entry = value_entries(dlg)[0]
+check("Von Hand geänderter Block erscheint im Dialog", entry.get() == "313.15", entry.get())
+dialog_button(dlg, "OK").invoke()
+app.update_idletasks()
+check("Unveränderter Wert: Angabe im Blatt bleibt (40 °C)", "T_x = 40 °C" in get_text(), repr(get_text()))
+app.solve()
+check("Lösen mit Startwert-Block", app.last_solution is not None
+      and abs(app.last_solution["T_x"] - 297.0) < 5, str(app.last_solution and app.last_solution.get("T_x")))
+
+dlg = open_dialog(app.show_initial_values_dialog)
+dialog_button(dlg, "Clear All").invoke()
+dialog_button(dlg, "OK").invoke()
+app.update_idletasks()
+check("Alle Werte gelöscht: Block wird entfernt", get_text().rstrip() == SHEET and app.manual_initial_values == {},
+      repr(get_text()))
+
+# Speichern und Öffnen: Block bleibt erhalten
+set_text("x^2 = 25")
+app.solve()
+dlg = open_dialog(app.show_initial_values_dialog)
+entry = value_entries(dlg)[0]
+entry.delete(0, "end")
+entry.insert(0, "-1")
+dialog_button(dlg, "OK").invoke()
+app.update_idletasks()
+_next_save_path[0] = os.path.join(TMP, "startwerte.hes")
+app.save_file_as()
+app.new_file()
+_next_open_path[0] = _next_save_path[0]
+app.open_file()
+app.solve()
+check("Startwert übersteht Speichern + Öffnen (x = -5)",
+      abs(app.last_solution["x"] + 5) < 1e-6, get_text())
 app.manual_initial_values = {}
 
 # ---------------------------------------------------------------------------

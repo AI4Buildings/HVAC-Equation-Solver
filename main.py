@@ -5,6 +5,7 @@ HVAC Equation Solver - Ein EES-ähnlicher Gleichungslöser
 Hauptanwendung mit CustomTkinter GUI.
 """
 
+import math
 import os
 import sys
 
@@ -14,11 +15,12 @@ if sys.platform == 'darwin':
 
 import tkinter as tk
 from tkinter import messagebox, filedialog
-from typing import Optional
+from typing import List, Optional
 
 import customtkinter as ctk
 
-from parser import parse_equations, validate_system, display_name, unmangle
+from parser import (parse_equations, validate_system, display_name, unmangle,
+                    parse_start_values, parse_start_value, start_value_entries, start_values_edit)
 from version import __version__
 from solver import solve_system, solve_parametric, format_solution, SolveAnalysis
 import solver as solver_module
@@ -146,11 +148,59 @@ log10(x), lg(x)             Base 10 logarithm
 sqrt(x)                     Square root
 abs(x)                      Absolute value
 max(a, b), min(a, b)        Maximum / minimum
+IF(a, b, x, y, z)           Case distinction: x if a < b,
+                            y if a = b, z if a > b (see below)
 pi                          Pi constant
 Angles are in degrees. Formulas from the literature that use radians
 (e.g. view factors): atan(x)*pi/180 gives the angle in radians.
-Not available (unlike EES): IF/case distinctions, own functions,
-optimisation (min/max search); use parametric studies instead.
+Not available (unlike EES): own functions, optimisation (min/max
+search); use parametric studies instead.
+
+CASE DISTINCTION - IF:
+----------------------
+IF(a, b, x, y, z) compares a with b (as in EES):
+  a < b  ->  x          a = b  ->  y          a > b  ->  z
+Usable in every equation, nested and in parametric studies.
+Also written if(...) or If(...).
+Examples:
+  Re = 5000
+  Re_krit = 2300
+  Nu = IF(Re, Re_krit, 3.66, 3.66, 0.023*Re^0.8*0.7^0.4)
+                         {laminar below Re_krit, else turbulent}
+  T_1 = 20 °C
+  T_2 = 30 °C
+  T_max = IF(T_1, T_2, T_2, T_2, T_1)       {same as max(T_1, T_2)}
+  eps = 1.1
+  s_1 = IF(eps, 1.065, 0, 1, 1)             {0 below 1.065, else 1}
+  k = 3
+  F = IF(k, 2, 0.13, 0.33, IF(k, 4, 0.56, 0.87, 1.13))
+                         {value from a table: k = 1, 2, 3, 4, >4}
+a and b must have the same unit; x, y and z as well.
+All five arguments are evaluated, also the branch not chosen:
+it must be computable (no division by zero, no CoolProp call
+outside the valid range); sqrt or ^ of a negative number does
+no harm there.
+If a or b is itself unknown (iterated), the equation jumps at
+a = b; if the solver fails, set an initial value (see below).
+Comparisons (<, >, ==) and if/else are not available otherwise.
+
+INITIAL VALUES (Solve > Initial Values):
+----------------------------------------
+Iterated unknowns start from automatic values (by unit; unknown
+temperatures at the mean of the given ones). For equations with
+several solutions (x^2 = 9: +3 or -3) the solver takes the one
+closest to the initial value. Set your own initial values in
+the dialog: in SI (288.15) or with unit (15 °C, 2 bar).
+OK writes them into the sheet as a comment block:
+  {$Startwerte
+  x = -3
+  T_2 = 15 °C
+  $}
+The block is saved with the file and used on every Solve, also
+after opening the file on another computer. It can be edited by
+hand (one value per line or separated by ';'); delete the block
+to go back to the automatic values. Names that are not unknowns
+of the sheet are ignored.
 
 THERMODYNAMIC FUNCTIONS (CoolProp):
 -----------------------------------
@@ -290,6 +340,8 @@ Unterbestimmt  = equations missing (lists the unknowns)
 Überbestimmt / Widersprüchlich = too many or conflicting values
 Abbruch nach Zeitlimit = no solution within 60 s: set initial
   values (Solve > Initial Values) or simplify the system
+Startwert ... / Startwerte-Block = error in {$Startwerte ... $}
+  (line number as for equations)
 ⚠ UNIT WARNINGS (n) and ⓘ HINWEISE (n) above the results are
 clickable and open the details in the Residuals tab.
 """
@@ -1419,6 +1471,9 @@ class EquationSolverApp(ctk.CTk):
         try:
             # Parse Gleichungen mit Einheiten
             equations, variables, initial_values, sweep_vars, original_equations, unit_values = parse_equations(equations_text, parse_units=True)
+            # Startwerte stehen im Blatt (Block {$Startwerte ... $}, von
+            # Solve > Initial Values geschrieben) - der Text ist die einzige Quelle
+            self.manual_initial_values = parse_start_values(equations_text)
 
             self.known_variables = variables.copy()
             self.current_unit_values = unit_values
@@ -2017,6 +2072,13 @@ class EquationSolverApp(ctk.CTk):
         if not self.known_variables:
             messagebox.showinfo("Initial Values", "Please run Solve first to detect variables.")
             return
+        # Aktuellen Stand des Blocks {$Startwerte ... $} lesen (auch von Hand geändert)
+        try:
+            block_entries = start_value_entries(self.equations_text.get("1.0", "end-1c"))
+        except Exception as exc:
+            messagebox.showerror("Initial Values", str(exc))
+            return
+        self.manual_initial_values = {name: value for name, (value, _) in block_entries.items()}
 
         dialog = ctk.CTkToplevel(self)
         dialog.title("Initial Values")
@@ -2027,8 +2089,9 @@ class EquationSolverApp(ctk.CTk):
         # Info
         ctk.CTkLabel(
             dialog,
-            text="Set initial values in SI units (K, Pa, J/kg, ...). Units are auto-detected.\n"
-                 "Grey values are automatic and are not stored; type a value to override.",
+            text="Initial values in SI units (K, Pa, J/kg, ...) or with unit (15 °C, 2 bar).\n"
+                 "Grey values are automatic and are not stored; type a value to override.\n"
+                 "OK writes the values into the sheet as block {$Startwerte ... $} (saved with the file).",
             font=ctk.CTkFont(size=12),
             text_color=COLORS["text_dim"]
         ).pack(pady=10)
@@ -2061,6 +2124,7 @@ class EquationSolverApp(ctk.CTk):
         entries = {}
         units_of = {}     # Einheit je Variable (None = unbekannt)
         auto_texts = {}   # automatisch (grau) eingetragener Text je Variable
+        shown_texts = {}  # angezeigter Text gespeicherter Startwerte (unverändert -> Blockzeile bleibt)
 
         for var in sorted(all_vars):
             row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
@@ -2081,7 +2145,8 @@ class EquationSolverApp(ctk.CTk):
 
             # Bestimme Standardwert
             if var in self.manual_initial_values:
-                entry.insert(0, f"{self.manual_initial_values[var]:.10g}")
+                shown_texts[var] = f"{self.manual_initial_values[var]:.10g}"
+                entry.insert(0, shown_texts[var])
             elif unit is not None:
                 # Zeige automatischen Startwert basierend auf Einheit (grau).
                 # Wird beim OK NICHT als manueller Wert übernommen.
@@ -2120,19 +2185,32 @@ class EquationSolverApp(ctk.CTk):
             # Erst vollständig validieren, dann übernehmen (bei Fehler bleiben
             # die bisherigen Startwerte erhalten)
             new_values = {}
+            lines = []
             for var, entry in entries.items():
                 val_str = entry.get().strip()
                 # Leere Felder und unveränderte automatische (graue) Werte sind
                 # KEINE manuellen Startwerte - sonst würden sie eingefroren
                 if not val_str or val_str == auto_texts.get(var):
                     continue
+                if val_str == shown_texts.get(var) and var in block_entries:
+                    # Unverändert: Angabe im Blatt bleibt wie geschrieben (15 °C)
+                    new_values[var], line = block_entries[var]
+                    lines.append(line)
+                    continue
                 try:
-                    new_values[var] = float(val_str)
-                except ValueError:
-                    messagebox.showerror("Error", f"Invalid value for {var}: '{val_str}'")
+                    _, new_values[var] = parse_start_value(f"{display_name(var)} = {val_str}")
+                except Exception:
+                    messagebox.showerror("Error", f"Invalid value for {display_name(var)}: '{val_str}'")
                     return
+                lines.append(self._start_value_line(var, val_str, new_values[var], units_of.get(var)))
+            # Startwerte im Block für Namen, die gerade nicht im Dialog stehen, bleiben
+            for var, (value, line) in block_entries.items():
+                if var not in entries:
+                    new_values[var] = value
+                    lines.append(line)
 
             self.manual_initial_values = new_values
+            self._write_start_values_block(lines)
             dialog.destroy()
             self.status_label.configure(text=f"{len(self.manual_initial_values)} initial values set")
 
@@ -2157,6 +2235,54 @@ class EquationSolverApp(ctk.CTk):
                      fg_color=COLORS["accent"]).pack(side="left", padx=5)
         ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy).pack(side="right", padx=5)
         ctk.CTkButton(btn_frame, text="OK", command=apply_values).pack(side="right")
+
+    @staticmethod
+    def _start_value_line(var: str, val_str: str, value: float, unit: Optional[str]) -> str:
+        """
+        Zeile im Startwerte-Block: mit Einheit eingetippte Werte bleiben wie
+        eingegeben (15 °C), reine Zahlen sind SI und erhalten die SI-Einheit
+        zur Lesbarkeit - nur wenn sie beim Wiedereinlesen denselben Wert ergibt.
+        """
+        name = display_name(var)
+        try:
+            float(val_str)
+        except ValueError:
+            return f"{name} = {val_str}"
+        if unit:
+            line = f"{name} = {value:.10g} {pretty_unit(unit.replace('delta_K', 'K'))}"
+            try:
+                if math.isclose(parse_start_value(line)[1], value, rel_tol=1e-9, abs_tol=1e-300):
+                    return line
+            except Exception:
+                pass
+        return f"{name} = {value:.10g}"
+
+    def _write_start_values_block(self, lines: List[str]) -> None:
+        """
+        Schreibt den Block {$Startwerte ... $} ins Blatt (ersetzt, ergänzt am Ende
+        oder entfernt ihn) - als EIN Undo-Schritt, der Rest des Texts bleibt unberührt.
+        """
+        text = self.equations_text.get("1.0", "end-1c")
+        start, end, new = start_values_edit(text, lines)
+        if text[start:end] == new:
+            return
+
+        def index(pos: int) -> str:
+            line = text.count('\n', 0, pos) + 1
+            return f"{line}.{pos - (text.rfind(chr(10), 0, pos) + 1)}"
+
+        textbox = self.equations_text._textbox
+        textbox.configure(autoseparators=False)
+        try:
+            textbox.edit_separator()
+            start_index, end_index = index(start), index(end)
+            if end > start:
+                textbox.delete(start_index, end_index)
+            if new:
+                textbox.insert(start_index, new)
+            textbox.edit_separator()
+        finally:
+            textbox.configure(autoseparators=True)
 
     def show_plot_dialog(self, multi: bool = True):
         """

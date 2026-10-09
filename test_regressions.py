@@ -19,7 +19,7 @@ import numpy as np
 warnings.filterwarnings("ignore")
 
 from parser import (parse_equations, parse_vector, remove_comments, tokenize_equation, extract_variables,
-                    display_name)
+                    display_name, if_function, parse_start_values, start_values_edit)
 from solver import solve_system, solve_parametric, _get_equation_unknowns, _find_tear_candidates
 from unit_constraints import analyze_equation, check_equation_dimensions, check_all_unit_consistency
 from units import UnitValue, get_initial_from_unit, detect_unit_from_equation
@@ -770,6 +770,89 @@ check("Keine asymptotische Scheinlösung (lambda_c = 4.10 µm, nicht 1e2 m)",
 eqs, variables, consts, _, orig, _ = parse_equations("Q_3 = 0\nJ_1 = 400\nJ_2 = 300\nQ_3 = 2*(0.4*(J_3 - J_1) + 0.4*(J_3 - J_2))")
 s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
 check("Null-Gleichung mit großen inneren Termen wird akzeptiert", s_ and abs(sol['J_3'] - 350) < 1e-9, msg)
+
+# ---------------------------------------------------------------------------
+print("\n=== Fallunterscheidung IF(a, b, x, y, z) wie EES ===")
+# ---------------------------------------------------------------------------
+check("IF: a < b -> x, a = b -> y, a > b -> z",
+      if_function(1, 2, 10, 20, 30) == 10 and if_function(2, 2, 10, 20, 30) == 20
+      and if_function(3, 2, 10, 20, 30) == 30)
+check("IF: ungültiger Vergleichswert (NaN, komplex) -> ungültiges Ergebnis",
+      np.isnan(if_function(float('nan'), 2, 10, 20, 30)) and np.isnan(if_function(1 + 2j, 2, 10, 20, 30)))
+check("IF: elementweise für Arrays",
+      list(if_function(np.array([1.0, 2.0, 3.0]), 2, 10, 20, 30)) == [10, 20, 30])
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "Re = 5000\nRe_krit = 2300\nNu_lam = 3.66\nNu = IF(Re, Re_krit, Nu_lam, Nu_lam, 0.023*Re^0.8*0.7^0.4)")
+s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("IF in Gleichung (turbulenter Zweig)", s_ and abs(sol['Nu'] - 0.023 * 5000**0.8 * 0.7**0.4) < 1e-9, msg)
+for spelling in ("if", "If", "IF"):
+    eqs, variables, consts, _, _, _ = parse_equations(f"a = 1\nb = {spelling}(a, 2, 3, 4, 5)")
+    s_, sol, _ = solve_system(eqs, variables, constants=consts)
+    check(f"Schreibweise {spelling}( wird erkannt", s_ and sol['b'] == 3)
+eqs, variables, consts, _, _, _ = parse_equations("if = 3\ny = 2*if")
+s_, sol, _ = solve_system(eqs, variables, constants=consts)
+check("'if' ohne Klammer bleibt ein Variablenname", s_ and sol['y'] == 6)
+_, _, consts, _, _, _ = parse_equations("x = IF(2, 3, 10, 20, 30)")
+check("IF in reinem Zahlenausdruck ist eine Konstante", consts.get('x') == 10)
+eqs, variables, consts, sweeps, orig, _ = parse_equations(
+    "Re = 1000:1000:4000\nNu = IF(Re, 2300, 3.66, 3.66, 0.023*Re^0.8)")
+s_, sol, msg = solve_parametric(eqs, variables, sweeps, {}, constants=consts, original_equations=orig)
+check("IF in Parameterstudie (Umschaltung zwischen den Punkten)",
+      s_ and list(np.round(sol['Nu'], 4)) == [3.66, 3.66, round(0.023 * 3000**0.8, 4), round(0.023 * 4000**0.8, 4)],
+      str(sol.get('Nu')))
+eqs, variables, consts, _, orig, _ = parse_equations("y = IF(x, 1, 2*x, 2, x + 1)\ny = 5")
+s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("IF mit iterierter Vergleichsgröße: nur der gültige Zweig ist Lösung",
+      s_ and abs(sol['x'] - 4) < 1e-9, f"{msg} {sol}")
+check("IF mit falscher Argumentzahl -> Meldung",
+      "IF(a, b, x, y, z) erwartet 5 Argumente" in parse_error("a = 1\nb = IF(a, 2, 3, 4)"))
+check("Vergleich ohne IF -> Hinweis auf IF",
+      "IF(a, b, x, y, z)" in parse_error("a = 1\nb = (a < 2)*3"))
+units = propagate_all_units_complete(
+    {'(q_2) - (IF(T_1, T_2, q, 0, 2*q))': 'q_2 = IF(T_1, T_2, q, 0, 2*q)',
+     '(T_m) - (IF(T_1, T_2, T_2, T_2, T_1))': 'T_m = IF(T_1, T_2, T_2, T_2, T_1)'},
+    {'T_1': 'K', 'T_2': 'K', 'q': 'W/m^2'})
+check("Einheit von IF = Einheit der Zweige", units.get('q_2') == 'W/m^2' and units.get('T_m') == 'K', str(units))
+w = check_all_unit_consistency({}, {'(y) - (IF(T_1, p, 1, 2, 3))': 'y = IF(T_1, p, 1, 2, 3)'},
+                               {'T_1': 'K', 'p': 'Pa', 'y': ''})
+check("IF: Vergleich verschiedener Dimensionen -> Einheitenwarnung", len(w) == 1, str(w))
+w = check_all_unit_consistency({}, {'(y) - (IF(T_1, T_2, q, 0, T_1))': 'y = IF(T_1, T_2, q, 0, T_1)'},
+                               {'T_1': 'K', 'T_2': 'K', 'q': 'W/m^2', 'y': 'W/m^2'})
+check("IF: Zweige verschiedener Dimension -> Einheitenwarnung", len(w) == 1, str(w))
+
+# ---------------------------------------------------------------------------
+print("\n=== Startwerte im Blatt {$Startwerte ... $} ===")
+# ---------------------------------------------------------------------------
+SHEET = "x^2 = 9\n{$Startwerte\nx = -3\nT_2 = 15 °C; lambda = 4 µm  {Kommentar}\ndT = 5 °C\n$}\n"
+check("Block wird gelesen (SI, Schlüsselwort-Namen, Temperaturdifferenz)",
+      parse_start_values(SHEET) == {'x': -3.0, 'T_2': 288.15, '_kw_lambda': 4e-06, 'dT': 5.0},
+      str(parse_start_values(SHEET)))
+eqs, variables, _, _, _, _ = parse_equations(SHEET)
+check("Block ist für das Gleichungssystem ein Kommentar", eqs == ['(x**2) - (9)'] and variables == {'x'})
+check("Kein Block -> keine Startwerte", parse_start_values("x^2 = 9\n{Startwerte x = 3}") == {})
+check("Block in einer Zeile", parse_start_values("{$startwerte x = 3 $}") == {'x': 3.0})
+for bad, expected in (("a = 1\n{$Startwerte\nx = 2*y\n$}", "Zeile 3: Startwert als 'Name = Wert Einheit'"),
+                      ("a = 1\n{$Startwerte\nx = 3 qcm\n$}", "Zeile 3:"),
+                      ("a = 1\n{$Startwerte x = 3", "Zeile 2: Startwerte-Block nicht geschlossen")):
+    try:
+        parse_start_values(bad)
+        message = ""
+    except Exception as exc:
+        message = str(exc)
+    check(f"Fehler im Block mit Zeilennummer: {expected[:30]}", message.startswith(expected), message)
+
+
+def apply_edit(text, lines):
+    start, end, new = start_values_edit(text, lines)
+    return text[:start] + new + text[end:]
+
+
+check("Block anhängen (eine Leerzeile davor)",
+      apply_edit("x^2 = 9", ["x = -3"]) == "x^2 = 9\n\n{$Startwerte\nx = -3\n$}\n"
+      and apply_edit("x^2 = 9\n\n", ["x = -3"]) == "x^2 = 9\n\n{$Startwerte\nx = -3\n$}\n")
+check("Block ersetzen (Rest unverändert)",
+      apply_edit("a = 1\n{$Startwerte\nx = 1\n$}\nb = 2", ["x = 5"]) == "a = 1\n{$Startwerte\nx = 5\n$}\nb = 2")
+check("Block entfernen", apply_edit("x^2 = 9\n\n{$Startwerte\nx = -3\n$}\n", []) == "x^2 = 9\n")
 
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")

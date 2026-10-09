@@ -14,6 +14,8 @@ Equation solver for teaching and rapid calculation of thermodynamic state change
 - **Blackbody Radiation**: Planck's radiation functions (`Eb`, `Blackbody`, `Wien`, `Stefan_Boltzmann`)
 - **Robust Solver**: Block decomposition with bracket search and Brent's method
 - **Parameter Studies**: Simple sweep syntax (`p = 25:5:50 bar`) and value lists for measured data (`T = [20 25 31] °C`)
+- **Case Distinction**: `IF(a, b, x, y, z)` as in EES (`Nu = IF(Re, 2300, Nu_lam, Nu_turb, Nu_turb)`)
+- **Initial Values in the Sheet**: saved with the file as block `{$Startwerte ... $}`
 - **Unit System**: Automatic unit parsing, propagation and consistency checking
 - **GUI**: Modern CustomTkinter interface with plotting capabilities
 - **Temperature Display**: Configurable display in °C or K (Settings)
@@ -170,6 +172,33 @@ Values are separated by spaces, tabs, line breaks, `;` or `,` (decimal point).
 A column copied from Excel/CSV/TXT can be pasted between `[` and `]`.
 Several lists are combined point by point.
 
+### Case Distinction (IF)
+
+```
+Re_krit = 2300
+Nu = IF(Re, Re_krit, Nu_lam, Nu_turb, Nu_turb)   {laminar below Re_krit}
+```
+
+`IF(a, b, x, y, z)` returns `x` for `a < b`, `y` for `a = b` and `z` for `a > b`
+(as in EES; also `if(...)`). It can be nested and used in parameter studies. `a`, `b`
+and `x`, `y`, `z` must have the same unit. All arguments are evaluated - the branch
+not chosen must be computable too (no division by zero).
+
+### Initial Values in the Sheet
+
+For equations with several solutions the solver takes the one closest to the
+initial value. *Solve → Initial Values* writes your own values (SI or with unit)
+into the sheet as a comment block, which is saved with the file:
+
+```
+x^2 = 9
+{$Startwerte
+x = -3
+$}
+```
+
+The block can also be edited by hand; deleting it restores the automatic values.
+
 ## Steam Power Cycle Example
 
 ```
@@ -280,7 +309,7 @@ Output: `T`, `h`, `rh`, `w`, `p_w`, `rho_tot`, `rho_a`, `rho_w`, `T_dp`, `T_wb`
 Input: `T`, `p_tot`, `rh`, `w`, `p_w`, `h`
 
 ### Mathematics
-`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log10`, `sqrt`, `abs`, `pi`
+`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log10`, `lg`, `sqrt`, `abs`, `max`, `min`, `IF`, `pi`
 
 ### Radiation
 `Eb`, `Blackbody`, `Blackbody_cumulative`, `Wien`, `Stefan_Boltzmann`
