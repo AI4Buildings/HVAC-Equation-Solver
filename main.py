@@ -7,6 +7,7 @@ Hauptanwendung mit CustomTkinter GUI.
 
 import math
 import os
+import re
 import sys
 
 # Unterdrücke macOS-spezifische Warnungen
@@ -44,7 +45,7 @@ except ImportError:
 # Versuche Constraint-Propagation zu laden
 try:
     from unit_constraints import (propagate_all_units, check_all_unit_consistency, propagate_all_units_complete,
-                                  temperature_sum_conflicts, scale_origin,
+                                  temperature_sum_conflicts, scale_origin, numeric_value_form,
                                   missing_unit_annotations, scale_offset_literals, si_number_literals)
     CONSTRAINT_PROPAGATION_AVAILABLE = True
 except ImportError:
@@ -402,10 +403,16 @@ in K (the unit selector converts them without offset).
 Values entered in K whose meaning cannot be decided are shown
 as entered (K). T only in p*v = R*T (product): shown in K -
 the value in K is right either way.
-Sums of absolute temperatures (T_3 = T_1 + T_2) are neither a
-temperature nor a difference. They are calculated in Kelvin like
-everything else (20 °C + 40 °C = 606.3 K = 333.15 °C) and reported
-under ⓘ HINWEISE - usually a difference was entered in °C.
+A SUM of absolute temperatures (T_3 = T_1 + T_2) is neither a
+temperature nor a difference - the result would depend on the
+zero point of the scale (20 °C + 40 °C: 60 °C as Celsius numbers,
+333.15 °C as Kelvin values). This is an error; write the intended
+calculation (the message offers it):
+  x = 10 K                    {a difference: in K}
+  value(T_3, °C) = value(T_1, °C) + value(T_2, °C)  {60 °C}
+  value(T_3, K) = value(T_1, K) + value(T_2, K)     {Kelvin}
+A temperature with a factor is a law in Kelvin (ratio scale):
+  T_2 = T_1*(p_2/p_1)^0.286, T_2 = 2*T_1, EER*(T_c - T_0) = T_0
 
 TEMPERATURE SCALE - IMPORTANT:
 ------------------------------
@@ -1746,8 +1753,11 @@ class EquationSolverApp(ctk.CTk):
                         f"'{unmangle(remove_comments(source)).strip()}': Die Wellenlänge {number:g} ohne "
                         f"Einheit gilt als {number:g} m = {number * 1e6:g} µm - Zahlen ohne Einheit sind "
                         f"SI-Werte. Wellenlängen in µm mit Einheit angeben (z.B. {number:g} µm)")
-                temperature_hints += self._celsius_difference_hints(
-                    original_equations, known_units, open_k, celsius, unit_values)
+                # Summe von Temperaturpunkten ohne festgelegten Ursprung (T_3 = T_1 + T_2): Fehler
+                point_sums = self._point_sum_errors(original_equations, known_units, open_k,
+                                                    unit_values, all_units, equations_text)
+                if point_sums:
+                    raise ValueError("\n\n".join(point_sums))
 
                 # Leite Startwerte aus Einheiten ab (nur für Variablen ohne manuellen Startwert)
                 # Vorgaben inkl. Sweep-/Listenwerte (erster Punkt) für das Temperatur-Mittel
@@ -2004,31 +2014,44 @@ class EquationSolverApp(ctk.CTk):
         return hints
 
     @staticmethod
-    def _celsius_difference_hints(original_equations, known_units, open_k, celsius, unit_values):
+    def _point_sum_errors(original_equations, known_units, open_k, unit_values, all_units, text):
         """
-        Hinweise für Gleichungen, in denen in °C/°F angegebene Werte (absolute
-        Temperaturen) so addiert werden, dass weder Temperatur noch Differenz
-        herauskommt - meist eine Temperaturdifferenz in °C (T_2 = T_1 + x, x = 10 °C).
+        Summen von Temperaturpunkten (absoluten Temperaturen), die weder Punkt noch Differenz
+        ergeben - Koeffizientensumme weder 1 noch 0 (T_3 = T_1 + T_2, eine Differenz in °C
+        angegeben). Ohne festgelegten Ursprung keine zulässige Operation: das Ergebnis hängt vom
+        Nullpunkt der Skala ab (30 °C + 20 °C: als °C-Zahlenwerte 50 °C, als Kelvin-Werte
+        323.15 °C). Daher keine Lösung, sondern eine Meldung mit den eindeutigen Schreibweisen
+        (value() legt den Ursprung fest); gerechnet wird weiterhin immer in Kelvin.
         """
-        if not celsius:
-            return []
         try:
             conflicts = temperature_sum_conflicts(original_equations, known_units, open_k)
         except Exception:
             return []
-        hints = []
-        for equation, names in conflicts:
-            given = [display_name(n) for n in names if n in celsius]
-            if not given:
-                continue
-            units = sorted({pretty_unit(unit_values[n].original_unit) for n in names if n in celsius})
-            hints.append(
-                f"'{unmangle(equation)}': {', '.join(given)} in {'/'.join(units)} angegeben, also "
-                f"absolute Temperatur(en) - so kombiniert ergibt sich weder eine Temperatur noch "
-                f"eine Temperaturdifferenz (gerechnet wird in Kelvin). Ist ein Wert eine "
-                f"Temperaturdifferenz? Temperaturdifferenzen in K angeben (z.B. 10 K statt 10 °C); "
-                f"Formeln für Zahlenwerte in °C mit value()/quantity() schreiben")
-        return hints
+        if not conflicts:
+            return []
+        from diagnostics import _source_line_numbers
+        lines = _source_line_numbers(original_equations, text)
+        line_of = {(original or parsed): lines.get(parsed) for parsed, original in original_equations.items()}
+        messages = []
+        for source, _ in conflicts:
+            code = remove_comments(source)
+            names = dict.fromkeys(re.findall(r'(?<![\w.])[A-Za-z_]\w*', code))
+            points = [n for n in names if (all_units.get(n) or known_units.get(n)) == 'K']
+            scales = {pretty_unit(unit_values[n].original_unit) for n in points
+                      if n in unit_values and scale_origin(unit_values[n].original_unit)}
+            scale = scales.pop() if len(scales) == 1 else '°C'
+            line = line_of.get(source)
+            forms = []
+            for label, unit in ((f"{scale}-Zahlenwerte", scale), ("Kelvin-Werte", 'K')):
+                form = numeric_value_form(source, points, unit)
+                forms.append(f"  - {label}: {unmangle(form) if form else f'mit value(x, {unit}) schreiben'}")
+            messages.append(
+                f"{f'Zeile {line}: ' if line else ''}'{unmangle(code).strip()}' - Kombination absoluter "
+                f"Temperaturen ({', '.join(display_name(n) for n in points)}), die weder eine Temperatur "
+                f"(wie ein Mittelwert) noch eine Temperaturdifferenz ergibt: das Ergebnis hinge vom "
+                f"Nullpunkt der Skala ab. Gemeinte Rechnung angeben:\n"
+                f"  - Differenz: in K eingeben (10 K statt 10 °C)\n" + "\n".join(forms))
+        return messages
 
     def _assign_result_units(self, solution: dict, original_equations: dict, unit_values: dict,
                              constants: dict):
@@ -2387,8 +2410,8 @@ class EquationSolverApp(ctk.CTk):
         message = unmangle(message or "")  # _kw_lambda -> lambda
         self.result_status_label.configure(text=status_text,
                                            text_color=status_color or COLORS["error"])
-        if len(message) > 300:
-            message = message[:297] + "..."
+        if len(message) > 1000:
+            message = message[:997] + "..."
         self.info_label.configure(text=message, text_color=COLORS["error"], wraplength=420)
 
     def _clear_last_solution(self):

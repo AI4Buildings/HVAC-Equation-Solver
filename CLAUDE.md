@@ -495,7 +495,7 @@ Früher wurden sie nach Radiant (pint-Basis) umgerechnet und dann als Grad geles
 - `_collect_additive_terms()`: Sammelt alle Terme aus +/- Ketten (ignoriert numerische Konstanten)
 - `_infer_from_mult_div()`: Rückwärts-Inferenz für Multiplikation/Division
 - `temperature_sum_conflicts()`: Summen von Temperaturen, die mit keinem Charakter (absolut 1 /
-  Differenz 0) aufgehen - typisch eine Differenz in °C angegeben (Hinweis in der GUI)
+  Differenz 0) aufgehen - typisch eine Differenz in °C angegeben (GUI: Fehler, `_point_sum_errors`)
 
 ### Einheiten-Syntax
 
@@ -629,13 +629,18 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
 - Zahl ohne Einheit in einer Summe mit einer in einer Nicht-SI-Einheit eingegebenen Größe
   (`24/(24 - t_S)` mit t_S = 2 h -> 24 s; `si_number_literals`, ohne Temperaturen, dimensionslose
   Summen und 0) -> Hinweis "ⓘ" (die Zahl ist ein SI-Wert)
-- Widerspruch (`temperature_sum_conflicts`): Werte in °C so addiert, dass weder Temperatur
-  noch Differenz herauskommt (`T_2 = T_1 + x`, `x = 10 °C`) -> Hinweis "ⓘ HINWEISE"
 - **Gerechnet wird IMMER in Kelvin** - keine Regel rechnet eine Gleichung auf einer anderen
-  Skala oder deutet Zahlen nach dem Zusammenhang um (allgemeingültig). Auch eine Summe absoluter
-  Temperaturen (T_3 = T_1 + T_2: 20 °C + 40 °C = 606.3 K = 333.15 °C) wird in Kelvin gerechnet,
-  dazu der Hinweis aus `temperature_sum_conflicts`. Kein Hinweis für "Differenz mal Größe"
-  (`EER_C*(T_c - T_0) = T_0`, aus EER_C = T_0/(T_c - T_0) ausmultipliziert; `_kelvin_law_term`)
+  Skala oder deutet Zahlen nach dem Zusammenhang um (allgemeingültig).
+- **Summe von Temperaturpunkten ohne festgelegten Ursprung ist ein Fehler** (affines Modell, Punkte
+  und Differenzen wie mp-units/pint): Summanden mit Faktor ±1, deren Koeffizientensumme weder 1
+  (Punkt: Mittelwert, 2*T_2 - T_1) noch 0 (Differenz) ist (`temperature_sum_conflicts`):
+  T_3 = T_1 + T_2 hinge vom Nullpunkt ab (°C-Zahlenwerte 60 °C, Kelvin-Werte 333.15 °C) ->
+  `main._point_sum_errors`: keine Lösung, Meldung mit Zeile und den eindeutigen Schreibweisen
+  (`unit_constraints.numeric_value_form`: `value(T_3, °C) = value(T_1, °C) + value(T_2, °C)` bzw.
+  in K; value() legt den Ursprung fest). Ebenso eine Differenz in °C (`x = 10 °C`, T_2 = T_1 + x).
+  Summanden, die eine Temperatur skalieren (`T_1*(p_2/p_1)^0.286`, `2*T_1`, `T_1*r`,
+  `EER_C*(T_c - T_0) = T_0`; `_kelvin_law_term`), sind Gesetze auf der Verhältnisskala Kelvin
+  (Festlegung der Eingabesprache) und werden nicht geprüft
 - Anzeige: Differenzen in K (`pretty_unit('delta_K')` = 'K', DIN 1345 / ISO 80000-5; die
   Einheiten-Auswahl rechnet sie ohne Offset in °C/°F um), absolute Temperaturen nach
   Settings (°C/K)

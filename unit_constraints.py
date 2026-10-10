@@ -1957,9 +1957,12 @@ def temperature_sum_conflicts(equations: Dict[str, str], known_units: Dict[str, 
     """
     Gleichungen, in denen Temperaturen so addiert/subtrahiert werden, dass weder eine
     absolute Temperatur noch eine Differenz herauskommt - jede Temperaturgröße ist
-    absolut (1) oder Differenz (0), und die Summe geht mit keiner Belegung auf.
-    Typisch: eine Temperaturdifferenz in °C angegeben (T_2 = T_1 + x mit x = 10 °C,
-    also 283.15 K). Generisch aus der Struktur, ohne Namen.
+    absolut (1, Punkt) oder Differenz (0), und die Summe geht mit keiner Belegung auf
+    (Koeffizientensumme weder 1 noch 0: T_3 = T_1 + T_2). Typisch: eine Temperaturdifferenz
+    in °C angegeben (T_2 = T_1 + x mit x = 10 °C, also 283.15 K). Ohne festgelegten Ursprung
+    keine zulässige Operation (main: Fehler). Summanden, die eine Temperatur skalieren
+    (T_1*r, 2*T_1, EER*(T_c - T_0)), sind Gesetze in Kelvin und werden nicht geprüft.
+    Generisch aus der Struktur, ohne Namen.
 
     Returns:
         [(Originalgleichung, Temperaturgrößen der Summe mit festem Charakter), ...]
@@ -1992,6 +1995,13 @@ def temperature_sum_conflicts(equations: Dict[str, str], known_units: Dict[str, 
             continue
         if any(not d.literal and _kelvin_law_term(n, known) for _, n, d in evals):
             continue
+        # Summand, der eine Temperatur skaliert (T_1*5^0.286, 2*T_1; Gewicht weder 0 noch 1): Gesetz
+        # auf der Verhältnisskala Kelvin (Isentrope, Gasgesetz - Festlegung der Eingabesprache);
+        # geprüft werden Summen von Temperaturpunkten und Differenzen mit Faktor ±1
+        if any(not isinstance(n, ast.Name) and not d.literal and d.quantity is not None
+               and _is_temp_q(d.quantity) and d.weight is not None and d.weight not in (0.0, 1.0)
+               for _, n, d in evals):
+            continue
         # offen: unbestimmt oder ein Gewicht, das weder absolut (1) noch Differenz (0) ist
         # (z.B. 2 = Summe zweier absoluter Temperaturen) - muss hier aufgehen
         open_names = [(s, n.id) for s, n, d in evals
@@ -2008,6 +2018,37 @@ def temperature_sum_conflicts(equations: Dict[str, str], known_units: Dict[str, 
                      and d.quantity is not None and _is_temp_q(d.quantity)]
             conflicts.append((source, fixed))
     return conflicts
+
+
+def numeric_value_form(equation: str, names, unit: str) -> Optional[str]:
+    """
+    Dieselbe Gleichung als Zahlenwertgleichung in 'unit': jede der Größen 'names' wird durch
+    value(x, unit) ersetzt - damit ist der Ursprung der Skala festgelegt (eindeutig auf jeder
+    Skala, unabhängig von der Eingabe in °C, °F oder K):
+    T3 = T1 + T2 -> value(T3, °C) = value(T1, °C) + value(T2, °C) (50 °C bei 30 °C und 20 °C).
+    """
+    import copy
+    parsed = _parse_equation(equation)
+    if parsed is None:
+        return None
+    names = set(names)
+
+    class _Wrap(ast.NodeTransformer):
+        def visit_Call(self, node):
+            # Funktionsargumente bleiben Größen (enthalpy(water, T=T_1) braucht eine Temperatur)
+            return node
+
+        def visit_Name(self, node):
+            if node.id in names:
+                return ast.Call(func=ast.Name(id='value', ctx=ast.Load()),
+                                args=[node, ast.Name(id='__UNIT__', ctx=ast.Load())], keywords=[])
+            return node
+
+    try:
+        sides = [ast.unparse(ast.fix_missing_locations(_Wrap().visit(copy.deepcopy(side)))) for side in parsed]
+    except Exception:
+        return None
+    return ' = '.join(sides).replace('**', '^').replace('__UNIT__', unit)
 
 
 def missing_unit_annotations(equations: Dict[str, str], known_units: Dict[str, str],

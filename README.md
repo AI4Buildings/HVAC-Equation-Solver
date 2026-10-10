@@ -339,8 +339,12 @@ shift of the temperature zero point (absolute temperatures shift, differences do
 `dT = Q/(m*c)` or `dT = q*R` is a difference, a mixing temperature
 `m_3*T_3 = m_1*T_1 + m_2*T_2` with `m_3 = m_1 + m_2` is absolute. Absolute temperatures are
 shown in °C (Settings), differences in K. Temperatures are always calculated in Kelvin, without
-exception: a sum of absolute temperatures (`T_1 = 20 °C`, `T_2 = 40 °C`, `T_3 = T_1 + T_2`) gives
-606.3 K = 333.15 °C and a hint (ⓘ) - neither a temperature nor a difference.
+exception. A sum of absolute temperatures (`T_1 = 20 °C`, `T_2 = 40 °C`, `T_3 = T_1 + T_2`) is
+neither a temperature nor a difference - its value would depend on the zero point of the scale
+(60 °C as Celsius numbers, 333.15 °C as Kelvin values) - and is reported as an error together
+with the unambiguous forms `value(T_3, °C) = value(T_1, °C) + value(T_2, °C)` and
+`value(T_3, K) = value(T_1, K) + value(T_2, K)`. A temperature with a factor
+(`T_2 = T_1*(p_2/p_1)^0.286`, `2*T_1`) is a law in Kelvin.
 
 Numeric-value equations (formulas that only hold for numbers in certain units, such as a
 heating curve in °C) use `value(x, unit)` and `quantity(z, unit)`:

@@ -142,6 +142,10 @@ for text, expected in (("T_1 = 20 °C\nx = 10 °C\nT_2 = T_1 + x", 1), ("T_1 = 2
                        ("T_1 = 20 °C\nT_2 = 40 °C\nT_3 = T_2 + T_1", 1),
                        ("T_1 = 68 °F\nT_2 = 104 °F\nT_3 = T_2 + T_1", 1),
                        ("T_1 = 20 °C\nT_2 = 40 °C\nT_3 = T_2 + T_1 + 2*abs(T_2 - T_1)", 1),
+                       # Summand skaliert eine Temperatur: Gesetz in Kelvin (Isentrope), keine Prüfung
+                       ("T_1 = 20 °C\nT_2 = T_1*5^0.286", 0), ("T_1 = 20 °C\nT_3 = 2*T_1", 0),
+                       ("T_1 = 20 °C\nT_2 = 40 °C\nT_m = (T_1 + T_2)/2", 0),
+                       ("T_1 = 20 °C\nT_2 = 40 °C\nT_e = 2*T_2 - T_1", 0),
                        ("T_1 = 20 °C\nT_2 = 40 °C\nT_m = (T_1 + T_2)/2\ntheta = T_2 - T_1", 0),
                        ("T_1 = 20 °C\nr = 1.2\nT_2 = T_1*r", 0),
                        ("T_1 = 300 K\nT_2 = 400 K\nT_3 = T_1 + T_2", 0),
@@ -865,6 +869,14 @@ check("Wellenlänge: Literal 5e-6, 5 µm und L = 5 µm gleich",
 eqs, variables, consts, _, orig, _ = parse_equations("E = Eb(1000, 5)")
 sol = solve_system(eqs, variables, constants=consts, original_equations=orig)[1]
 check("Wellenlänge als Zahl ohne Einheit = m (Eb(1000, 5) sind 5 m)", sol['E'] < 1e-10, str(sol))
+from unit_constraints import numeric_value_form
+for text, names, unit, expected in (
+        ("T3=T1+T2", ['T1', 'T2', 'T3'], '°C', "value(T3, °C) = value(T1, °C) + value(T2, °C)"),
+        ("T1 + T2 - T3 = 0 {Kommentar}", ['T1', 'T2', 'T3'], 'K', "value(T1, K) + value(T2, K) - value(T3, K) = 0"),
+        ("y = T1 + enthalpy(water, T=T1, p=p)", ['T1', 'y'], '°F',
+         "value(y, °F) = value(T1, °F) + enthalpy(water, T=T1, p=p)")):
+    check(f"Zahlenwert-Schreibweise: {text} -> {expected}", numeric_value_form(text, names, unit) == expected,
+          str(numeric_value_form(text, names, unit)))
 from parser import wavelength_literals
 for text, expected in (("E = Eb(1000, 5)", [5.0]), ("E = Eb(1000, 5 µm)", []), ("E = Eb(1000, L)", []),
                        ("f = Blackbody(T, 0.38, 0.75 µm) {Kommentar 3}", [0.38]),

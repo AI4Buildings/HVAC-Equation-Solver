@@ -284,7 +284,7 @@ if sys.platform == "darwin":
     check("Nach Neustart einfügbar", pasted == "A = 20 cm² ⋅ µm", repr(pasted))
 
 # Messdaten-Spalte (z.B. aus Excel/TXT kopiert) in eine Werteliste einfügen und lösen
-set_text("T = [\n] °C\ny = 2*T")
+set_text("T = [\n] °C\nT_u = 10 °C\ny = 2*(T - T_u)")
 tb.focus_force()
 app.clipboard_clear()
 app.clipboard_append("20\r\n25\r\n30\r\n")
@@ -588,9 +588,10 @@ for diff, out in (("dT", "T_2"), ("a", "b")):
     check(f"Differenz in K ({diff}): {diff} = 10 K, {out} = 30 °C",
           shown(diff) == (10.0, "K") and shown(out) == (30.0, "°C"), f"{shown(diff)} {shown(out)}")
 solve("T_1 = 20 °C\nx = 10 °C\nT_2 = T_1 + x")
-check("Zwei Werte in °C addiert -> in Kelvin gerechnet (303.15 °C) + Hinweis",
-      close(shown("T_2")[0], 303.15) and shown("T_2")[1] == "°C" and app.hints_label.cget("text") == "ⓘ HINWEISE (1)"
-      and "gerechnet wird in Kelvin" in app.last_analysis.hints[0], f"{shown('T_2')} {app.hints_label.cget('text')}")
+info = app.info_label.cget("text")
+check("Differenz in °C (x = 10 °C) -> Fehler mit Zeile und Abhilfe, keine Lösung",
+      "ERROR" in app.result_status_label.cget("text") and app.last_solution is None
+      and info.startswith("Zeile 3: 'T_2 = T_1 + x'") and "in K eingeben" in info, info)
 solve("Q = 41.9 kW\nm = 1 kg/s\nc = 4.19 kJ/(kg*K)\nQ = m*c*theta")
 check("Temperatur im Produkt ohne Temperatur-Dimension = Differenz: theta = 10 K", shown("theta") == (10.0, "K"),
       str(shown("theta")))
@@ -600,15 +601,35 @@ check("T1 = T2 + x mit T1, T2 in °C: x = -10 K", shown("x") == (-10.0, "K"), st
 for order, expected in (("T1-T2", 75.0), ("T2-T1", 85.0)):
     solve(f"T1=80°C\nQ_dot=20kW\nm_dot=1 kg/s\nc=4 kJ/kgK\nQ_dot=m_dot*c*({order})")
     check(f"Q = m*c*({order}) mit T1 = 80 °C: T2 = {expected} °C", shown("T2") == (expected, "°C"), str(shown("T2")))
-# Temperaturen immer in Kelvin - auch Summen absoluter Temperaturen (nur Hinweis), keine Skalen-Regel
-for text, name, expected, hints in (("T_1=20°C\nT_2=40°C\n\n\nT_3=T_2+T_1", "T_3", 333.15, 1),
-                                    ("T_1=20°C\nT_2=40°C\nT_3=T_2+T_1\nT_4=T_3+T_1", "T_4", 626.3, 1),
-                                    ("T_1 = 20 °C\nT_2 = 40 °C\nT_m = (T_1 + T_2)/2", "T_m", 30.0, 0)):
+# Kombination absoluter Temperaturen, die weder Temperatur noch Differenz ergibt (Koeffizientensumme
+# nicht 1 oder 0): ohne festgelegten Ursprung keine zulässige Operation -> Fehler mit den eindeutigen
+# Schreibweisen (value() legt den Ursprung fest). Gerechnet wird immer in Kelvin, keine Skalen-Regel
+for text, line in (("T_1=20°C\nT_2=40°C\n\n\nT_3=T_2+T_1", 5), ("T_1 = 20 °C\nT_2 = 40 °C\nT_1 + T_2 - T_3 = 0", 3),
+                   ("T_1 = 20 °C\nT_2 = 40 °C\nT_3 = T_2 + T_1 + 2*abs(T_2 - T_1)", 3)):
     solve(text)
-    v, u = shown(name)
-    n_hints = len(app.last_analysis.hints) if app.last_analysis else 0
-    check(f"Summe absoluter Temperaturen in Kelvin: {name} = {expected} °C, {hints} Hinweis(e)",
-          close(v, expected) and u == "°C" and n_hints == hints, f"{(v, u)} {n_hints}")
+    info = app.info_label.cget("text")
+    check(f"Kombination absoluter Temperaturen -> Fehler: {text.splitlines()[-1]}",
+          "ERROR" in app.result_status_label.cget("text") and app.last_solution is None
+          and info.startswith(f"Zeile {line}:") and "value(T_3, °C)" in info and "value(T_3, K)" in info, info)
+solve("T_1=20°C\nT_2=40°C\nT_3=T_2+T_1")
+forms = [line.split(": ", 1)[1] for line in app.info_label.cget("text").splitlines() if "Zahlenwerte" in line or "Kelvin-Werte" in line]
+for form, expected in zip(forms, (60.0, 333.15)):
+    solve(f"T_1=20°C\nT_2=40°C\n{form}")
+    check(f"Vorgeschlagene Schreibweise löst eindeutig: {form} -> T_3 = {expected} °C",
+          close(shown("T_3")[0], expected) and shown("T_3")[1] == "°C", str(shown("T_3")))
+check("Zwei Schreibweisen vorgeschlagen (°C-Zahlenwerte, Kelvin-Werte)", len(forms) == 2, str(forms))
+# Summand, der eine Temperatur skaliert: Gesetz auf der Kelvin-Skala (Festlegung), kein Fehler
+for text, name, expected in (("T_1 = 20 °C\nT_3 = 2*T_1", "T_3", 313.15),
+                             ("T_1 = 20 °C\nr = 1.5\nT_3 = T_1*r", "T_3", 166.575)):
+    solve(text)
+    check(f"Temperatur mit Faktor in Kelvin: {text.splitlines()[-1]} -> {name} = {expected} °C",
+          app.last_solution is not None and close(shown(name)[0], expected), str(shown(name)))
+for text, name, expected in (("T_1 = 20 °C\nT_2 = 40 °C\nT_m = (T_1 + T_2)/2", "T_m", 30.0),
+                             ("T_1 = 20 °C\nT_2 = 40 °C\nT_e = 2*T_2 - T_1", "T_e", 60.0),
+                             ("T_1 = 20 °C\nT_2 = 40 °C\nT_4 = 10 °C\nT_m = (T_1 + T_2 + T_4)/3", "T_m", 23.3333)):
+    solve(text)
+    check(f"Affine Kombination (Koeffizientensumme 1) ist eine Temperatur: {name} = {expected} °C",
+          close(shown(name)[0], expected) and shown(name)[1] == "°C", str(shown(name)))
 solve("T_a = -5 °C\nT_VL = quantity(20 + 1.5*(20 - value(T_a, °C)), °C)")
 check("Zahlenwertgleichung (Heizkurve in °C): T_VL = 57.5 °C", shown("T_VL") == (57.5, "°C"), str(shown("T_VL")))
 solve("L_0 = 5 m\nn = 0.4\ny = L_0^n\nq = 2*y")
