@@ -463,6 +463,8 @@ check("Hilfe nennt [Pa] und [J/kg]",
 check("Keine Beispiele mit p=1 / p_tot=1 ohne Einheit",
       not re.search(r"p(_tot)?=1\s*\)", FUNCTION_HELP_TEXT))
 
+too_long = [line for line in FUNCTION_HELP_TEXT.splitlines() if len(line) > 70]
+check("Hilfe: alle Zeilen <= 70 Zeichen", not too_long, str(too_long))
 # Alle Funktionsaufruf-Beispiele müssen lösbar sein (mit Konstanten-Kontext)
 results = {}
 for block in re.split(r"\n\s*\n", FUNCTION_HELP_TEXT):

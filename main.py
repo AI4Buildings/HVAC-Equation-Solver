@@ -410,7 +410,8 @@ under ⓘ HINWEISE - usually a difference was entered in °C.
 TEMPERATURE SCALE - IMPORTANT:
 ------------------------------
 Temperatures are ALWAYS calculated in KELVIN, without exception.
-Physical laws work directly (p*v = R*T, sigma*T^4, T_2 = T_1*(p_2/p_1)^...).
+Physical laws work directly (p*v = R*T, sigma*T^4,
+T_2 = T_1*(p_2/p_1)^...).
 Formulas DEFINED IN °C (heating curve, Magnus formula,
 cp(theta) polynomials) are numeric-value equations - write them
 with value() and quantity() (see next section), otherwise the
