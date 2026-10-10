@@ -83,14 +83,17 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 
 - **Alle Regeln generisch**: aus der Struktur des Gleichungssystems, nie für bestimmte
   Gleichungsformen und nie abhängig von Variablennamen (bei Gleichstand: Reihenfolge im Blatt)
+- **Intern immer SI, Temperaturen immer Kelvin**: keine Regel, die Zahlen oder Gleichungen nach
+  dem Zusammenhang anders deutet (keine andere Temperaturskala, keine Einheit nach der Größe einer
+  Zahl) - vermutete Fehleingaben nur als Hinweis "ⓘ", die Rechnung bleibt unverändert
 - Neue Funktion: Tests in den Suiten, Hilfe (`FUNCTION_HELP_TEXT`, Zeilen ≤ 70 Zeichen - getestet),
   README.md, CLAUDE.md; das Beispielblatt (`main._insert_example`, Werte in `test_gui.py` geprüft)
   soll die Funktionen zeigen
-- **Lokal, nicht im Repo** (`Testbeispiele/` in `.gitignore`, nie committen): 49 Lehrbeispiele mit
+- **Lokal, nicht im Repo** (`Testbeispiele/` in `.gitignore`, nie committen): 123 Lehrbeispiele mit
   Lösungsblättern und Testbericht, `Testbeispiele/PROJEKTSTAND.md` (Stand, Festlegungen, offene
   Punkte) und `Testbeispiele/Pruefskripte/alle_pruefungen.sh` - vor jedem Push: alle Suiten und
   alle Lehrbeispiele mit Einheiten, ohne Einheiten (alles SI), mit neutral umbenannten Variablen
-  sowie Vergleich der Anzeige-Einheiten (ca. 20-30 min)
+  sowie Vergleich der Anzeige-Einheiten (ca. 40 min)
 - Git: Arbeitsbranch (derzeit `fix/review-2026-10`), `main` per Fast-Forward; Commit, Push und
   Aktualisieren von `main` nur auf ausdrücklichen Wunsch
 
@@ -124,6 +127,17 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   Umlaute (Φ, η, Q_wärme) werden beim Einlesen mit Zeile gemeldet (sonst fielen sie still aus den
   Gleichungen); Einheiten wie µm sind erlaubt
 - `ceil`, `floor`, `round` (z.B. Anzahl Geräte); Einheit wie das Argument
+- **Fortsetzungszeilen**: eine Gleichung geht in einer offenen Klammer weiter, wenn die Zeile mit
+  `(`, `,` oder einem Operator endet bzw. die nächste damit beginnt (`parser._join_bracket_lines`,
+  Original für Meldungen ebenso zusammengefügt); eine vergessene `)` ohne Fortsetzung bleibt ein
+  Fehler ihrer Zeile
+- **Bezugszustand** `REFERENCE R717 IIR` (eigene Zeile, wie EES; `parser.parse_reference_states`,
+  `thermodynamics.set_reference_states` je Lösungslauf): IIR (h = 200 kJ/kg, s = 1 kJ/(kg K) für
+  siedende Flüssigkeit bei 0 °C), ASHRAE (0 bei -40 °C), NBP (0 beim Normalsiedepunkt), DEFAULT
+  (CoolProp). Verschiebt h, u, s um Konstanten (Ein- und Ausgaben), gilt für alle Namen des Fluids
+  (`canonical_fluid`: R717 = ammonia); ohne Zeile CoolProp-Standard (für die meisten Kältemittel
+  schon IIR, nicht Ammoniak/Wasser). Fehler mit Zeile (Fluid unbekannt, Bezugspunkt nicht im
+  Nassdampfgebiet, Fluid doppelt)
 - **Python-Schlüsselwörter als Variablennamen** (`lambda` für λ, `in`, `is`, ...) sind
   erlaubt: intern umbenannt (`lambda` → `_kw_lambda`), angezeigt wieder als `lambda`
   (`parser.display_name()` / `parser.unmangle()`)
@@ -373,11 +387,9 @@ rho = HumidAir(rho_tot, T=25°C, rh=0.5, p_tot=1bar)
   - `Wien(T)` - Wellenlänge maximaler Emission [m] (Anzeige: µm)
   - `Stefan_Boltzmann(T)` - Gesamtemission [W/m²]
 - Einheiten intern SI wie überall: T in K, λ in m (`L = 5 µm` → 5e-6 m)
-- Zahlenliterale als Wellenlänge im Aufruf werden erkannt: Werte < 0.01 gelten als Meter,
-  größere als µm - `Eb(1000, 5)` und `Eb(1000, 5e-6)` sind gleich (Umrechnung im Parser).
-  Variablen sind dagegen immer SI: `L = 5` ohne Einheit sind 5 m (wie `T = 20` → 20 K);
-  der Solver verwendet SI-Varianten ohne Heuristik, sonst hätte eine iterierte
-  Wellenlänge zwei Lösungsäste (4.1e-6 als m und 4.1 als µm)
+- Zahlen ohne Einheit sind wie überall SI-Werte, keine Deutung nach der Größe: `Eb(1000, 5)`
+  sind 5 m, `L = 5` sind 5 m (wie `T = 20` → 20 K). Eine Zahl als Wellenlänge im Aufruf
+  ergibt einen Hinweis "ⓘ" mit Wert in m und µm (`parser.wavelength_literals`)
 - Einheiten auch direkt in den Argumenten: `Eb(500 °C, 5 µm)`, `Wien(500 °C)`
 - Eingabe: `T = 500 °C` oder `T = 773.15 K`
 - Groß-/Kleinschreibung egal: `Eb` = `eb`, `Blackbody` = `blackbody`
@@ -405,7 +417,7 @@ Eingaben mit anderen Einheiten (°C, bar, kJ) werden automatisch konvertiert.
 | Fläche, Volumen | m², m³ | `50 cm^2`, `200 L` |
 | Spektrale Emission Eb | W/m³ (Anzeige W/(m²·µm)) | |
 | Gesamtemission E | W/m² | |
-| **Winkel (Trigonometrie)** | **Grad (°)** | |
+| **Winkel (Trigonometrie)** | **Grad (°)** | `30 deg`, `0.5236 rad` (-> 30) |
 
 ### Humid Air Units
 
@@ -434,6 +446,11 @@ atan(1) = 45        {Ergebnis in Grad}
 ```
 
 Hyperbolische Funktionen (`sinh`, `cosh`, `tanh`) verwenden Radiant.
+
+Winkel mit Einheit werden nach Grad umgerechnet (interne Einheit wie die Winkelfunktionen;
+`units._convert_to_standard`, Anzeige `from_si_base`): `a = 0.5236 rad` -> 30, `sin(a)` = 0.5.
+Früher wurden sie nach Radiant (pint-Basis) umgerechnet und dann als Grad gelesen
+(sin(30 deg) = 0.009, ohne Meldung).
 
 ## Einheiten-System (v3.0)
 
@@ -466,7 +483,9 @@ Hyperbolische Funktionen (`sinh`, `cosh`, `tanh`) verwenden Radiant.
 - **Rückwärts-Propagation**: Bei `q = h*dT` wird `h = q/dT` abgeleitet
 - **Konsistenzprüfung**: Warnt bei inkonsistenten Einheiten; bei einer Summe mit verschiedenen
   Einheiten nennt die Warnung Terme und Einheiten und als Größe den Verdächtigen
-  (`_incompatible_sum`: "h_9 - h_11s: h_9 in J/kg, h_11s dimensionslos (ohne Einheit eingegeben?)")
+  (`_incompatible_sum`: "h_9 - h_11s: h_9 in J/kg, h_11s dimensionslos (ohne Einheit eingegeben?)");
+  ist die dimensionslose Größe berechnet, nennt sie die ohne Einheit eingegebene Größe, von der sie
+  die Dimension über Summen erbt (`_dimensionless_sources`: T_B - T_s mit T_s = -10 -> T_s)
 - **Additive Ketten**: Bei `A + B - C = 0` erhalten alle Terme die gleiche Dimension
 
 **Wichtige Funktionen:**
@@ -607,15 +626,16 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
 - Umrechnung im EES-/Excel-Stil `T + 273.15` (`scale_offset_literals`): eine Zahl gleich dem
   Nullpunkt einer Temperaturskala (273.15, 459.67 - aus pint) in einer Summe mit einer
   Temperatur -> Hinweis "ⓘ": T ist bereits in K, die Zahl verschiebt den Nullpunkt erneut
+- Zahl ohne Einheit in einer Summe mit einer in einer Nicht-SI-Einheit eingegebenen Größe
+  (`24/(24 - t_S)` mit t_S = 2 h -> 24 s; `si_number_literals`, ohne Temperaturen, dimensionslose
+  Summen und 0) -> Hinweis "ⓘ" (die Zahl ist ein SI-Wert)
 - Widerspruch (`temperature_sum_conflicts`): Werte in °C so addiert, dass weder Temperatur
   noch Differenz herauskommt (`T_2 = T_1 + x`, `x = 10 °C`) -> Hinweis "ⓘ HINWEISE"
-- Skalenabhängige Summen (`scale_dependent_sums`, `main._apply_input_scale`): eine Summe
-  absoluter Temperaturen mit Faktor ±1, die in Kelvin weder Temperatur noch Differenz ergibt
-  (T_3 = T_1 + T_2), wird auf der Skala der Eingabe gerechnet (Nullpunkt aus pint: °C 273.15 K,
-  °F 255.37 K; Residuum + Korrektur) -> 20 °C + 40 °C = 60 °C wie EES; Hinweis "ⓘ". Gültige
-  Kombinationen (Differenz, Temperatur ± Differenz, Mittelwert) sind auf jeder Skala gleich;
-  Temperaturen mit Faktor (Isentrope T_1*r) bleiben Kelvin; Eingaben in K: Kelvin-Skala.
-  Charakter dafür nur aus eindeutigen Bestimmungen (Gleichung, die die Größe berechnet)
+- **Gerechnet wird IMMER in Kelvin** - keine Regel rechnet eine Gleichung auf einer anderen
+  Skala oder deutet Zahlen nach dem Zusammenhang um (allgemeingültig). Auch eine Summe absoluter
+  Temperaturen (T_3 = T_1 + T_2: 20 °C + 40 °C = 606.3 K = 333.15 °C) wird in Kelvin gerechnet,
+  dazu der Hinweis aus `temperature_sum_conflicts`. Kein Hinweis für "Differenz mal Größe"
+  (`EER_C*(T_c - T_0) = T_0`, aus EER_C = T_0/(T_c - T_0) ausmultipliziert; `_kelvin_law_term`)
 - Anzeige: Differenzen in K (`pretty_unit('delta_K')` = 'K', DIN 1345 / ISO 80000-5; die
   Einheiten-Auswahl rechnet sie ohne Offset in °C/°F um), absolute Temperaturen nach
   Settings (°C/K)
@@ -632,7 +652,9 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
    Die Einheiten-Ableitung kennt beide Funktionen (Argument von value hat die Dimension der
    Einheit, quantity liefert sie; °C/°F -> absolute Temperatur; falsche Einheit -> Warnung).
 
-1. **Nassdampf unterhalb des Tripelpunkts** (T < T_triple bzw. p < p_triple mit x gegeben) wird gemeldet
+1. **T und p auf der Sättigungslinie** (Sattdampf mit T und p angegeben) -> Meldung "Dampfgehalt
+   angeben (x=1 ...)" statt der englischen CoolProp-Meldung.
+   **Nassdampf unterhalb des Tripelpunkts** (T < T_triple bzw. p < p_triple mit x gegeben) wird gemeldet
    (Wasser: Eis) - Grenzen aus CoolProp je Fluid.
    **Dampfgehalt x**: nur Rundungsfehler (±1e-6) werden auf [0, 1] begrenzt; x deutlich
    außerhalb (x = 2, x = quality(...) = -1 eines einphasigen Zustands) ist eine Meldung
@@ -677,7 +699,13 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
   `eta*0.5` in %; `unit_constraints._scaled_label`, `main._assign_result_units` übergibt die eingegebenen
   Einheiten als Labels) - außer wo die Settings bestimmen (Leistung, Energie, Druck, J/kg, J/(kg·K),
   Temperatur: `x = 2*P_el` mit P_el in MW erscheint in kW); dimensionslose Ergebnisse umschaltbar
-  (-, %, ‰, g/kg), Feuchtebeladung mit Label kg/kg, 1/s auch in 1/h
+  (-, %, ‰, g/kg), Feuchtebeladung mit Label kg/kg, 1/s auch in 1/h. Produkte/Quotienten zweier
+  Größen mit Einheit (`_composed_label`): kürzt sich die Einheit auf eine (V_dot/V mit m3/h -> 1/h,
+  V/V_dot -> h, A/L in mm), bleibt sie; Leistung mal Zeit je Länge/Volumen -> kWh/m, kWh/m³ (statt
+  N/bar). IF/max/min behalten eine gemeinsame Eingabe-Einheit. Ein Startwert mit Einheit legt die
+  Anzeige fest (wie Variable Info in EES): `q_V = 600 kJ/m^3` -> kJ/m³ statt bar (gleiche Dimension
+  wie Druck - die Größenart folgt nicht aus der Dimension, p = R*T/v bleibt bar). Rundungsrest
+  nach Offset-Umrechnung (-1.7e-13 °C) wird als 0 angezeigt (`main._si_to_unit`)
 - Ergebnisanzeige: Wert und Einheit stammen immer aus derselben Einheit. Die Settings
   (°C/K, bar/Pa, kJ/J, kW/W) gelten für Temperaturen, Drücke, J/kJ, J/kg, J/(kg·K), W/kW;
   andere Einheiten (MW, kWh, W/(m²K), W/K, ...) bleiben wie eingegeben bzw. abgeleitet.
@@ -792,5 +820,5 @@ L = 5 µm
 E_spectral = Eb(T_surface, L)
 
 {Fraction of energy in visible range}
-f_visible = Blackbody(T_surface, 0.38, 0.75)
+f_visible = Blackbody(T_surface, 0.38 µm, 0.75 µm)
 ```

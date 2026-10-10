@@ -21,7 +21,8 @@ import customtkinter as ctk
 
 from parser import (parse_equations, validate_system, display_name, unmangle,
                     parse_start_values, parse_start_value, start_value_entries, start_values_edit,
-                    parse_optimization, start_value_units)
+                    parse_optimization, start_value_units, parse_reference_states, remove_comments,
+                    wavelength_literals)
 from version import __version__
 from solver import solve_system, solve_parametric, format_solution, SolveAnalysis
 import solver as solver_module
@@ -43,8 +44,8 @@ except ImportError:
 # Versuche Constraint-Propagation zu laden
 try:
     from unit_constraints import (propagate_all_units, check_all_unit_consistency, propagate_all_units_complete,
-                                  temperature_sum_conflicts, scale_dependent_sums, scale_origin,
-                                  missing_unit_annotations, scale_offset_literals)
+                                  temperature_sum_conflicts, scale_origin,
+                                  missing_unit_annotations, scale_offset_literals, si_number_literals)
     CONSTRAINT_PROPAGATION_AVAILABLE = True
 except ImportError:
     CONSTRAINT_PROPAGATION_AVAILABLE = False
@@ -69,7 +70,7 @@ ctk.set_default_color_theme("blue")
 
 # Versuche Thermodynamik-Modul zu laden
 try:
-    from thermodynamics import get_fluid_info, THERMO_FUNCTIONS
+    from thermodynamics import get_fluid_info, THERMO_FUNCTIONS, set_reference_states
     THERMO_AVAILABLE = True
 except ImportError:
     THERMO_AVAILABLE = False
@@ -128,6 +129,10 @@ One equation per line, in any form and any order:
   · can be used instead of * (0.475·10^-6)
 Decimal POINT, not comma: 0.71 (a comma is reported as error)
 Comments: "text" or {text} (also over several lines)
+A long equation may continue on the next line inside an open
+bracket, if the line ends with '(', ',' or an operator:
+  Nu = IF(Re, 2300, 3.66, 3.66,
+          0.023*Re^0.8*Pr^0.4)
 Values with units only in assignments 'name = number unit':
   T_1 = 20 °C    p = 1 bar    A = 20 cm2    V_dot = 500 m3/h
   U = 0.3 W/(m²·K)   (m2 = m^2 = m², · or * between units)
@@ -149,6 +154,8 @@ All calculations use SI base units internally:
 Inputs with units are converted automatically:
   T = 25 °C    p = 1 bar    h = 100 kJ/kg    Q = 5 kW
 Plain numbers WITHOUT unit are SI values (p=1 means 1 Pa!).
+Also in equations: in 24/(24 - t_S) with t_S = 2 h the 24 is
+24 s (hint ⓘ) - define t_d = 24 h and write t_d - t_S.
 Results are displayed in °C, bar, kJ/kg, kW (see Settings).
 
 MATHEMATICAL FUNCTIONS:
@@ -156,6 +163,7 @@ MATHEMATICAL FUNCTIONS:
 sin(x), cos(x), tan(x)     Trigonometric (x in degrees)
 asin(x), acos(x), atan(x)  Inverse trig functions (result in degrees)
 sinh(x), cosh(x), tanh(x)  Hyperbolic functions (radians)
+Angles with a unit are converted to degrees: a = 0.5236 rad -> 30.
 exp(x)                      e^x
 ln(x)                       Natural logarithm
 log10(x), lg(x)             Base 10 logarithm
@@ -259,7 +267,10 @@ to go back to the automatic values. Names that are not unknowns
 of the sheet are ignored.
 A start value WITH unit also sets the unit of a computed quantity
 whose unit does not follow from the equations (reported under
-ⓘ HINWEISE: "Einheit nicht bestimmbar ... Einheit von q angeben").
+ⓘ HINWEISE: "Einheit nicht bestimmbar ... Einheit von q angeben"),
+and its display unit (as Variable Info in EES), e.g. an energy
+per volume that would otherwise be shown as pressure (same
+dimension): q_V = 600 kJ/m^3 in the block -> q_V in kJ/m³.
 
 THERMODYNAMIC FUNCTIONS (CoolProp):
 -----------------------------------
@@ -296,6 +307,17 @@ Examples:
   h = enthalpy(water, T=100 °C, p=1 bar)     {also valid}
   rho = density(R134a, T=298.15 K, x=1)      {25°C, sat. vapor}
 
+Reference state (zero point of h, u, s) - own line, as in EES:
+  REFERENCE R717 IIR    h = 200 kJ/kg, s = 1 kJ/(kg K) for
+                        saturated liquid at 0 °C (refrigeration)
+  REFERENCE R134a ASHRAE   h = 0, s = 0 sat. liquid at -40 °C
+  REFERENCE water NBP   h = 0, s = 0 at the normal boiling point
+  REFERENCE R717 DEFAULT   CoolProp standard (also without line)
+Applies to the whole sheet and all names of the fluid (R717 =
+ammonia). Differences (q_0, w_t, EER), T, p, x, rho stay the same.
+Standard is already IIR for R134a, R32, R410A, CO2, propane, ...;
+not for ammonia (h' at 0 °C = 345.7 kJ/kg) and water (IAPWS).
+
 HUMID AIR FUNCTIONS:
 --------------------
 Syntax: HumidAir(property, T=..., rh=..., p_tot=...)  (3 inputs)
@@ -319,8 +341,8 @@ has to be part of the balance. Saturated air gives rh = 1.
 RADIATION FUNCTIONS (Blackbody):
 --------------------------------
 Temperature T in K, wavelengths in m (SI). Units can be used for
-variables and inside the call (500 °C, 5 µm). Plain numbers as
-wavelength: values < 0.01 are taken as metres, otherwise as µm.
+variables and inside the call (500 °C, 5 µm). Plain numbers are
+SI like everywhere: Eb(1000, 5) means 5 m - write 5 µm.
 
   Eb(T, lambda)              Spectral emissive power
                              [W/m3 internally, shown as W/(m2 µm)]
@@ -336,9 +358,8 @@ Examples:
   E = Eb(T_s, L)                       {spectral power at 5 µm}
   lambda_max = Wien(T_s)               {peak wavelength}
   E_1 = Eb(300 °C, 5 µm)               {units inside the call}
-  E_2 = Eb(573.15, 5)                  {numbers in the call: K and µm}
-Variables without unit are SI: L = 5 is 5 m - write L = 5 µm.
-  f = Blackbody(1273.15, 0.4, 0.7)     {visible fraction, 1000°C}
+  E_2 = Eb(573.15, 5e-6)               {numbers are SI: K and m}
+  f = Blackbody(1273.15, 0.4 µm, 0.7 µm)   {visible, 1000°C}
   E_total = Stefan_Boltzmann(373.15)   {total emission at 100°C}
 
 VARIABLE NAMES:
@@ -381,17 +402,15 @@ in K (the unit selector converts them without offset).
 Values entered in K whose meaning cannot be decided are shown
 as entered (K). T only in p*v = R*T (product): shown in K -
 the value in K is right either way.
-Sums of absolute temperatures (T_3 = T_1 + T_2) depend on the
-zero point of the scale - in Kelvin they are no temperature.
-They are calculated on the scale of the input, as in EES:
-  T_1 = 20 °C, T_2 = 40 °C, T_3 = T_1 + T_2  ->  T_3 = 60 °C
-(reported under ⓘ HINWEISE). Temperatures with a factor
-(T_2 = T_1*(p_2/p_1)^...) stay physical laws in Kelvin.
+Sums of absolute temperatures (T_3 = T_1 + T_2) are neither a
+temperature nor a difference. They are calculated in Kelvin like
+everything else (20 °C + 40 °C = 606.3 K = 333.15 °C) and reported
+under ⓘ HINWEISE - usually a difference was entered in °C.
 
 TEMPERATURE SCALE - IMPORTANT:
 ------------------------------
-Temperatures are calculated in KELVIN. Physical laws work
-directly (p*v = R*T, sigma*T^4, T_2 = T_1*(p_2/p_1)^...).
+Temperatures are ALWAYS calculated in KELVIN, without exception.
+Physical laws work directly (p*v = R*T, sigma*T^4, T_2 = T_1*(p_2/p_1)^...).
 Formulas DEFINED IN °C (heating curve, Magnus formula,
 cp(theta) polynomials) are numeric-value equations - write them
 with value() and quantity() (see next section), otherwise the
@@ -1607,14 +1626,12 @@ class EquationSolverApp(ctk.CTk):
         self.last_solution = None
 
         try:
+            # Bezugszustände der Fluide (REFERENCE R717 IIR) gelten für diesen Lauf
+            if THERMO_AVAILABLE:
+                set_reference_states({})
+                set_reference_states(parse_reference_states(equations_text))
             # Parse Gleichungen mit Einheiten
             equations, variables, initial_values, sweep_vars, original_equations, unit_values = parse_equations(equations_text, parse_units=True)
-            # Summen absoluter Temperaturen, die vom Nullpunkt abhängen (T_3 = T_1 + T_2):
-            # auf der Skala der Eingabe rechnen (in Kelvin wären sie keine Temperatur)
-            self._scale_points, scale_hints = set(), []
-            if CONSTRAINT_PROPAGATION_AVAILABLE and UNITS_AVAILABLE:
-                equations, original_equations, self._scale_points, scale_hints = \
-                    self._apply_input_scale(equations, original_equations, unit_values)
 
             # Startwerte stehen im Blatt (Block {$Startwerte ... $}, von
             # Solve > Initial Values geschrieben) - der Text ist die einzige Quelle
@@ -1684,8 +1701,6 @@ class EquationSolverApp(ctk.CTk):
                 for var, uv in unit_values.items():
                     if uv.calc_unit:
                         known_units[var] = uv.calc_unit
-                for var in self._scale_points:
-                    known_units.setdefault(var, 'K')
                 # In K eingegebene Größen: absolut oder Differenz folgt aus den Gleichungen
                 open_k, celsius = self._temperature_inputs(unit_values)
                 # Startwerte mit Einheit legen die Einheit berechneter Größen fest
@@ -1717,11 +1732,21 @@ class EquationSolverApp(ctk.CTk):
                         f"Temperaturen werden hier in Kelvin gerechnet - die Umrechnung "
                         f"verschiebt den Nullpunkt ein zweites Mal. Formeln, die für Zahlenwerte "
                         f"in {scale} gelten, mit value()/quantity() schreiben (siehe Hilfe)")
-                handled = {h_source for h_source, _ in scale_hints}
-                temperature_hints += [text for _, text in scale_hints] + [
-                    h for h in self._celsius_difference_hints(
-                        original_equations, known_units, open_k, celsius, unit_values)
-                    if not any(f"'{unmangle(src)}'" in h for src in handled)]
+                for source, number, name, unit, si in si_number_literals(
+                        original_equations, {v: uv.original_unit for v, uv in unit_values.items()
+                                             if uv.original_unit}):
+                    temperature_hints.append(
+                        f"'{unmangle(remove_comments(source)).strip()}': Die Zahl {number:g} steht in einer Summe mit "
+                        f"{display_name(name)} (in {unit} eingegeben) und gilt als {number:g} {si} - "
+                        f"Zahlen ohne Einheit sind SI-Werte. Ist {number:g} {unit} gemeint, als Größe "
+                        f"mit Einheit angeben (z.B. c = {number:g} {unit})")
+                for source, number in wavelength_literals(original_equations):
+                    temperature_hints.append(
+                        f"'{unmangle(remove_comments(source)).strip()}': Die Wellenlänge {number:g} ohne "
+                        f"Einheit gilt als {number:g} m = {number * 1e6:g} µm - Zahlen ohne Einheit sind "
+                        f"SI-Werte. Wellenlängen in µm mit Einheit angeben (z.B. {number:g} µm)")
+                temperature_hints += self._celsius_difference_hints(
+                    original_equations, known_units, open_k, celsius, unit_values)
 
                 # Leite Startwerte aus Einheiten ab (nur für Variablen ohne manuellen Startwert)
                 # Vorgaben inkl. Sweep-/Listenwerte (erster Punkt) für das Temperatur-Mittel
@@ -1892,49 +1917,6 @@ class EquationSolverApp(ctk.CTk):
                 celsius.add(var)
         return open_k, celsius
 
-    def _apply_input_scale(self, equations, original_equations, unit_values):
-        """
-        Summen absoluter Temperaturen, deren Ergebnis vom Nullpunkt der Skala abhängt
-        (unit_constraints.scale_dependent_sums), auf der Eingabe-Skala rechnen:
-        Residuum + Korrektur (T_3 = T_1 + T_2 - 273.15 K -> 20 °C + 40 °C = 60 °C).
-        Liefert (Gleichungen, Original-Zuordnung, neu absolute Größen, Hinweise).
-        """
-        import ast
-        known_units = {v: uv.calc_unit for v, uv in unit_values.items() if uv.calc_unit}
-        open_k, celsius = self._temperature_inputs(unit_values)
-        origins = {v: scale_origin(unit_values[v].original_unit) for v in celsius}
-        origins = {v: o for v, o in origins.items() if o}
-        try:
-            found = scale_dependent_sums(original_equations, known_units, open_k, origins)
-        except Exception:
-            return equations, original_equations, set(), []
-        if not found:
-            return equations, original_equations, set(), []
-        replaced = {}
-        points, hints = set(), []
-        for item in found:
-            key = item['key']
-            try:
-                tree = ast.parse(key, mode='eval').body
-                left = ast.get_source_segment(key, tree.left)
-                right = ast.get_source_segment(key, tree.right)
-            except Exception:
-                continue
-            if not (isinstance(tree, ast.BinOp) and isinstance(tree.op, ast.Sub) and left and right):
-                continue
-            # Residuum + Korrektur: links - (rechts - Korrektur)
-            replaced[key] = f"({left}) - (({right}) - ({item['correction']!r}))"
-            points.update(item['points'])
-            scale = next((pretty_unit(unit_values[v].original_unit) for v in celsius
-                          if abs(origins.get(v, 0) - item['origin']) < 1e-6), '°C')
-            hints.append((item['source'],
-                          f"'{unmangle(item['source'])}': Summe absoluter Temperaturen - auf der "
-                          f"{scale}-Skala gerechnet, wie eingegeben (in Kelvin ergäbe die Summe weder "
-                          f"eine Temperatur noch eine Temperaturdifferenz)"))
-        equations = [replaced.get(eq, eq) for eq in equations]
-        original_equations = {replaced.get(eq, eq): text for eq, text in original_equations.items()}
-        return equations, original_equations, points, hints
-
     @staticmethod
     def _single_phase_quality_hints(original_equations, solution) -> List[str]:
         """
@@ -2042,8 +2024,9 @@ class EquationSolverApp(ctk.CTk):
             hints.append(
                 f"'{unmangle(equation)}': {', '.join(given)} in {'/'.join(units)} angegeben, also "
                 f"absolute Temperatur(en) - so kombiniert ergibt sich weder eine Temperatur noch "
-                f"eine Temperaturdifferenz. Ist ein Wert eine Temperaturdifferenz? "
-                f"Temperaturdifferenzen in K angeben (z.B. 10 K statt 10 °C)")
+                f"eine Temperaturdifferenz (gerechnet wird in Kelvin). Ist ein Wert eine "
+                f"Temperaturdifferenz? Temperaturdifferenzen in K angeben (z.B. 10 K statt 10 °C); "
+                f"Formeln für Zahlenwerte in °C mit value()/quantity() schreiben")
         return hints
 
     def _assign_result_units(self, solution: dict, original_equations: dict, unit_values: dict,
@@ -2064,15 +2047,16 @@ class EquationSolverApp(ctk.CTk):
         if not CONSTRAINT_PROPAGATION_AVAILABLE:
             return
         known_units = {var: uv.calc_unit for var, uv in unit_values.items() if uv.calc_unit}
-        for var in getattr(self, '_scale_points', ()):
-            known_units.setdefault(var, 'K')
         if any(uv.original_unit for uv in unit_values.values()):
             for var in self._dimensionless_constants(constants):
                 known_units.setdefault(var, '')
         open_k, _ = self._temperature_inputs(unit_values)
         for name, uv in getattr(self, '_start_units', {}).items():
             if name not in known_units:
-                known_units[name] = uv.calc_unit
+                # Startwert mit Einheit legt auch die Anzeige fest (wie Variable Info in EES):
+                # q_V = 600 kJ/m^3 -> kJ/m^3 statt bar (gleiche Dimension, andere Größenart)
+                known_units[name] = (uv.original_unit.strip() if uv.calc_unit not in ('K', 'delta_K')
+                                     and not scale_origin(uv.original_unit) else uv.calc_unit)
                 if uv.calc_unit == 'K' and uv.original_unit.strip() in ('K', 'kelvin'):
                     open_k.add(name)
         self._kelvin_display = set()
@@ -2164,11 +2148,21 @@ class EquationSolverApp(ctk.CTk):
 
     @staticmethod
     def _si_to_unit(value_si: float, unit: str) -> float:
-        """Rechnet einen SI-Wert in die Anzeige-Einheit um (inkl. Offset °C/°F)."""
+        """
+        Rechnet einen SI-Wert in die Anzeige-Einheit um (inkl. Offset °C/°F). Bei einer
+        Einheit mit Nullpunkt bleibt vom Abziehen ein Rundungsrest (273.15 K -> -1.7e-13 °C):
+        Werte unter 1e-9 des SI-Werts sind 0.
+        """
         try:
-            return UnitValue.from_si_base(float(value_si), unit).original_value
+            value = UnitValue.from_si_base(float(value_si), unit).original_value
         except Exception:
             return float(value_si)
+        try:
+            if value and abs(value) < 1e-9 * abs(float(value_si)) and scale_origin(unit):
+                return 0.0
+        except Exception:
+            pass
+        return value
 
     def _display_values(self, var: str, val):
         """
@@ -2988,6 +2982,18 @@ Q_a = U*dT_m*t_H            {heat loss per m2 and year}
 K_E = k_E*value(Q_a, kWh/m^2)
 K_ins = a_n*k_ins*value(s_ins, m)
 K_tot = K_E + K_ins         {annual cost per m2}
+
+{--- Example 7: Refrigeration cycle NH3, reference state IIR ---}
+REFERENCE R717 IIR          {h = 200 kJ/kg, s = 1 kJ/(kg*K): sat. liquid 0 °C}
+T_0 = -10 °C                {evaporation}
+T_c = 35 °C                 {condensation}
+h_r1 = enthalpy(R717, T=T_0, x=1)
+s_r1 = entropy(R717, T=T_0, x=1)
+p_c = pressure(R717, T=T_c, x=0)
+h_r2s = enthalpy(R717, p=p_c, s=s_r1)
+h_r3 = enthalpy(R717, T=T_c, x=0)
+EER = (h_r1 - h_r3)/(h_r2s - h_r1)
+EER_C*(T_c - T_0) = T_0     {Carnot in kelvin, also implicit}
 
 "Press F5 to solve. Help > Function Reference describes all functions."
 '''

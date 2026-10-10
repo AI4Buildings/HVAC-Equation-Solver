@@ -154,6 +154,14 @@ x + y = 10
 x - y = 2
 ```
 
+A long equation may continue on the next line inside an open bracket when the line
+ends with `(`, `,` or an operator:
+
+```
+Nu = IF(Re, 2300, 3.66, 3.66,
+        0.023*Re^0.8*Pr^0.4)
+```
+
 ### Parameter Study
 
 ```
@@ -224,6 +232,9 @@ $}
 ```
 
 The block can also be edited by hand; deleting it restores the automatic values.
+A start value with unit also sets the display unit of a computed quantity (like Variable Info
+in EES), e.g. `q_V = 600 kJ/m^3` for an energy per volume that would otherwise be shown as a
+pressure (same dimension).
 
 ## Steam Power Cycle Example
 
@@ -313,7 +324,7 @@ equations and are solved iteratively. Expression constants with units like
 | Temperature difference | delta_K | `dT = 7 K` (always in K; °C is an absolute temperature) |
 | Pressure p | Pa | `1 bar`, `101325 Pa` |
 | Enthalpy h | J/kg | `100 kJ/kg` |
-| Angles (sin, cos, tan) | Degrees (°) | |
+| Angles (sin, cos, tan) | Degrees (°) | `30 deg`, `0.5236 rad` (→ 30) |
 | Entropy s | J/(kg·K) | |
 | Density rho | kg/m³ | |
 | Vapor quality x | - (0-1) | |
@@ -327,9 +338,9 @@ dimension is not a temperature is a difference (as in COMSOL): in `Q = m*c*(T_1 
 shift of the temperature zero point (absolute temperatures shift, differences do not):
 `dT = Q/(m*c)` or `dT = q*R` is a difference, a mixing temperature
 `m_3*T_3 = m_1*T_1 + m_2*T_2` with `m_3 = m_1 + m_2` is absolute. Absolute temperatures are
-shown in °C (Settings), differences in K. Sums of absolute temperatures depend on the zero point of the scale (in
-Kelvin they are no temperature); they are calculated on the scale of the input, as in EES:
-`T_1 = 20 °C`, `T_2 = 40 °C`, `T_3 = T_1 + T_2` gives 60 °C.
+shown in °C (Settings), differences in K. Temperatures are always calculated in Kelvin, without
+exception: a sum of absolute temperatures (`T_1 = 20 °C`, `T_2 = 40 °C`, `T_3 = T_1 + T_2`) gives
+606.3 K = 333.15 °C and a hint (ⓘ) - neither a temperature nor a difference.
 
 Numeric-value equations (formulas that only hold for numbers in certain units, such as a
 heating curve in °C) use `value(x, unit)` and `quantity(z, unit)`:
@@ -357,6 +368,13 @@ unit has to be given (as a start value with unit) so that all others follow.
 ### Thermodynamics
 `enthalpy`, `entropy`, `density`, `volume`, `intenergy`, `quality`, `temperature`, `pressure`, `viscosity`, `conductivity`, `prandtl`, `cp`, `cv`, `soundspeed`
 
+Reference state of h, u, s per fluid as in EES, as an own line in the sheet:
+`REFERENCE R717 IIR` (h = 200 kJ/kg, s = 1 kJ/(kg·K) for saturated liquid at 0 °C),
+`ASHRAE` (0 at −40 °C), `NBP` (0 at the normal boiling point) or `DEFAULT` (CoolProp). It applies
+to all names of the fluid (R717 = ammonia); differences, T, p, x, ρ are unchanged. CoolProp's
+standard is already IIR for R134a, R32, R410A, CO2, propane and most refrigerants, but not for
+ammonia (h' at 0 °C = 345.7 kJ/kg) and water (IAPWS).
+
 ### Humid Air (HumidAir)
 Output: `T`, `h`, `rh`, `w`, `p_w`, `rho_tot`, `rho_a`, `rho_w`, `T_dp`, `T_wb`
 Input: `T`, `p_tot`, `rh`, `w`, `p_w`, `h`, `T_dp` (dew point), `T_wb` (wet bulb)
@@ -374,9 +392,8 @@ A state with more water vapour than saturated air can hold (w > w_s at T, p) is 
 
 Like everything else, radiation quantities are SI internally: wavelengths in m
 (`L = 5 µm` → 5e-6 m), `Eb` in W/m³ (displayed as W/(m²·µm)), `Wien` in m
-(displayed in µm). Plain numbers written directly in the call are still accepted:
-values < 0.01 are taken as metres, larger ones as µm (`Eb(1000, 5)` = `Eb(1000, 5e-6)`).
-Variables are always SI: `L = 5` without a unit is 5 m - write `L = 5 µm`.
+(displayed in µm). Plain numbers are SI like everywhere: `Eb(1000, 5)` and `L = 5` mean
+5 m - write `5 µm` (a number as wavelength in a call gives a hint ⓘ).
 Units may also be written directly in the arguments: `Eb(500 °C, 5 µm)`.
 
 ## Error Analysis
@@ -410,7 +427,8 @@ mPa·s, mm²/s, µm). Exponents may be written without `^` (`20 cm2`, `500 m3/h`
 (`eta = 89.2 %` is 0.892, also `rh=50 %` in function arguments). Unknown units are
 reported as an error instead of being silently ignored, and units in function
 arguments are checked against the expected dimension (`T=` temperature, `p=`
-pressure, ...). Python keywords may be used as variable names, e.g.
+pressure, ...). Numbers without unit are SI values, also in equations: in `24/(24 - t_S)`
+with `t_S = 2 h` the 24 is 24 s - a hint (ⓘ) points this out (define `t_d = 24 h`). Python keywords may be used as variable names, e.g.
 `lambda = 0.04 W/mK` for a thermal conductivity.
 
 ### Automatic Unit Propagation

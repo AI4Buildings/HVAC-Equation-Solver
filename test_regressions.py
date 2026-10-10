@@ -130,24 +130,25 @@ for label, text, expected in (
     check(f"Einheiten-Ableitung gekoppelt: {label}", {k: units.get(k) for k in expected} == expected,
           str({k: units.get(k) for k in expected}))
 
-# Summe absoluter Temperaturen hängt vom Nullpunkt ab: auf der Eingabe-Skala rechnen
-from unit_constraints import scale_dependent_sums, scale_origin
-for text, expected in (("T_1 = 20 °C\nT_2 = 40 °C\nT_3 = T_2 + T_1", [273.15]),
-                       ("T_1 = 20 °C\nT_2 = 40 °C\nT_3 = T_2 + T_1\nT_4 = T_3 + T_1", [273.15, 273.15]),
-                       ("T_1 = 68 °F\nT_2 = 104 °F\nT_3 = T_2 + T_1", [255.372]),
-                       ("T_1 = 20 °C\nT_2 = 40 °C\nT_m = (T_1 + T_2)/2\ntheta = T_2 - T_1", []),
-                       ("T_1 = 20 °C\ndT = 5 K\nT_2 = T_1 + dT", []),
-                       ("T_1 = 20 °C\nr = 1.2\nT_2 = T_1*r", []),
-                       ("T_1 = 300 K\nT_2 = 400 K\nT_3 = T_1 + T_2", [])):
-    eqs, variables, consts, _, orig, uv = parse_equations(text)
-    known = {v: u.calc_unit for v, u in uv.items()}
-    open_k = {v for v, u in uv.items() if u.original_unit == 'K'}
-    origins = {v: scale_origin(u.original_unit) for v, u in uv.items() if u.calc_unit == 'K' and v not in open_k}
-    found = [round(item['correction'], 3) for item in scale_dependent_sums(orig, known, open_k, origins)]
-    check(f"Skala: {text.splitlines()[-1]} -> Korrektur {expected}", found == expected, str(found))
+# Temperaturen werden IMMER in Kelvin gerechnet - keine Regel rechnet eine Gleichung auf
+# einer anderen Skala; Summen absoluter Temperaturen ergeben nur einen Hinweis
+import unit_constraints as _uc
+check("Keine Skalen-Regel (Rechnung immer in Kelvin)", not hasattr(_uc, 'scale_dependent_sums'))
 for text, expected in (("T_1 = 20 °C\nx = 10 °C\nT_2 = T_1 + x", 1), ("T_1 = 20 °C\nx = 10 K\nT_2 = T_1 + x", 0),
                        ("T_1 = 80 °C\nT_2 = 20 °C\nT_m = (T_1 + T_2)/2\ntheta = T_1 - T_2", 0),
-                       ("T_1 = 20 °C\nT_2 = T_1 + 10", 0)):
+                       ("T_1 = 20 °C\nT_2 = T_1 + 10", 0),
+                       ("T_0 = -40 °C\nT_c = 25 °C\nEER_C*(T_c - T_0) = T_0", 0),
+                       # Summe absoluter Temperaturen: Hinweis (gerechnet wird in Kelvin)
+                       ("T_1 = 20 °C\nT_2 = 40 °C\nT_3 = T_2 + T_1", 1),
+                       ("T_1 = 68 °F\nT_2 = 104 °F\nT_3 = T_2 + T_1", 1),
+                       ("T_1 = 20 °C\nT_2 = 40 °C\nT_3 = T_2 + T_1 + 2*abs(T_2 - T_1)", 1),
+                       ("T_1 = 20 °C\nT_2 = 40 °C\nT_m = (T_1 + T_2)/2\ntheta = T_2 - T_1", 0),
+                       ("T_1 = 20 °C\nr = 1.2\nT_2 = T_1*r", 0),
+                       ("T_1 = 300 K\nT_2 = 400 K\nT_3 = T_1 + T_2", 0),
+                       # Differenz mal Größe: ausmultipliziertes Gesetz in Kelvin (Carnot), kein Hinweis
+                       ("T_0 = -40 °C\nT_c = 25 °C\nT_0 = EER_C*(T_c - T_0)", 0),
+                       ("T_0 = -40 °C\nT_c = 25 °C\ndT = T_c - T_0\nEER_C*dT = T_0", 0),
+                       ("T_0 = -40 °C\nT_c = 25 °C\nCOP*(T_c - T_0) = T_c", 0)):
     eqs, variables, consts, _, orig, uv = parse_equations(text)
     known = {v: u.calc_unit for v, u in uv.items()}
     open_k = {v for v, u in uv.items() if u.original_unit == 'K'}
@@ -404,11 +405,11 @@ check("Mehrzeiliger Kommentar: Originalzeile korrekt",
       list(orig.values()) == ["h = enthalpy(water, T=300, p=p)"], str(list(orig.values())))
 check("Kommentare: Zeilenumbrüche bleiben erhalten", remove_comments('{a\nb} x = 1') == '\n x = 1')
 
-# Strahlung: intern SI (Wellenlänge m, Eb W/m³, Wien m); µm-Zahlen weiter erkannt
+# Strahlung: intern SI (Wellenlänge m, Eb W/m³, Wien m); Zahlen sind Meter, keine µm-Deutung
 check("Wien(1000 K) = 2.898e-6 m", abs(Wien_displacement(1000) - 2.897771955e-6) < 1e-15)
 check("Eb(1000, 5 µm) in W/m³", abs(Eb(1000, 5e-6) / 7.13962e9 - 1) < 1e-5, str(Eb(1000, 5e-6)))
-check("Eb: µm-Zahl == Meter-Wert", Eb(1000, 5) == Eb(1000, 5e-6))
-check("Blackbody bis 1000 µm in Metern", abs(Blackbody(5800, 0.75e-6, 1e-3) - Blackbody(5800, 0.75, 1000)) < 1e-12)
+check("Eb: Zahl 5 ist 5 m (keine µm-Deutung)", Eb(1000, 5) < 1e-6 * Eb(1000, 5e-6), str(Eb(1000, 5)))
+check("Blackbody: Zahlen sind Meter", Blackbody(5800, 0.75, 1000) < 1e-12 < Blackbody(5800, 0.75e-6, 1e-3))
 check("Einheiten in Strahlungs-Argumenten", tokenize_equation("E = Eb(500°C, 5µm)") == "E = Eb(773.15, 4.9999999999999996e-06)",
       tokenize_equation("E = Eb(500°C, 5µm)"))
 
@@ -853,14 +854,24 @@ _, _, _, sweeps, _, _ = parse_equations('"Liste [offen"\n{Klammer [1 2}\nx = [1 
 check("Eckige Klammern in Kommentaren stören nicht", np.allclose(sweeps['x'], [1, 2]))
 
 # ---------------------------------------------------------------------------
-# Wellenlängen: Zahlenliterale nach µm-Regel (Parser), Variablen immer SI (m)
+# Wellenlängen: Zahlen und Variablen ohne Einheit immer SI (m) - keine Deutung nach der Größe
 # ---------------------------------------------------------------------------
 results = {}
-for text in ("E = Eb(1000, 5)", "E = Eb(1000, 5e-6)", "E = Eb(1000, 5 µm)", "L = 5 µm\nE = Eb(1000, L)"):
+for text in ("E = Eb(1000, 5e-6)", "E = Eb(1000, 5 µm)", "L = 5 µm\nE = Eb(1000, L)"):
     eqs, variables, consts, _, orig, _ = parse_equations(text)
     results[text] = solve_system(eqs, variables, constants=consts, original_equations=orig)[1]['E']
-check("Wellenlänge: Literal 5, 5e-6, 5 µm und L = 5 µm gleich",
+check("Wellenlänge: Literal 5e-6, 5 µm und L = 5 µm gleich",
       max(results.values()) - min(results.values()) < 1e-6 * max(results.values()), str(results))
+eqs, variables, consts, _, orig, _ = parse_equations("E = Eb(1000, 5)")
+sol = solve_system(eqs, variables, constants=consts, original_equations=orig)[1]
+check("Wellenlänge als Zahl ohne Einheit = m (Eb(1000, 5) sind 5 m)", sol['E'] < 1e-10, str(sol))
+from parser import wavelength_literals
+for text, expected in (("E = Eb(1000, 5)", [5.0]), ("E = Eb(1000, 5 µm)", []), ("E = Eb(1000, L)", []),
+                       ("f = Blackbody(T, 0.38, 0.75 µm) {Kommentar 3}", [0.38]),
+                       ("F = blackbody_cumulative(5800, 1e-6) + Eb(T, 2)", [1e-6, 2.0]),
+                       ("E = Wien(1000)", [])):
+    found = [number for _, number in wavelength_literals({text: text})]
+    check(f"Hinweis Wellenlänge ohne Einheit: {text} -> {expected}", found == expected, str(found))
 eqs, variables, consts, _, orig, _ = parse_equations("L = 5\nE = Eb(1000, L)")
 sol = solve_system(eqs, variables, constants=consts, original_equations=orig)[1]
 check("Wellenlänge als Variable ohne Einheit = m (SI, wie T ohne Einheit = K)", sol['E'] < 1e-10, str(sol))
@@ -979,6 +990,22 @@ check("Block anhängen (eine Leerzeile davor)",
 check("Block ersetzen (Rest unverändert)",
       apply_edit("a = 1\n{$Startwerte\nx = 1\n$}\nb = 2", ["x = 5"]) == "a = 1\n{$Startwerte\nx = 5\n$}\nb = 2")
 check("Block entfernen", apply_edit("x^2 = 9\n\n{$Startwerte\nx = -3\n$}\n", []) == "x^2 = 9\n")
+
+# Winkel mit Einheit: intern Grad wie die Winkelfunktionen (früher Radiant -> sin(30 deg) = 0.009)
+from units import UnitValue
+for text, name, expected in (("a = 30 deg\ny = sin(a)", 'y', 0.5),
+                             ("a = 0.5235987756 rad\ny = sin(a)", 'y', 0.5),
+                             ("a = 0.25 turn\ny = cos(a)", 'y', 0.0),
+                             ("a = 60\ny = cos(a)", 'y', 0.5)):
+    eqs, variables, consts, _, orig, _ = parse_equations(text)
+    sol = solve_system(eqs, variables, constants=consts, original_equations=orig)[1]
+    check(f"Winkel mit Einheit: {text.splitlines()[0]} -> {name} = {expected}",
+          abs(sol.get(name, np.nan) - expected) < 1e-9, str(sol))
+_, _, _, sweeps, _, _ = parse_equations("b = 0:30:90 deg")
+check("Winkel-Sweep in deg intern Grad", np.allclose(sweeps['b'], [0, 30, 60, 90]), str(sweeps['b']))
+check("Winkel-Anzeige: interner Wert Grad -> deg/rad",
+      UnitValue.from_si_base(30.0, 'deg').original_value == 30.0
+      and abs(UnitValue.from_si_base(30.0, 'rad').original_value - np.pi / 6) < 1e-12)
 
 # Zahlenwertgleichungen: value(x, Einheit), quantity(z, Einheit) - generisch über pint
 from units import unit_number, unit_quantity
@@ -1152,6 +1179,66 @@ try:
     check("rh = 50 -> Meldung 0 ... 1", False)
 except ValueError as exc:
     check("rh = 50 -> Meldung 0 ... 1", "außerhalb von 0 ... 1" in str(exc) and "50 %" in str(exc), str(exc))
+
+# Bezugszustand je Fluid (REFERENCE R717 IIR): h, u, s verschoben, Umkehrfunktionen konsistent
+import thermodynamics
+from parser import parse_reference_states
+from thermodynamics import set_reference_states, entropy, temperature, intenergy, density
+h_default = enthalpy('ammonia', T=273.15, x=0)
+set_reference_states(parse_reference_states("REFERENCE R717 IIR"))
+check("REFERENCE R717 IIR: h' = 200 kJ/kg, s' = 1 kJ/(kg K) bei 0 °C (auch Name ammonia)",
+      abs(enthalpy('ammonia', T=273.15, x=0) - 200e3) < 1e-3 and abs(entropy('nh3', T=273.15, x=0) - 1e3) < 1e-6)
+h_iir = enthalpy('ammonia', T=263.15, p=3e5)
+check("IIR: Umkehrfunktionen mit h und s", abs(temperature('ammonia', p=3e5, h=h_iir) - 263.15) < 1e-6
+      and abs(temperature('ammonia', p=3e5, s=entropy('ammonia', T=263.15, p=3e5)) - 263.15) < 1e-6)
+check("IIR: u um dieselbe Konstante wie h verschoben",
+      abs((enthalpy('ammonia', T=300, p=2e5) - intenergy('ammonia', T=300, p=2e5))
+          - 2e5/density('ammonia', T=300, p=2e5)) < 1e-6)
+check("IIR: andere Fluide unverändert", abs(enthalpy('water', T=373.15, x=0) - 419.1e3) < 200)
+set_reference_states({'R134a': 'ASHRAE', 'water': 'NBP'})
+check("ASHRAE (-40 °C) und NBP (1 atm): h = 0; Ammoniak wieder Standard",
+      abs(enthalpy('R134a', T=233.15, x=0)) < 1e-6 and abs(enthalpy('water', p=101325, x=0)) < 1e-6
+      and abs(enthalpy('ammonia', T=273.15, x=0) - h_default) < 1e-6)
+set_reference_states({})
+for text, part in (("REFERENCE R717", "so angeben"), ("REFERENCE foo IIR", "Unbekanntes Fluid"),
+                   ("REFERENCE water IIR", "nicht im Nassdampfgebiet"), ("REFERENCE ammonia XYZ", "möglich: IIR"),
+                   ("REFERENCE ammonia IIR\nREFERENCE R717 NBP", "Zeile 2: Bezugszustand von R717 steht schon")):
+    try:
+        parse_reference_states(text)
+        check(f"REFERENCE-Fehler: {text!r}", False)
+    except EquationSyntaxError as exc:
+        check(f"REFERENCE-Fehler: {text!r}", part in str(exc), str(exc))
+eqs, variables, consts, _, orig, _ = parse_equations("REFERENCE R717 IIR\nreference = 2\ny = reference + 1")
+check("REFERENCE-Zeile ist keine Gleichung, Variable reference bleibt möglich",
+      variables == {'y'} and consts.get('reference') == 2, f"{variables} {consts}")
+
+# Gleichung über mehrere Zeilen: Fortsetzung in offener Klammer nach '(' ',' oder Operator
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "a = 2\ny = IF(a, 1, 10,\n      20, 30)   {Kommentar}\nNu = IF(a, 1, 3.66, 3.66,\n   0.023*a^0.8\n   *0.7^0.4)\nz = y + 1")
+s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Mehrzeilige Gleichung (offene Klammer)", s_ and sol['y'] == 30 and abs(sol['Nu'] - 0.023*2**0.8*0.7**0.4) < 1e-12
+      and 'y = IF(a, 1, 10, 20, 30)   {Kommentar}' in orig.values(), f"{sol} {list(orig.values())}")
+try:
+    parse_equations("a = 2\ny = (a + 1\nz = 3")
+    check("Vergessene Klammer ohne Fortsetzung bleibt Fehler der Zeile", False)
+except EquationSyntaxError as exc:
+    check("Vergessene Klammer ohne Fortsetzung bleibt Fehler der Zeile", "Zeile 2" in str(exc), str(exc))
+# Sattzustand mit T und p: verständliche Meldung statt CoolProp-Text
+import CoolProp.CoolProp as CP
+try:
+    enthalpy('ammonia', T=263.15, p=CP.PropsSI('P', 'T', 263.15, 'Q', 1, 'Ammonia'))
+    check("T und p auf der Sättigungslinie -> Meldung x angeben", False)
+except ValueError as exc:
+    check("T und p auf der Sättigungslinie -> Meldung x angeben", "Sättigungslinie" in str(exc) and "x=1" in str(exc), str(exc))
+
+# Zeile ohne '=' (Tippfehler im Schlüsselwort, Ausdruck) ist ein Fehler statt still zu fehlen
+for text, line_no in (("REFERENZ R717 IIR\nh_1 = 2", 1), ("a = 1\nh_1 - 100 kJ/kg", 2)):
+    try:
+        parse_equations(text)
+        check(f"Zeile ohne '=' gemeldet: {text.splitlines()[line_no - 1]}", False)
+    except EquationSyntaxError as exc:
+        check(f"Zeile ohne '=' gemeldet: {text.splitlines()[line_no - 1]}",
+              str(exc).startswith(f"Zeile {line_no}: ") and "keine Gleichung" in str(exc), str(exc))
 
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")

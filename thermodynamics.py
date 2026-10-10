@@ -23,6 +23,7 @@ Syntax (wie EES):
 """
 
 import CoolProp.CoolProp as CP
+from functools import lru_cache
 from typing import Dict, List, Tuple, Optional
 import re
 
@@ -186,6 +187,87 @@ def get_fluid_info() -> Dict[str, List[str]]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Bezugszustand (wie EES: REFERENCE R134a IIR). CoolProp rechnet jedes Fluid in
+# seinem Standard-Bezugszustand (R134a, R32, CO2, Propan: IIR; Ammoniak, Wasser
+# nicht). Ein anderer Bezugszustand verschiebt h, u und s um Konstanten -
+# Differenzen sowie T, p, x, rho, cp bleiben gleich.
+# ---------------------------------------------------------------------------
+# Name: (Eingabe, Wert, h, s, Beschreibung) der siedenden Flüssigkeit
+REFERENCE_STATES = {
+    'IIR': ('T', 273.15, 200e3, 1e3, 'h = 200 kJ/kg, s = 1 kJ/(kg K) bei 0 °C'),
+    'ASHRAE': ('T', 233.15, 0.0, 0.0, 'h = 0, s = 0 bei -40 °C'),
+    'NBP': ('P', 101325.0, 0.0, 0.0, 'h = 0, s = 0 beim Normalsiedepunkt (1 atm)'),
+    'DEFAULT': None,
+}
+REFERENCE_ALIASES = {'iir': 'IIR', 'ashrae': 'ASHRAE', 'ash': 'ASHRAE', 'nbp': 'NBP',
+                     'default': 'DEFAULT', 'def': 'DEFAULT', 'dft': 'DEFAULT'}
+
+# Verschiebung (dh, ds) und Name des Bezugszustands je Fluid (CoolProp-Name), je Lösungslauf
+_reference_offsets: Dict[str, Tuple[float, float]] = {}
+_reference_names: Dict[str, str] = {}
+
+
+@lru_cache(maxsize=None)
+def canonical_fluid(name: str) -> str:
+    """Eindeutiger CoolProp-Name (R717 und ammonia -> Ammonia)."""
+    cp_name = get_fluid_name(name)
+    try:
+        return CP.get_fluid_param_string(cp_name, 'name')
+    except Exception:
+        return cp_name
+
+
+def reference_offsets(fluid: str, reference: str) -> Tuple[float, float]:
+    """
+    Verschiebung (dh, ds) in J/kg bzw. J/(kg K) vom CoolProp-Standard zum
+    Bezugszustand IIR, ASHRAE, NBP (DEFAULT: keine). Fehler, wenn der
+    Bezugspunkt nicht im Nassdampfgebiet des Fluids liegt.
+    """
+    key = REFERENCE_ALIASES.get(reference.lower())
+    if key is None:
+        raise ValueError(f"Unbekannter Bezugszustand '{reference}' - möglich: IIR, ASHRAE, NBP, DEFAULT")
+    if REFERENCE_STATES[key] is None:
+        return 0.0, 0.0
+    input_key, value, h_ref, s_ref, text = REFERENCE_STATES[key]
+    cp_name = canonical_fluid(fluid)
+    try:
+        if input_key == 'T':
+            low, high = CP.PropsSI('Ttriple', cp_name), CP.PropsSI('Tcrit', cp_name)
+        else:
+            low, high = CP.PropsSI('ptriple', cp_name), CP.PropsSI('pcrit', cp_name)
+        inside = low <= value < high
+        if inside:
+            h = CP.PropsSI('H', input_key, value, 'Q', 0, cp_name)
+            s = CP.PropsSI('S', input_key, value, 'Q', 0, cp_name)
+    except Exception:
+        low = high = None
+        inside = False
+    if not inside:
+        where = ''
+        if low is not None:
+            fmt = ((lambda t: f"{t - 273.15:.4g} °C") if input_key == 'T' else (lambda p: f"{p / 1e5:.4g} bar"))
+            where = (f" (unter dem Tripelpunkt {fmt(low)})" if value < low
+                     else f" (über dem kritischen Punkt {fmt(high)})")
+        raise ValueError(f"Bezugszustand {key} ({text}) für {fluid} nicht möglich - "
+                         f"der Bezugspunkt liegt nicht im Nassdampfgebiet{where}")
+    return h_ref - h, s_ref - s
+
+
+def set_reference_states(states: Dict[str, str]) -> None:
+    """Bezugszustände {Fluid: IIR/ASHRAE/NBP/DEFAULT} für die folgenden Berechnungen."""
+    offsets, names = {}, {}
+    for fluid, reference in states.items():
+        dh, ds = reference_offsets(fluid, reference)
+        if dh or ds:
+            offsets[canonical_fluid(fluid)] = (dh, ds)
+            names[canonical_fluid(fluid)] = REFERENCE_ALIASES[reference.lower()]
+    _reference_offsets.clear()
+    _reference_offsets.update(offsets)
+    _reference_names.clear()
+    _reference_names.update(names)
+
+
 def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
     """
     Berechnet eine thermodynamische Eigenschaft.
@@ -265,6 +347,14 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
         else:
             raise ValueError(f"Unbekannter Parameter: {key}")
 
+    # Bezugszustand (REFERENCE): h, u, s des Blatts -> CoolProp-Standard
+    dh, ds = (_reference_offsets.get(canonical_fluid(coolprop_fluid), (0.0, 0.0))
+              if _reference_offsets else (0.0, 0.0))
+    if dh or ds:
+        for cp_key, shift in (('H', dh), ('U', dh), ('S', ds)):
+            if cp_key in inputs:
+                inputs[cp_key] = float(inputs[cp_key]) - shift
+
     # Brauchen genau 2 unabhängige Zustandsgrößen
     if len(inputs) != 2:
         raise ValueError(f"Genau 2 Zustandsgrößen erforderlich, {len(inputs)} gegeben")
@@ -291,7 +381,19 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
     try:
         result_si = CP.PropsSI(output_prop, keys[0], values[0], keys[1], values[1], coolprop_fluid)
     except Exception as e:
-        raise ValueError(f"CoolProp Fehler für {coolprop_fluid}: {e}")
+        if set(keys) == {'T', 'P'} and 'Saturation pressure' in str(e):
+            # T und p auf der Siedelinie bestimmen den Zustand nicht (Nassdampf: x fehlt)
+            raise ValueError(f"{coolprop_fluid}: T = {inputs['T'] - 273.15:.4g} °C und p = "
+                             f"{inputs['P'] / 1e5:.5g} bar liegen auf der Sättigungslinie - dort legen "
+                             f"T und p den Zustand nicht fest. Dampfgehalt angeben (x=1 Sattdampf, "
+                             f"x=0 siedende Flüssigkeit) statt T bzw. p") from None
+        note = ''
+        if dh or ds:
+            # Zahlen der CoolProp-Meldung sind intern verschoben (h, u, s im CoolProp-Bezug)
+            note = (f" (h, u, s in dieser Meldung im CoolProp-Standardbezug; im Blatt gilt "
+                    f"REFERENCE {_reference_names.get(canonical_fluid(coolprop_fluid), '')}: "
+                    f"h um {dh / 1e3:+.6g} kJ/kg, s um {ds / 1e3:+.6g} kJ/(kg K) verschoben)")
+        raise ValueError(f"CoolProp Fehler für {coolprop_fluid}: {e}{note}")
 
     # Konvertiere von SI zu EES-Einheiten
     if func_name == 'volume':
@@ -301,6 +403,11 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
         result = FROM_SI[output_prop](result_si)
     else:
         result = result_si
+    shift = dh if output_prop in ('H', 'U') else ds if output_prop == 'S' else 0.0
+    if shift:
+        shifted = result + shift
+        # im Bezugspunkt selbst bleibt sonst ein Rundungsrest (-1.2e-9 J/kg statt 0)
+        result = 0.0 if abs(shifted) <= 1e-12 * max(abs(shift), abs(result)) else shifted
 
     return result
 

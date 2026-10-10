@@ -441,19 +441,14 @@ def _iter_call_spans(text: str, func_names_lower: Set[str]):
 def _convert_positional_call(func_name: str, args_str: str, keep_case: bool = True) -> str:
     """
     Konvertiert Einheiten in POSITIONSargumenten zu SI (Strahlungsfunktionen):
-    Eb(500°C, 5µm) -> Eb(773.15, 5e-06). Argumente ohne Einheit bleiben unverändert.
+    Eb(500°C, 5µm) -> Eb(773.15, 5e-06). Argumente ohne Einheit bleiben unverändert
+    (SI wie jede Zahl: Eb(1000, 5) sind 5 m).
     """
     args = []
     expected_units = RADIATION_ARG_UNITS.get(func_name.lower(), ())
     for index, arg in enumerate(_split_call_args(args_str)):
         converted = arg
-        if (index < len(expected_units) and expected_units[index] == 'm'
-                and re.fullmatch(r'\s*[+]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*', arg)):
-            # Zahlenliteral als Wellenlänge: >= 0.01 als µm ("Eb(1000, 5)"), kleinere
-            # als m. Im Solver sind Wellenlängen danach immer SI (keine Heuristik)
-            value = float(arg)
-            converted = repr(value / 1e6 if value >= 0.01 else value)
-        elif UNITS_AVAILABLE and '=' not in arg:
+        if UNITS_AVAILABLE and '=' not in arg:
             try:
                 magnitude, unit_str = parse_value_with_unit(arg)
             except ValueError:
@@ -465,6 +460,30 @@ def _convert_positional_call(func_name: str, args_str: str, keep_case: bool = Tr
                 converted = repr(unit_value.calc_value)
         args.append(converted)
     return f"{func_name}({', '.join(args)})"
+
+
+_NUMBER_LITERAL = re.compile(r'\s*[+]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*')
+
+
+def wavelength_literals(equations: Dict[str, str]) -> List[Tuple[str, float]]:
+    """
+    Zahlen ohne Einheit als Wellenlänge einer Strahlungsfunktion (Eb(1000, 5)): wie jede
+    Zahl SI-Werte (5 m). Nur für einen Hinweis - die Rechnung bleibt unverändert.
+
+    Returns:
+        [(Originalgleichung, Zahl), ...]
+    """
+    names = {name for name, units in RADIATION_ARG_UNITS.items() if 'm' in units}
+    found = []
+    for parsed, original in equations.items():
+        source = original or parsed
+        text = remove_comments(source)
+        for _, open_idx, close_idx, func in _iter_call_spans(text, names):
+            expected = RADIATION_ARG_UNITS[func.lower()]
+            for index, arg in enumerate(_split_call_args(text[open_idx + 1:close_idx])):
+                if index < len(expected) and expected[index] == 'm' and _NUMBER_LITERAL.fullmatch(arg):
+                    found.append((source, float(arg)))
+    return found
 
 
 def _convert_unit_function_call(func_name: str, args_str: str, keep_case: bool = False) -> str:
@@ -947,11 +966,21 @@ def _check_equation_syntax(left: str, right: str) -> None:
                 f"ist falsch, bei: {_excerpt(text, paren if paren >= 0 else func_end)}")
 
 
-def _join_bracket_lines(lines: List[str]) -> List[str]:
+_CONTINUES_AFTER = ('(', ',', '+', '-', '*', '/', '^', '·')
+_CONTINUES_BEFORE = (')', ',', '+', '-', '*', '/', '^', '·')
+
+
+def _join_bracket_lines(lines: List[str], spans: Optional[Dict[int, int]] = None) -> List[str]:
     """
     Fügt eine über mehrere Zeilen gehende Werteliste "x = [ ... ]" zu einer
-    Zeile zusammen (z.B. eine aus Excel eingefügte Spalte). Die verbrauchten
-    Zeilen werden zu Leerzeilen, damit die Zeilennummern erhalten bleiben.
+    Zeile zusammen (z.B. eine aus Excel eingefügte Spalte), ebenso eine Gleichung,
+    die in einer offenen Klammer weitergeht (wie in Python), wenn die Zeile mit
+    '(', ',' oder einem Operator endet bzw. die nächste damit beginnt:
+        y = IF(a, 1, 10,
+               20, 30)
+    Eine vergessene ')' ohne solche Fortsetzung bleibt ein Fehler dieser Zeile.
+    Die verbrauchten Zeilen werden zu Leerzeilen, damit die Zeilennummern erhalten
+    bleiben; spans erhält {erste Zeile: letzte Zeile} (Indizes ab 0).
     """
     result = list(lines)
     i = 0
@@ -965,7 +994,23 @@ def _join_bracket_lines(lines: List[str]) -> List[str]:
                 joined += ' ' + result[j]
                 result[j] = ''
             result[i] = joined
+            if spans is not None and j > i:
+                spans[i] = j
             i = j
+        elif line.count('(') > line.count(')') and '=' in line:
+            j, joined = i, line
+            while (joined.count('(') > joined.count(')') and j + 1 < len(result)
+                   and (joined.rstrip().endswith(_CONTINUES_AFTER)
+                        or result[j + 1].lstrip().startswith(_CONTINUES_BEFORE))):
+                j += 1
+                joined += ' ' + result[j].strip()
+            if j > i and joined.count('(') == joined.count(')'):
+                result[i] = joined
+                for k in range(i + 1, j + 1):
+                    result[k] = ''
+                if spans is not None:
+                    spans[i] = j
+                i = j
         i += 1
     return result
 
@@ -1056,13 +1101,18 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
     for _, used in _optimization_line_groups(raw_lines):
         for j in used:
             raw_lines[j] = ''
+    # ebenso die Bezugszustände (REFERENCE R717 IIR, parse_reference_states)
+    raw_lines = ['' if _REFERENCE_PATTERN.match(line) else line for line in raw_lines]
     text = '\n'.join(raw_lines)
 
     # Teile in Zeilen auf; Python-Schlüsselwörter als Variablennamen intern
     # umbenennen (lambda -> _kw_lambda), auch in den Originalzeilen, damit die
     # Einheiten-Analyse dieselben Namen sieht. Anzeige: display_name()/unmangle()
-    lines = [_mangle_line(line) for line in _join_bracket_lines(text.split('\n'))]
+    spans: Dict[int, int] = {}
+    lines = [_mangle_line(line) for line in _join_bracket_lines(text.split('\n'), spans)]
     original_lines = [mangle_keywords(line) for line in original_text.split('\n')]
+    for first, last in spans.items():      # mehrzeilige Gleichung: Original ebenso zusammen
+        original_lines[first] = ' '.join(line.strip() for line in original_lines[first:last + 1])
     for line_index, line in enumerate(lines):
         position[0] = line_index + 1
         _check_ascii_names(line)
@@ -1138,9 +1188,12 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
         if not line:
             continue
 
-        # Prüfe ob es eine Gleichung ist (enthält =)
+        # Jede Zeile außer Kommentaren und Anweisungen ist eine Gleichung - eine Zeile ohne '='
+        # (Tippfehler im Schlüsselwort: REFERENZ R717 IIR, Ausdruck ohne '=') fiele sonst still weg
         if '=' not in line:
-            continue
+            raise EquationSyntaxError(
+                f"'{unmangle(line)[:60]}' ist keine Gleichung (kein '=') - Text als "
+                f"Kommentar in {{...}} oder \"...\" setzen; Anweisungen: REFERENCE, MINIMIZE, MAXIMIZE")
 
         # Prüfe auf Vektor-Zuweisung (z.B. T = 0:10:100 oder T = 0:10:100 °C)
         is_vec, var_name, vec_str, vec_unit = is_vector_assignment(line, parse_units=parse_units)
@@ -1518,6 +1571,47 @@ def parse_optimization(text: str) -> List[OptimizationGoal]:
                 f"Zeile {line_no}: Die Zielgröße {unmangle(goal.objective)} kann nicht selbst variiert werden")
         goals.append(goal)
     return goals
+
+
+# ---------------------------------------------------------------------------
+# Bezugszustand eines Fluids (wie EES): REFERENCE R717 IIR - eigene Zeile, gilt
+# für das ganze Blatt; IIR, ASHRAE, NBP oder DEFAULT (CoolProp-Standard)
+# ---------------------------------------------------------------------------
+_REFERENCE_PATTERN = re.compile(r'^\s*REFERENCE\b[^=]*$', re.IGNORECASE)
+_REFERENCE_SYNTAX = "REFERENCE Fluid IIR (oder ASHRAE, NBP, DEFAULT), z.B. REFERENCE R717 IIR"
+
+
+def parse_reference_states(text: str) -> Dict[str, str]:
+    """
+    Liest alle Zeilen REFERENCE Fluid Bezugszustand -> {Fluid: Bezugszustand}.
+    Fehler mit Zeilennummer (unbekanntes Fluid, Bezugszustand nicht möglich,
+    dasselbe Fluid zweimal).
+    """
+    states, seen = {}, {}
+    for index, line in enumerate(remove_comments(text).split('\n')):
+        if not _REFERENCE_PATTERN.match(line):
+            continue
+        line_no = index + 1
+        parts = line.split()
+        if len(parts) != 3:
+            raise EquationSyntaxError(f"Zeile {line_no}: Bezugszustand so angeben: {_REFERENCE_SYNTAX}")
+        fluid, reference = parts[1].strip("'\""), parts[2]
+        if not _known_fluid(fluid):
+            raise EquationSyntaxError(f"Zeile {line_no}: Unbekanntes Fluid '{fluid}' (Help > Fluid List)")
+        try:
+            from thermodynamics import reference_offsets, canonical_fluid
+            reference_offsets(fluid, reference)
+            key = canonical_fluid(fluid)
+        except ImportError:
+            key = fluid.lower()
+        except ValueError as exc:
+            raise EquationSyntaxError(f"Zeile {line_no}: {exc}") from None
+        if key in seen:
+            raise EquationSyntaxError(
+                f"Zeile {line_no}: Bezugszustand von {fluid} steht schon in Zeile {seen[key]}")
+        seen[key] = line_no
+        states[fluid] = reference
+    return states
 
 
 def validate_system(equations: List[str], variables: Set[str], constants: Optional[Dict[str, float]] = None) -> Tuple[bool, str]:

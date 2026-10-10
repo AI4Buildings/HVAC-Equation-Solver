@@ -391,6 +391,32 @@ check("Strahlung: keine Unit-Warnungen", w == [], str([x.explanation for x in w]
 w = check_all_unit_consistency({'x': 2.86, 'r': 3.0}, {'(x*log(x)) - (r)': 'x*ln(x) = r'}, {'r': ''})
 check("Einheitenloses System -> keine Unit-Warnungen", w == [])
 
+print("=== Anzeige-Labels aus den Faktoren, IF/max, Herkunft dimensionsloser Größen ===")
+r = propagate(["n = V_dot/V", "t = V/V_dot", "d = A/L", "w = q*t_B", "p = R*T/v", "F = m*a", "q_V = h/v"],
+              {'V_dot': 'm^3/h', 'V': 'm^3', 'A': 'mm^2', 'L': 'mm', 'q': 'W/m', 't_B': 'h',
+               'R': 'J/(kg*K)', 'T': 'K', 'v': 'm^3/kg', 'm': 'kg', 'a': 'm/s^2', 'h': 'kJ/kg'})
+check("Gekürzte Einheit bleibt: V_dot/V -> 1/h, V/V_dot -> h, A/L -> mm",
+      (r.get('n'), r.get('t'), r.get('d')) == ('1/h', 'h', 'mm'), str(r))
+check("Leistung mal Zeit je Länge -> kWh/m (nicht N); Kraft bleibt N", (r.get('w'), r.get('F')) == ('kWh/m', 'N'), str(r))
+check("Druck aus R*T/v bleibt bar (Energie je Volumen nur per Startwert-Einheit)",
+      (r.get('p'), r.get('q_V')) == ('bar', 'bar'), str(r))
+r = propagate(["V_a = IF(n, 3.5, V_1, V_1, V_2)", "V_b = max(V_1, V_2)", "L_a = min(L_1, L_2)"],
+              {'V_1': 'm^3/h', 'V_2': 'm^3/h', 'n': '', 'L_1': 'mm', 'L_2': 'mm'})
+check("IF/max/min mit gleicher Eingabe-Einheit behalten sie",
+      (r.get('V_a'), r.get('V_b'), r.get('L_a')) == ('m^3/h', 'm^3/h', 'mm'), str(r))
+w = warnings_for(["Q_B = Q_HL*(T_i - T_B)/(T_i - T_a)", "Q_B = Q_1 + k_2*(T_B - T_s)"],
+                 {'Q_HL': 'W', 'T_i': 'K', 'T_a': 'K', 'T_s': '', 'Q_1': 'W', 'k_2': 'W/K'})
+check("Warnung nennt die ohne Einheit eingegebene Größe (T_s), nicht die berechnete (T_B)",
+      w and w[0].variable == 'T_s' and 'über eine Summe mit T_s' in w[0].explanation,
+      str([(x.variable, x.explanation) for x in w]))
+from unit_constraints import si_number_literals
+found = si_number_literals(eqs("f = 24/(24 - t_S)", "p_2 = p_1 - 0.2", "x = 1 - eta", "T_2 = T_1 + 10",
+                               "y = t_S*2 + 0"),
+                           {'t_S': 'h', 'p_1': 'bar', 'eta': '%', 'T_1': '°C'})
+check("Zahl in Summe mit Nicht-SI-Eingabe: 24 - t_S (h) -> 24 s, 0.2 bar -> Pa; nicht %, °C, 0",
+      [(n, name, unit, si) for _, n, name, unit, si in found] == [(24.0, 't_S', 'h', 's'), (0.2, 'p_1', 'bar', 'Pa')],
+      str(found))
+
 # ---------------------------------------------------------------------------
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")

@@ -338,6 +338,16 @@ COMPATIBLE_UNITS = {
     'MW': ['MW', 'kW', 'W'],
     'hp': ['hp', 'kW', 'W'],
 
+    # Energie je Länge, Fläche, Volumen (gleiche Dimension wie N, N/m, Pa - andere Größenart)
+    'kWh/m': ['kWh/m', 'Wh/m', 'kJ/m', 'MJ/m'],
+    'kJ/m': ['kJ/m', 'J/m', 'kWh/m', 'MJ/m'],
+    'kWh/m^2': ['kWh/m^2', 'Wh/m^2', 'kJ/m^2', 'MJ/m^2'],
+    'kJ/m^2': ['kJ/m^2', 'J/m^2', 'kWh/m^2', 'MJ/m^2'],
+    'kWh/m^3': ['kWh/m^3', 'Wh/m^3', 'kJ/m^3', 'MJ/m^3'],
+    'kJ/m^3': ['kJ/m^3', 'J/m^3', 'MJ/m^3', 'kWh/m^3'],
+    'N': ['N', 'kN'],
+    'kN': ['kN', 'N'],
+
     # Enthalpie / spezifische Energie
     'kJ/kg': ['kJ/kg', 'J/kg', 'BTU/lb'],
     'J/kg': ['J/kg', 'kJ/kg'],
@@ -418,6 +428,10 @@ def _convert_to_standard(quantity) -> Tuple[float, str]:
         # Temperaturdifferenz: bleibt Differenz (kein Offset), Label delta_K
         if 'delta_' in units_str:
             return (float(quantity.to('delta_degC').magnitude), 'delta_K')
+
+        # Winkel: intern Grad, wie die Winkelfunktionen (sin(30) = 0.5); 0.5236 rad -> 30
+        if quantity.dimensionless and units_str in _ANGLE_UNITS:
+            return (float(quantity.to('degree').magnitude), '')
 
         # Dimensionslos (inkl. kg/kg, g/kg): Zahlenwert ohne Einheiten-Präfix
         if quantity.dimensionless:
@@ -605,6 +619,8 @@ class UnitValue:
             # Erstelle temporäre Quantity um SI-Basis zu ermitteln
             temp_qty = 1.0 * ureg(normalized_unit)
             si_base_unit = str(temp_qty.to_base_units().units)
+            if temp_qty.dimensionless and str(temp_qty.units) in _ANGLE_UNITS:
+                si_base_unit = 'degree'   # Winkel sind intern Grad (wie die Winkelfunktionen)
 
             # Erstelle SI-Quantity
             si_quantity = si_value * ureg(si_base_unit)
@@ -692,10 +708,7 @@ class UnitValue:
         Returns:
             Numerischer Wert in Ziel-Einheit
 
-        Spezialfall Temperaturdifferenzen:
-            Bei berechneten Temperaturen (ohne original_unit aber mit calc_unit = 'K')
-            wird eine Delta-Konvertierung verwendet, da T1-T2 immer eine Differenz ist.
-            1K Differenz = 1°C Differenz (keine Offset-Subtraktion)
+        Temperaturdifferenzen (calc_unit delta_K) ohne Offset: 1 K = 1 °C Differenz.
         """
         if not target_unit:
             return self.original_value if self.original_unit else self.si_value
@@ -729,22 +742,6 @@ class UnitValue:
                     return self.si_value * 9.0 / 5.0
                 if normalized in ('degC', 'celsius', 'degree_Celsius', 'K', 'kelvin', 'delta_K'):
                     return self.si_value
-
-            # Prüfe ob es eine berechnete Temperaturdifferenz ist
-            # (keine original_unit aber calc_unit ist eine Temperatur-Einheit)
-            temp_units = {'K', 'degC', 'degF', 'kelvin', 'celsius', 'fahrenheit', '°C', '°F'}
-            is_calculated_temp = (
-                not self.original_unit and
-                self._calc_unit in temp_units and
-                self.si_unit == 'kelvin'
-            )
-
-            if is_calculated_temp and normalized in ('degC', 'celsius', 'degree_Celsius'):
-                # Berechnete Temperatur = Temperaturdifferenz → 1K = 1°C
-                return self.si_value
-            elif is_calculated_temp and normalized in ('degF', 'fahrenheit', 'degree_Fahrenheit'):
-                # Temperaturdifferenz: 1K = 1.8°F
-                return self.si_value * 9.0 / 5.0
 
             converted = self.quantity.to(normalized)
             return float(converted.magnitude)
@@ -984,9 +981,11 @@ def get_compatible_units(unit_str: str) -> List[str]:
     # Normalisiere für Lookup
     normalized = normalize_unit(unit_str)
 
-    # Suche in COMPATIBLE_UNITS
-    if normalized in COMPATIBLE_UNITS:
-        return COMPATIBLE_UNITS[normalized]
+    # Suche in COMPATIBLE_UNITS (wie geschrieben, sonst normalisiert: kJ/m^3 -> kJ/(m^3) -
+    # die Dimension allein unterscheidet Größenarten wie kJ/m^3 und bar nicht)
+    for key in (unit_str.strip(), normalized):
+        if key in COMPATIBLE_UNITS:
+            return COMPATIBLE_UNITS[key]
 
     # Versuche SI-Basiseinheit zu finden
     try:

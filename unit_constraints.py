@@ -612,6 +612,49 @@ def _scaled_label(l: DimensionInfo, r: DimensionInfo, q, divide: bool = False) -
     return None
 
 
+# Dimensionen, deren Anzeige die Settings bestimmen (Leistung, Energie, Druck) bzw. der
+# Temperatur-Charakter - dort kein zusammengesetztes Label
+_SETTINGS_DIMS = ('W', 'J', 'Pa')
+
+
+def _composed_label(l: DimensionInfo, r: DimensionInfo, q, divide: bool = False) -> Optional[str]:
+    """
+    Einheit eines Produkts/Quotienten zweier Größen mit Einheit aus den Einheiten der Faktoren
+    (gleiche Einheiten kürzen sich, wie in pint):
+    - eine einzige Einheit bleibt: n = V_dot/V mit m^3/h und m^3 -> 1/h, t = V/V_dot -> h,
+      d = A/L mit mm^2 und mm -> mm (sonst SI aus der Dimension: 1/s, s, m)
+    - Leistung mal Zeit ist Energie: w = q*t mit W/m und h -> kWh/m (gleiche Dimension wie N),
+      ebenso je Volumen (kWh/m^3; je Fläche kWh/m^2 aus der Tabelle)
+    Nicht für Temperaturen und die Settings-Größen (Leistung, Energie, Druck).
+    """
+    if (q is None or _is_temp_q(q) or _is_dimless_q(q) or not l.unit or not r.unit
+            or l.quantity is None or r.quantity is None
+            or _is_dimless_q(l.quantity) or _is_dimless_q(r.quantity)):
+        return None
+    try:
+        if any(q.dimensionality == ureg.Quantity(1.0, u).dimensionality for u in _SETTINGS_DIMS):
+            return None
+        a, b = ureg.Quantity(1.0, l.unit), ureg.Quantity(1.0, r.unit)
+        items = dict(((a / b) if divide else (a * b))._units)
+        dims = {name: ureg.Quantity(1.0, name).dimensionality for name in items}
+        if len(items) == 1:
+            (name, exp), = items.items()
+            if exp in (1, -1) and not _is_temp_q(ureg.Quantity(1.0, name)):
+                symbol = ureg.get_symbol(name)
+                return symbol if exp == 1 else f"1/{symbol}"
+            return None
+        power = ureg.Quantity(1.0, 'W').dimensionality
+        time = ureg.Quantity(1.0, 's').dimensionality
+        if (any(exp > 0 and dims[n] == power for n, exp in items.items())
+                and any(exp > 0 and dims[n] == time for n, exp in items.items())):
+            for k, label in ((1, 'kWh/m'), (3, 'kWh/m^3')):
+                if q.dimensionality == ureg.Quantity(1.0, f'J/m^{k}').dimensionality:
+                    return label
+    except Exception:
+        return None
+    return None
+
+
 def _mul(l: DimensionInfo, r: DimensionInfo) -> DimensionInfo:
     if l.quantity is None or r.quantity is None:
         return DimensionInfo(None)
@@ -630,7 +673,7 @@ def _mul(l: DimensionInfo, r: DimensionInfo) -> DimensionInfo:
             product = l.product and weight is None
         else:
             product = True
-    d = _dim(q, weight, _scaled_label(l, r, q))
+    d = _dim(q, weight, _scaled_label(l, r, q) or _composed_label(l, r, q))
     if product:
         d = replace(d, product=True)
     if l.literal and r.literal:
@@ -654,7 +697,7 @@ def _div(l: DimensionInfo, r: DimensionInfo) -> DimensionInfo:
             product = l.product and weight is None
         else:
             product = True
-    d = _dim(q, weight, _scaled_label(l, r, q, divide=True))
+    d = _dim(q, weight, _scaled_label(l, r, q, divide=True) or _composed_label(l, r, q, divide=True))
     if product:
         d = replace(d, product=True)
     if l.literal and r.literal:
@@ -769,7 +812,10 @@ def _same_dimension_result(dims, ctx: _Ctx) -> DimensionInfo:
             weight = ws.pop()
     if len(dims) == 1:
         return ref
-    return _dim(ref.quantity, weight)
+    # gemeinsame Eingabe-Einheit bleibt (max(V_1, V_2) mit m^3/h -> m^3/h, wie V_1 + V_2)
+    labels = {d.unit for d in known}
+    label = labels.pop() if len(labels) == 1 and len(known) == len(nonlit) and not _is_temp_q(ref.quantity) else None
+    return _dim(ref.quantity, weight, label or None)
 
 
 def _eval_call(node, ctx: _Ctx) -> DimensionInfo:
@@ -1889,6 +1935,23 @@ def _propagate(parsed_eqs, known_units: Dict[str, str], open_temperatures=frozen
     return known_units, result
 
 
+def _factor_names(node: ast.AST) -> Set[str]:
+    """Variablennamen eines Ausdrucks ohne Funktionsnamen (abs, enthalpy, ...)."""
+    calls = {id(sub.func) for sub in ast.walk(node) if isinstance(sub, ast.Call)}
+    return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name) and id(sub) not in calls}
+
+
+def _kelvin_law_term(node: ast.AST, known: Dict[str, DimensionInfo]) -> bool:
+    """
+    Summand mit einer Größe als Faktor, die keine Temperatur ist (EER*(T_c - T_0),
+    Q/(m*c)): die Gleichung ist ein Gesetz in Kelvin - aus EER = T_0/(T_c - T_0)
+    ausmultipliziert -, keine Summe von Temperaturwerten (kein Hinweis).
+    """
+    return not isinstance(node, ast.Name) and any(
+        not (name in known and known[name].quantity is not None and _is_temp_q(known[name].quantity))
+        for name in _factor_names(node))
+
+
 def temperature_sum_conflicts(equations: Dict[str, str], known_units: Dict[str, str],
                               open_temperatures=frozenset()) -> List[Tuple[str, List[str]]]:
     """
@@ -1926,6 +1989,8 @@ def temperature_sum_conflicts(equations: Dict[str, str], known_units: Dict[str, 
         terms = _flatten_additive(left, 1) + _flatten_additive(right, -1)
         evals = [(s, n, _eval_collect(n, known)[0]) for s, n in terms]
         if not any(d.quantity is not None and _is_temp_q(d.quantity) and not d.literal for _, _, d in evals):
+            continue
+        if any(not d.literal and _kelvin_law_term(n, known) for _, n, d in evals):
             continue
         # offen: unbestimmt oder ein Gewicht, das weder absolut (1) noch Differenz (0) ist
         # (z.B. 2 = Summe zweier absoluter Temperaturen) - muss hier aufgehen
@@ -2055,6 +2120,57 @@ def scale_offset_literals(equations: Dict[str, str], units: Dict[str, str]) -> L
     return found
 
 
+def si_number_literals(equations: Dict[str, str],
+                       input_units: Dict[str, str]) -> List[Tuple[str, float, str, str, str]]:
+    """
+    Zahlen ohne Einheit in einer Summe mit einer Größe, die in einer Nicht-SI-Einheit
+    eingegeben wurde (24 - t_Sperr mit t_Sperr = 2 h): die Zahl ist ein SI-Wert (24 s),
+    gemeint ist meist die Einheit der Eingabe (24 h). Kein Einheitenfehler - Zahlen sind in
+    Summen dimensionsneutral. Ausgenommen: dimensionslose Summen, Temperaturen (Differenzen
+    in K sind SI) und 0. Generisch aus der Struktur, unabhängig von Namen.
+
+    Returns:
+        [(Originalgleichung, Zahl, Größe, Eingabe-Einheit, SI-Einheit), ...]
+    """
+    if not PINT_AVAILABLE:
+        return []
+    factors = {}
+    for name, unit in input_units.items():
+        try:
+            q = ureg.Quantity(1.0, normalize_unit(unit.strip()))
+            if _is_dimless_q(q) or _is_temp_q(q):
+                continue
+            base = q.to_base_units()
+            if abs(base.magnitude - 1.0) > 1e-9:
+                si = next((expr for expr, _ in _LABEL_ENTRIES
+                           if ureg.Quantity(1.0, expr).dimensionality == base.dimensionality),
+                          _generic_label(base.dimensionality))
+                factors[name] = (unit.strip(), si)
+        except Exception:
+            continue
+    found = []
+    for parsed_key, original_eq in equations.items():
+        source = original_eq if original_eq else parsed_key
+        parsed = _parse_equation(source)
+        if parsed is None:
+            continue
+        hit = None
+        for node in (sub for side in parsed for sub in ast.walk(side)):
+            if not (isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub))):
+                continue
+            terms = _flatten_additive(node)
+            numbers = [float(n.value) for _, n in terms if isinstance(n, ast.Constant)
+                       and isinstance(n.value, (int, float)) and not isinstance(n.value, bool) and n.value]
+            names = [n.id for _, n in terms if isinstance(n, ast.Name) and n.id in factors]
+            if numbers and names:
+                hit = (numbers[0], names[0])
+                break
+        if hit:
+            unit, si = factors[hit[1]]
+            found.append((source, hit[0], hit[1], unit, si))
+    return found
+
+
 def scale_origin(unit: str) -> Optional[float]:
     """Nullpunkt einer Temperatur-Einheit in K (°C 273.15, °F 255.37, K 0) aus pint."""
     if not PINT_AVAILABLE or not unit:
@@ -2063,112 +2179,6 @@ def scale_origin(unit: str) -> Optional[float]:
         return float(ureg.Quantity(0.0, normalize_unit(unit.strip())).to('kelvin').magnitude)
     except Exception:
         return None
-
-
-def scale_dependent_sums(equations: Dict[str, str], known_units: Dict[str, str],
-                         open_temperatures=frozenset(),
-                         origins: Optional[Dict[str, float]] = None) -> List[Dict[str, Any]]:
-    """
-    Summen absoluter Temperaturen, deren Ergebnis vom Nullpunkt der Skala abhängt
-    (T_3 = T_1 + T_2: in K 606.3 K = 333.15 °C, auf der Celsius-Skala 60 °C). Solche
-    Kombinationen sind in Kelvin physikalisch sinnlos (pint: "ambiguous"); gerechnet
-    wird daher auf der Skala, in der die Temperaturen eingegeben wurden (wie EES).
-    Gültige Kombinationen (Differenz, Temperatur ± Differenz, Mittelwert) sind auf
-    jeder Skala gleich und bleiben unverändert; Temperaturen mit einem Faktor
-    (T_1*r, Isentrope) ebenso (Verhältnisskala Kelvin).
-
-    origins: Nullpunkt (K) der Eingabe-Skala je absoluter Eingabe (°C: 273.15).
-
-    Returns:
-        [{'key': Gleichung, 'source': Original, 'correction': c (zum Residuum addieren),
-          'points': neu als absolute Temperatur bestimmte Größen, 'origin': Nullpunkt}]
-    """
-    if not PINT_AVAILABLE:
-        return []
-    import itertools
-    origins = dict(origins or {})
-    parsed_eqs, keys, sources = [], [], []
-    for parsed_key, original_eq in equations.items():
-        source = original_eq if original_eq else parsed_key
-        parsed = _parse_equation(source)
-        if parsed is None and parsed_key and parsed_key != source:
-            parsed = _parse_equation(parsed_key)
-        if parsed is not None:
-            parsed_eqs.append(parsed)
-            keys.append(parsed_key)
-            sources.append(source)
-    sheet_origins = {round(o, 9) for o in origins.values()}
-    default_origin = next(iter(sheet_origins)) if len(sheet_origins) == 1 else None
-    known_units = dict(known_units)
-    open_temperatures = set(open_temperatures)
-    found: List[Dict[str, Any]] = []
-    handled: Set[int] = set()
-    for _ in range(len(parsed_eqs) + 1):
-        user = {v: _dim_info_from_unit(u, v) for v, u in known_units.items() if u is not None}
-        for v in open_temperatures:
-            if v in user and _is_temp_q(user[v].quantity):
-                user[v] = replace(user[v], weight=None)
-        inferred = _infer_dimensions(parsed_eqs, user)
-        all_dims = {**user, **inferred}
-        # nur eindeutige Bestimmungen (keine Ganzzahl-Auswahl über andere Gleichungen):
-        # eine Größe bekommt ihren Charakter aus der Gleichung, die sie berechnet
-        weights = _resolve_temperature_weights(parsed_eqs, all_dims, user, integral=False)
-        known = {v: (replace(d, weight=weights[v]) if v in weights else d) for v, d in all_dims.items()}
-        new = None
-        for index, (left, right) in enumerate(parsed_eqs):
-            if index in handled:
-                continue
-            terms = _flatten_additive(left, 1) + _flatten_additive(right, -1)
-            evals = [(sgn, n, _eval_collect(n, known)[0]) for sgn, n in terms]
-            if not any(d.quantity is not None and _is_temp_q(d.quantity) and not d.literal
-                       for _, _, d in evals):
-                continue
-            points, open_names, rest, ok = [], [], [], True
-            for sgn, n, d in evals:
-                if d.literal:
-                    continue
-                if isinstance(n, ast.Name) and d.quantity is not None and _is_temp_q(d.quantity):
-                    if d.weight == 1.0:
-                        points.append((sgn, n.id))
-                    elif d.weight == 0.0:
-                        rest.append((sgn, d))
-                    elif n.id not in user:
-                        open_names.append((sgn, n.id))
-                    else:
-                        ok = False
-                elif d.weight == 0.0 or (d.weight is None and d.product):
-                    rest.append((sgn, d))
-                else:
-                    ok = False     # Temperatur mit Faktor (T_1*r) o.ä.: Kelvin-Skala
-            if not ok or not points:
-                continue
-            base = sum(sgn for sgn, _ in points) + (_sum_weights(rest) or 0.0)
-            valid = any(abs(base + sum(sgn * w for (sgn, _), w in zip(open_names, combo))) < 1e-9
-                        for combo in itertools.product((0.0, 1.0), repeat=len(open_names)))
-            if valid:
-                continue
-            point_origins = {round(origins[name], 9) if name in origins else default_origin
-                             for _, name in points}
-            if len(point_origins) != 1 or None in point_origins:
-                continue
-            origin = next(iter(point_origins))
-            if not origin:
-                continue       # Kelvin-Skala: Nullpunkt 0, Ergebnis unverändert
-            count = sum(sgn for sgn, _ in points) + sum(sgn for sgn, _ in open_names)
-            if count == 0:
-                continue
-            new = index
-            found.append({'key': keys[index], 'source': sources[index], 'correction': -origin * count,
-                          'points': [name for _, name in open_names], 'origin': origin})
-            for _, name in open_names:
-                known_units[name] = 'K'
-                open_temperatures.discard(name)
-                origins[name] = origin
-            break
-        if new is None:
-            break
-        handled.add(new)
-    return found
 
 
 # ============================================================================
@@ -3356,6 +3366,44 @@ def _get_pressure_volume_factor(unit1: str, unit2: str) -> float:
         return 100.0  # Fallback
 
 
+def _dimensionless_sources(equations: Dict[str, str], all_units: Dict[str, str],
+                           given: Set[str]) -> Dict[str, List[str]]:
+    """
+    Je dimensionsloser Größe die ohne Einheit EINGEGEBENEN Größen, von denen sie die
+    Dimension über Summen erbt (T_B - T_s mit T_s = -10: T_B -> [T_s]); eine Eingabe
+    selbst -> [sie selbst]. Summanden derselben Summe haben dieselbe Dimension.
+    """
+    links: Dict[str, Set[str]] = {}
+    for parsed_key, original_eq in equations.items():
+        parsed = _parse_equation(original_eq or parsed_key)
+        if parsed is None:
+            continue
+        for node in (sub for side in parsed for sub in ast.walk(side)):
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
+                names = [n.id for _, n in _flatten_additive(node) if isinstance(n, ast.Name)]
+                for a in names:
+                    links.setdefault(a, set()).update(b for b in names if b != a)
+        left, right = parsed
+        if isinstance(left, ast.Name) and isinstance(right, ast.Name):
+            links.setdefault(left.id, set()).add(right.id)
+            links.setdefault(right.id, set()).add(left.id)
+    sources = {}
+    for var, unit in all_units.items():
+        if unit != '':
+            continue
+        if var in given:
+            sources[var] = [var]
+            continue
+        seen, todo = {var}, [var]
+        while todo:
+            for other in links.get(todo.pop(), ()):
+                if other not in seen and all_units.get(other) == '':
+                    seen.add(other)
+                    todo.append(other)
+        sources[var] = sorted(seen & given)
+    return sources
+
+
 def check_all_unit_consistency(solution: Dict[str, float],
                                 equations: Dict[str, str],
                                 known_units: Dict[str, str]) -> list:
@@ -3398,9 +3446,10 @@ def check_all_unit_consistency(solution: Dict[str, float],
         return []
 
     warnings = []
+    sources = _dimensionless_sources(equations, all_units, {v for v, u in known_units.items() if u == ''})
 
     for parsed_eq, original_eq in equations.items():
-        error = check_equation_dimensions(original_eq, all_units)
+        error = check_equation_dimensions(original_eq, all_units, sources)
 
         if error:
             if error['type'] == 'missing_units':
@@ -3529,11 +3578,15 @@ def compute_expression_dimension(expr: str, unit_map: Dict[str, str]) -> Tuple[A
     return dim, missing
 
 
-def _incompatible_sum(expr: str, unit_map: Dict[str, str]) -> Optional[Tuple[str, List[str]]]:
+def _incompatible_sum(expr: str, unit_map: Dict[str, str],
+                      sources: Optional[Dict[str, List[str]]] = None) -> Optional[Tuple[str, List[str]]]:
     """
     Erste Summe/Differenz im Ausdruck, deren Terme verschiedene Einheiten haben - als Text
     mit der Einheit jedes Terms ("h_9 - h_11s: h_9 in J/kg, h_11s dimensionslos (ohne Einheit
     eingegeben?)") und den verdächtigen Größen (dimensionslose Größen in der Summe).
+
+    sources: {Größe: ohne Einheit eingegebene Größen} - ist eine dimensionslose Größe der Summe
+    berechnet (T_B), nennt die Meldung, woher das kommt (T_B - T_s mit T_s = -10 ohne Einheit).
     """
     try:
         node = ast.parse(_remove_comments(expr).replace('^', '**'), mode='eval').body
@@ -3557,8 +3610,13 @@ def _incompatible_sum(expr: str, unit_map: Dict[str, str]) -> Optional[Tuple[str
             if dim == dimensionless:
                 hint = ''
                 if isinstance(term, ast.Name) and unit_map.get(term.id) == '':
-                    hint = ' (ohne Einheit eingegeben?)'
-                    suspects.append(term.id)
+                    origin = (sources or {}).get(term.id)
+                    if sources is None or origin == [term.id]:
+                        hint = ' (ohne Einheit eingegeben?)'
+                        suspects.append(term.id)
+                    elif origin:
+                        hint = f" (über eine Summe mit {', '.join(origin)} - ohne Einheit eingegeben?)"
+                        suspects += [name for name in origin if name not in suspects]
                 described.append(f"{text} dimensionslos{hint}")
             else:
                 described.append(f"{text} in {si_label_from_dimensionality(dim)}")
@@ -3566,7 +3624,8 @@ def _incompatible_sum(expr: str, unit_map: Dict[str, str]) -> Optional[Tuple[str
     return None
 
 
-def check_equation_dimensions(equation: str, unit_map: Dict[str, str]) -> Optional[Dict]:
+def check_equation_dimensions(equation: str, unit_map: Dict[str, str],
+                              sources: Optional[Dict[str, List[str]]] = None) -> Optional[Dict]:
     """
     Prüft ob eine Gleichung dimensional konsistent ist.
 
@@ -3605,7 +3664,7 @@ def check_equation_dimensions(equation: str, unit_map: Dict[str, str]) -> Option
             'type': 'dimension_mismatch',
             'left_dim': '(linke Seite)',
             'right_dim': 'Inkompatible Terme werden addiert/subtrahiert',
-            'detail': _incompatible_sum(right, unit_map),
+            'detail': _incompatible_sum(right, unit_map, sources),
             'equation': equation
         }
 
@@ -3633,7 +3692,7 @@ def check_equation_dimensions(equation: str, unit_map: Dict[str, str]) -> Option
             'type': 'dimension_mismatch',
             'left_dim': 'Inkompatible Terme werden addiert/subtrahiert',
             'right_dim': '(rechte Seite)',
-            'detail': _incompatible_sum(left, unit_map),
+            'detail': _incompatible_sum(left, unit_map, sources),
             'equation': equation
         }
 

@@ -10,11 +10,8 @@ Funktionen:
 
 Einheiten (intern SI, wie im ganzen Solver):
 - Temperatur T: K
-- Wellenlänge lambda: m (Eingaben mit Einheit, z.B. "5 µm", werden vom Parser
-  nach m umgerechnet). Zahlenliterale im Aufruf: Werte < 0.01 gelten als Meter,
-  größere als µm - "Eb(1000, 5)" und "Eb(1000, 5e-6)" sind gleich (Umrechnung im
-  Parser). Variablen sind im Solver immer Meter (RADIATION_FUNCTIONS = SI-Varianten);
-  die Python-Funktionen selbst erkennen reine Zahlen weiterhin automatisch.
+- Wellenlänge lambda: immer m wie jede Länge (Eingaben mit Einheit, z.B. "5 µm",
+  rechnet der Parser nach m um); eine Zahl ohne Einheit ist ein Meter-Wert
 - Eb: W/m³ (Anzeige in der GUI als W/(m²·µm))
 - Wien: m (Anzeige in der GUI als µm)
 - Blackbody: dimensionslos (0-1)
@@ -27,7 +24,6 @@ Konstanten (CODATA, konsistent zu σ = 5.670374419e-8):
 Alle Funktionen unterstützen sowohl skalare Werte als auch numpy-Arrays (vektorisiert).
 """
 
-import functools
 import math
 import numpy as np
 from scipy import integrate
@@ -48,36 +44,15 @@ def _ensure_kelvin(T):
     return np.asarray(T)
 
 
-def _normalize_wavelength(wavelength, si=False):
+def _normalize_wavelength(wavelength):
     """
-    Normalisiert Wellenlänge zu µm (interne Rechengröße der Planck-Formeln).
-
-    Wellenlängen kommen im Solver in Metern an (SI, "5 µm" -> 5e-6). Reine
-    Zahlen in µm ("5") bleiben weiterhin möglich: Werte < 0.01 werden als Meter
-    interpretiert und mit 1e6 multipliziert, größere Werte als µm.
-
-    Die Schwelle 0.01 deckt Wellenlängen in Metern bis 1 cm ab (weit über den
-    für Wärmestrahlung relevanten Bereich hinaus); als µm-Zahl wären Werte
-    < 0.01 µm (< 10 nm) für die Schwarzkörperstrahlung bedeutungslos.
+    Wellenlänge in m (SI, wie jede Länge) -> µm, die Rechengröße der Planck-Formeln.
+    Keine Deutung nach der Größe der Zahl: 5 ist 5 m, 5 µm ist 5e-6.
     """
-    wavelength = np.asarray(wavelength)
-    if si:
-        # Solver: Wellenlängen sind dort immer SI (m), keine Zahlen-Heuristik
-        return wavelength * 1e6
-
-    threshold = 0.01
-
-    if wavelength.ndim == 0:
-        # Skalar
-        if wavelength < threshold:
-            return wavelength * 1e6  # m -> µm
-        return wavelength
-    else:
-        # Array
-        return np.where(wavelength < threshold, wavelength * 1e6, wavelength)
+    return np.asarray(wavelength) * 1e6
 
 
-def Eb(T, wavelength, si=False):
+def Eb(T, wavelength):
     """
     Berechnet die spektrale (monochromatische) Emissionsleistung eines Schwarzkörpers.
 
@@ -86,8 +61,7 @@ def Eb(T, wavelength, si=False):
 
     Args:
         T: Temperatur in K (Skalar oder Array)
-        wavelength: Wellenlänge in µm oder m (automatische Erkennung)
-                   Werte < 0.0001 werden als Meter interpretiert
+        wavelength: Wellenlänge in m
 
     Returns:
         Spektrale Emissionsleistung in W/m³ (SI). Für W/(m²·µm) durch 1e6 teilen.
@@ -95,10 +69,8 @@ def Eb(T, wavelength, si=False):
     Beispiel:
         >>> Eb(1273.15, 3e-6)  # Bei 1273.15 K (= 1000°C) und 3 µm
         3.64...e10            # = 36446 W/(m²·µm)
-        >>> Eb(1273.15, 3.0)   # 3 als µm-Zahl erkannt (gleiches Ergebnis)
-        3.64...e10
     """
-    wavelength = _normalize_wavelength(wavelength, si)  # m -> µm (Rechengröße)
+    wavelength = _normalize_wavelength(wavelength)  # m -> µm (Rechengröße)
     T_kelvin = _ensure_kelvin(T)
 
     # Validierung (Skalare und Arrays)
@@ -195,7 +167,7 @@ def _blackbody_single(T_kelvin, lambda1, lambda2):
     return max(0.0, min(1.0, fraction))
 
 
-def Blackbody(T, lambda1, lambda2, si=False):
+def Blackbody(T, lambda1, lambda2):
     """
     Berechnet den Anteil der Schwarzkörperstrahlung im Wellenlängenbereich [λ1, λ2].
 
@@ -206,19 +178,19 @@ def Blackbody(T, lambda1, lambda2, si=False):
 
     Args:
         T: Temperatur in K (Skalar oder Array)
-        lambda1: Untere Wellenlänge in µm oder m (automatische Erkennung)
-        lambda2: Obere Wellenlänge in µm oder m (automatische Erkennung)
+        lambda1: Untere Wellenlänge in m
+        lambda2: Obere Wellenlänge in m
 
     Returns:
         Anteil der Strahlung im Bereich (dimensionslos, 0-1)
 
     Beispiel:
-        >>> Blackbody(5773.15, 0.4, 0.7)  # Sichtbares Licht bei Sonnentemperatur (5773 K)
+        >>> Blackbody(5773.15, 0.4e-6, 0.7e-6)  # Sichtbares Licht bei Sonnentemperatur (5773 K)
         0.367...
     """
     T_kelvin = _ensure_kelvin(T)
-    lambda1 = _normalize_wavelength(lambda1, si)  # m -> µm (Rechengröße)
-    lambda2 = _normalize_wavelength(lambda2, si)  # m -> µm (Rechengröße)
+    lambda1 = _normalize_wavelength(lambda1)  # m -> µm (Rechengröße)
+    lambda2 = _normalize_wavelength(lambda2)  # m -> µm (Rechengröße)
 
     # Validierung (Skalare und Arrays)
     if np.any(T_kelvin <= 0):
@@ -263,7 +235,7 @@ def _blackbody_cumulative_single(T_kelvin, wavelength):
     return max(0.0, min(1.0, fraction))
 
 
-def Blackbody_cumulative(T, wavelength, si=False):
+def Blackbody_cumulative(T, wavelength):
     """
     Berechnet den kumulativen Anteil der Schwarzkörperstrahlung von 0 bis λ.
 
@@ -271,12 +243,12 @@ def Blackbody_cumulative(T, wavelength, si=False):
 
     Args:
         T: Temperatur in K (Skalar oder Array)
-        wavelength: Obere Wellenlänge in µm oder m (automatische Erkennung)
+        wavelength: Obere Wellenlänge in m
 
     Returns:
         Kumulativer Anteil der Strahlung (dimensionslos, 0-1)
     """
-    wavelength = _normalize_wavelength(wavelength, si)  # m -> µm (Rechengröße)
+    wavelength = _normalize_wavelength(wavelength)  # m -> µm (Rechengröße)
     T_kelvin = _ensure_kelvin(T)
 
     # Validierung (Skalare und Arrays)
@@ -359,29 +331,13 @@ def Stefan_Boltzmann(T):
 
 # Dictionary aller Strahlungs-Funktionen für den Solver
 # Sowohl Groß- als auch Kleinschreibung unterstützen
-def _si_variant(func):
-    """
-    Variante für den Solver: Wellenlängen sind dort immer SI (m) wie alle Längen.
-    Mit der Zahlen-Heuristik (< 0.01 -> m, sonst µm) hätte eine ITERIERTE
-    Wellenlänge zwei Lösungsäste (z.B. 4.1e-6 als m und 4.1 als µm). Zahlenliterale
-    in Aufrufen ("Eb(1000, 5)") rechnet der Parser vorher nach dieser Regel um.
-    """
-    variant = functools.partial(func, si=True)
-    functools.update_wrapper(variant, func)
-    return variant
-
-
-_Eb_si = _si_variant(Eb)
-_Blackbody_si = _si_variant(Blackbody)
-_Blackbody_cumulative_si = _si_variant(Blackbody_cumulative)
-
 RADIATION_FUNCTIONS = {
-    'Eb': _Eb_si,
-    'eb': _Eb_si,
-    'Blackbody': _Blackbody_si,
-    'blackbody': _Blackbody_si,
-    'Blackbody_cumulative': _Blackbody_cumulative_si,
-    'blackbody_cumulative': _Blackbody_cumulative_si,
+    'Eb': Eb,
+    'eb': Eb,
+    'Blackbody': Blackbody,
+    'blackbody': Blackbody,
+    'Blackbody_cumulative': Blackbody_cumulative,
+    'blackbody_cumulative': Blackbody_cumulative,
     'Wien': Wien_displacement,
     'wien': Wien_displacement,
     'Stefan_Boltzmann': Stefan_Boltzmann,
@@ -418,14 +374,14 @@ if __name__ == "__main__":
     print("Test 4: Blackbody-Fraktion")
     T_sun = 5773.15  # K (ungefähre Sonnenoberflächentemperatur, = 5500°C)
     # Sichtbares Licht: 0.38 - 0.75 µm
-    f_visible = Blackbody(T_sun, 0.38, 0.75)
+    f_visible = Blackbody(T_sun, 0.38e-6, 0.75e-6)
     print(f"  Sichtbarer Anteil bei {T_sun} K: {f_visible*100:.1f}%")
 
     # Infrarot: 0.75 - 1000 µm
-    f_ir = Blackbody(T_sun, 0.75, 100)
+    f_ir = Blackbody(T_sun, 0.75e-6, 100e-6)
     print(f"  Infrarot-Anteil bei {T_sun} K: {f_ir*100:.1f}%")
 
     # UV: 0.01 - 0.38 µm
-    f_uv = Blackbody(T_sun, 0.01, 0.38)
+    f_uv = Blackbody(T_sun, 0.01e-6, 0.38e-6)
     print(f"  UV-Anteil bei {T_sun} K: {f_uv*100:.1f}%")
     print(f"  Summe: {(f_visible+f_ir+f_uv)*100:.1f}%")

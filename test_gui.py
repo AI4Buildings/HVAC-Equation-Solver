@@ -515,6 +515,10 @@ check("Beispiel: Optimierung der Dämmdicke = analytisch", abs(app.last_solution
       f"{app.last_solution['s_ins']} / {s_opt}")
 check("Beispiel: Energie je Fläche in kWh/m²", shown("Q_a")[1] == "kWh/m^2" and abs(shown("Q_a")[0] - 15.874) < 0.01,
       str(shown("Q_a")))
+check("Beispiel: NH3 mit REFERENCE R717 IIR (h' 0 °C = 200 kJ/kg) und Carnot implizit",
+      abs(shown("h_r1")[0] - 1450.274) < 0.01 and abs(shown("h_r3")[0] - 365.880) < 0.01
+      and abs(app.last_solution["EER"] - 4.86227) < 1e-4 and abs(app.last_solution["EER_C"] - 263.15/45) < 1e-6,
+      f"{shown('h_r1')} {shown('h_r3')} {app.last_solution.get('EER')} {app.last_solution.get('EER_C')}")
 check("Beispiel: keine Einheitenwarnung, kein Hinweis",
       app.unit_warning_label.cget("text") == "" and app.hints_label.cget("text") == "",
       app.unit_warning_label.cget("text") + app.hints_label.cget("text"))
@@ -582,9 +586,9 @@ for diff, out in (("dT", "T_2"), ("a", "b")):
     check(f"Differenz in K ({diff}): {diff} = 10 K, {out} = 30 °C",
           shown(diff) == (10.0, "K") and shown(out) == (30.0, "°C"), f"{shown(diff)} {shown(out)}")
 solve("T_1 = 20 °C\nx = 10 °C\nT_2 = T_1 + x")
-check("Zwei Werte in °C addiert -> auf der °C-Skala gerechnet (30 °C) + Hinweis",
-      shown("T_2") == (30.0, "°C") and app.hints_label.cget("text") == "ⓘ HINWEISE (1)"
-      and "°C-Skala gerechnet" in app.last_analysis.hints[0], f"{shown('T_2')} {app.hints_label.cget('text')}")
+check("Zwei Werte in °C addiert -> in Kelvin gerechnet (303.15 °C) + Hinweis",
+      close(shown("T_2")[0], 303.15) and shown("T_2")[1] == "°C" and app.hints_label.cget("text") == "ⓘ HINWEISE (1)"
+      and "gerechnet wird in Kelvin" in app.last_analysis.hints[0], f"{shown('T_2')} {app.hints_label.cget('text')}")
 solve("Q = 41.9 kW\nm = 1 kg/s\nc = 4.19 kJ/(kg*K)\nQ = m*c*theta")
 check("Temperatur im Produkt ohne Temperatur-Dimension = Differenz: theta = 10 K", shown("theta") == (10.0, "K"),
       str(shown("theta")))
@@ -594,13 +598,15 @@ check("T1 = T2 + x mit T1, T2 in °C: x = -10 K", shown("x") == (-10.0, "K"), st
 for order, expected in (("T1-T2", 75.0), ("T2-T1", 85.0)):
     solve(f"T1=80°C\nQ_dot=20kW\nm_dot=1 kg/s\nc=4 kJ/kgK\nQ_dot=m_dot*c*({order})")
     check(f"Q = m*c*({order}) mit T1 = 80 °C: T2 = {expected} °C", shown("T2") == (expected, "°C"), str(shown("T2")))
-for text, name, expected in (("T_1=20°C\nT_2=40°C\n\n\nT_3=T_2+T_1", "T_3", 60.0),
-                             ("T_1=20°C\nT_2=40°C\nT_3=T_2+T_1\nT_4=T_3+T_1", "T_4", 80.0),
-                             ("T_1 = 20 °C\nT_2 = 40 °C\nT_m = (T_1 + T_2)/2", "T_m", 30.0)):
+# Temperaturen immer in Kelvin - auch Summen absoluter Temperaturen (nur Hinweis), keine Skalen-Regel
+for text, name, expected, hints in (("T_1=20°C\nT_2=40°C\n\n\nT_3=T_2+T_1", "T_3", 333.15, 1),
+                                    ("T_1=20°C\nT_2=40°C\nT_3=T_2+T_1\nT_4=T_3+T_1", "T_4", 626.3, 1),
+                                    ("T_1 = 20 °C\nT_2 = 40 °C\nT_m = (T_1 + T_2)/2", "T_m", 30.0, 0)):
     solve(text)
     v, u = shown(name)
-    check(f"Summe absoluter Temperaturen auf der Eingabe-Skala: {name} = {expected} °C",
-          close(v, expected) and u == "°C", str((v, u)))
+    n_hints = len(app.last_analysis.hints) if app.last_analysis else 0
+    check(f"Summe absoluter Temperaturen in Kelvin: {name} = {expected} °C, {hints} Hinweis(e)",
+          close(v, expected) and u == "°C" and n_hints == hints, f"{(v, u)} {n_hints}")
 solve("T_a = -5 °C\nT_VL = quantity(20 + 1.5*(20 - value(T_a, °C)), °C)")
 check("Zahlenwertgleichung (Heizkurve in °C): T_VL = 57.5 °C", shown("T_VL") == (57.5, "°C"), str(shown("T_VL")))
 solve("L_0 = 5 m\nn = 0.4\ny = L_0^n\nq = 2*y")
@@ -920,6 +926,36 @@ solve("a = [1 2 3] kg/s\nf = (m - a)^2\nMINIMIZE f VARY m = 0 .. 5 kg/s")
 check("Optimum je Punkt einer Werteliste",
       isinstance(app.last_solution.get("m"), np.ndarray) and np.allclose(app.last_solution["m"], [1, 2, 3], atol=1e-4)
       and "Parametric Study: 3 points" in app.info_label.cget("text"), str(app.last_solution.get("m")))
+
+# Bezugszustand im Blatt (REFERENCE R717 IIR) gilt nur für diesen Lauf
+solve("REFERENCE R717 IIR\nh_1 = enthalpy(ammonia, T=0 °C, x=0)")
+check("REFERENCE R717 IIR -> h' = 200 kJ/kg bei 0 °C", shown("h_1") == (200.0, "kJ/kg"), str(shown("h_1")))
+solve("h_1 = enthalpy(ammonia, T=0 °C, x=0)")
+check("Blatt ohne REFERENCE -> wieder CoolProp-Standard (345.7 kJ/kg)",
+      shown("h_1")[0] is not None and abs(shown("h_1")[0] - 345.675) < 0.01, str(shown("h_1")))
+solve("T_0 = -40 °C\nT_c = 25 °C\nEER_C*(T_c - T_0) = T_0")
+check("Carnot implizit: EER_C*(T_c - T_0) = T_0 in Kelvin (3.587), kein Hinweis",
+      abs(shown("EER_C")[0] - 3.58692) < 1e-4 and not app.last_analysis.hints, f"{shown('EER_C')}")
+# Wellenlänge als Zahl ohne Einheit: SI (m) wie jede Zahl, keine µm-Deutung - Hinweis
+solve("E_1 = Eb(573.15, 5)\nE_2 = Eb(573.15, 5 µm)")
+check("Eb(573.15, 5) = 5 m (keine µm-Deutung) + Hinweis",
+      app.last_solution["E_1"] < 1e-12 * app.last_solution["E_2"] and len(app.last_analysis.hints) == 1
+      and "gilt als 5 m" in app.last_analysis.hints[0], str(app.last_analysis.hints))
+
+# Anzeige: Startwert mit Einheit legt die Anzeige fest (q_V in kJ/m^3 statt bar), Energie je Länge,
+# Rundungsrest nach Offset-Umrechnung, Zahl in Summe mit h-Eingabe -> Hinweis
+solve("h_1 = 388 kJ/kg\nh_6 = 242 kJ/kg\nv_1 = 0.2367 m^3/kg\nq_V = (h_1 - h_6)/v_1\n"
+      "{$Startwerte\nq_V = 600 kJ/m^3\n$}")
+check("Startwert mit Einheit -> Anzeige q_V in kJ/m³", shown("q_V")[1] == "kJ/m^3"
+      and abs(shown("q_V")[0] - 616.815) < 0.01, str(shown("q_V")))
+solve("q_ES = 60 W/m\nt_B = 1800 h\nw_ES = q_ES*t_B")
+check("Leistung je Länge mal Zeit -> 108 kWh/m (nicht N)", shown("w_ES") == (108.0, "kWh/m"), str(shown("w_ES")))
+solve("T_0 = 0 °C\np_0 = pressure(ammonia, T=T_0, x=1)\nh_1 = enthalpy(ammonia, T=T_0, x=0.5)\n"
+      "T_4 = temperature(ammonia, p=p_0, h=h_1)")
+check("Kein Rundungsrest nach Offset-Umrechnung (T_4 = 0 °C)", shown("T_4") == (0.0, "°C"), str(shown("T_4")))
+solve("Q_HL = 10 kW\nt_S = 2 h\nf = 24/(24 - t_S)\nQ_WP = Q_HL*f")
+check("Zahl in Summe mit Zeit in h -> Hinweis 'gilt als 24 s'",
+      any("gilt als 24 s" in h for h in app.last_analysis.hints), str(app.last_analysis.hints))
 
 # ---------------------------------------------------------------------------
 app.destroy()
