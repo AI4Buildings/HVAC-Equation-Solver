@@ -159,34 +159,6 @@ def get_available_fluids() -> List[str]:
         return []
 
 
-def get_fluid_info() -> Dict[str, List[str]]:
-    """Gibt kategorisierte Fluid-Informationen zurück."""
-    return {
-        'Wasser/Dampf': ['Water (water, steam, h2o)'],
-        'Luft': ['Air (air, luft)'],
-        'Kältemittel (HFCs)': [
-            'R134a', 'R32', 'R410A', 'R407C', 'R404A', 'R507A'
-        ],
-        'Kältemittel (HFOs)': [
-            'R1234yf', 'R1234ze(E)'
-        ],
-        'Natürliche Kältemittel': [
-            'R717/Ammonia (ammonia, nh3)',
-            'R744/CO2 (co2)',
-            'R290/Propane (propane, propan)',
-            'R600a/IsoButane (isobutane, isobutan)',
-        ],
-        'Gase': [
-            'Nitrogen (n2, stickstoff)',
-            'Oxygen (o2, sauerstoff)',
-            'Hydrogen (h2, wasserstoff)',
-            'Helium (he)',
-            'Argon (ar)',
-            'Methane (ch4, methan)',
-        ],
-    }
-
-
 # ---------------------------------------------------------------------------
 # Bezugszustand (wie EES: REFERENCE R134a IIR). CoolProp rechnet jedes Fluid in
 # seinem Standard-Bezugszustand (R134a, R32, CO2, Propan: IIR; Ammoniak, Wasser
@@ -278,7 +250,7 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
         **kwargs: Zustandsgrößen (T, p, h, s, x, etc.)
 
     Returns:
-        Berechneter Wert in EES-Einheiten
+        Berechneter Wert in SI-Einheiten
     """
     func_name = func_name.lower()
 
@@ -395,7 +367,7 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
                     f"h um {dh / 1e3:+.6g} kJ/kg, s um {ds / 1e3:+.6g} kJ/(kg K) verschoben)")
         raise ValueError(f"CoolProp Fehler für {coolprop_fluid}: {e}{note}")
 
-    # Konvertiere von SI zu EES-Einheiten
+    # Ausgabe in SI (volume = 1/Dichte)
     if func_name == 'volume':
         # Spez. Volumen = 1 / Dichte
         result = 1.0 / result_si

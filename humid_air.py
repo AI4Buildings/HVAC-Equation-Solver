@@ -87,7 +87,8 @@ def _resolve_dual_humidity(inputs: dict, humidity_keys: set) -> dict:
         Modified inputs dict with T instead of one humidity property
     """
     P = inputs['P']
-    humidity_list = list(humidity_keys)
+    # Reihenfolge der Argumente im Aufruf (eine Menge hätte eine vom Hash-Seed abhängige Reihenfolge)
+    humidity_list = [key for key in inputs if key in humidity_keys]
     key1, key2 = humidity_list[0], humidity_list[1]
     val1, val2 = inputs[key1], inputs[key2]
 

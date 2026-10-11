@@ -25,13 +25,13 @@ from parser import (parse_equations, validate_system, display_name, unmangle,
                     parse_optimization, start_value_units, parse_reference_states, remove_comments,
                     wavelength_literals)
 from version import __version__
-from solver import solve_system, solve_parametric, format_solution, SolveAnalysis
+from solver import solve_system, solve_parametric, SolveAnalysis
 import solver as solver_module
 import numpy as np
 
 # Versuche Units-Modul zu laden
 try:
-    from units import (get_compatible_units, UnitValue, detect_unit_from_equation, get_initial_from_unit,
+    from units import (get_compatible_units, UnitValue, get_initial_from_unit,
                        initial_values_from_units)
     UNITS_AVAILABLE = True
 except ImportError:
@@ -44,7 +44,7 @@ except ImportError:
 
 # Versuche Constraint-Propagation zu laden
 try:
-    from unit_constraints import (propagate_all_units, check_all_unit_consistency, propagate_all_units_complete,
+    from unit_constraints import (check_all_unit_consistency, propagate_all_units_complete,
                                   temperature_sum_conflicts, scale_origin, numeric_value_form,
                                   missing_unit_annotations, scale_offset_literals, si_number_literals)
     CONSTRAINT_PROPAGATION_AVAILABLE = True
@@ -71,7 +71,7 @@ ctk.set_default_color_theme("blue")
 
 # Versuche Thermodynamik-Modul zu laden
 try:
-    from thermodynamics import get_fluid_info, THERMO_FUNCTIONS, set_reference_states
+    from thermodynamics import THERMO_FUNCTIONS, set_reference_states
     THERMO_AVAILABLE = True
 except ImportError:
     THERMO_AVAILABLE = False
@@ -139,6 +139,11 @@ Values with units only in assignments 'name = number unit':
   U = 0.3 W/(m²·K)   (m2 = m^2 = m², · or * between units)
   n = 0.3 1/h        (reciprocal units after a space; also h^-1)
   eta = 89.2 %       (% and ‰ are units: eta = 0.892; rh=50 %)
+  b = 0.25 kg/kWh    (prefixes stay prefixes: 1/kPa, kg/MJ)
+  r = 2 °C/h         (°C in a compound unit is a difference: K/h)
+  n = 1450 rpm       (rpm = U/min = 1/min: revolutions per time)
+Each quantity is given once; a second value (x = 5, x = 3) is
+checked like an equation and reported as a contradiction.
 A constant WITHOUT unit is dimensionless (eta = 0.8) - except 0:
 zero is zero in every unit, its unit follows from the equations
 (Q_12 = 0 next to Q_12 + W_12 = m*c_v*(T_2 - T_1) is in kJ).
@@ -399,7 +404,7 @@ For the display, each equation is also checked with the solution:
 it must stay valid when the zero point of the temperature scale
 is shifted (absolute temperatures shift, differences do not).
 Absolute temperatures are shown in °C (Settings), differences
-in K (the unit selector converts them without offset).
+in K (the unit selector offers only K: °C is always absolute).
 Values entered in K whose meaning cannot be decided are shown
 as entered (K). T only in p*v = R*T (product): shown in K -
 the value in K is right either way.
@@ -1096,19 +1101,35 @@ class EquationSolverApp(ctk.CTk):
             text += " Hinweis: " + " ".join(hints)
         return text.strip()
 
-    def _add_equation_row(self, parent, equation: str, var: str, value: float, residual: float, row: int):
+    def _relative_residual(self, parsed: str, residual: float) -> float:
+        """
+        Residuum relativ zur Größenordnung der Terme der Gleichung (wie im Solver). Absolut in
+        SI hinge die Bewertung von der Einheit ab (1e-5 in Pa winzig, in m^3/s nicht).
+        """
+        values = getattr(self, '_residual_values', None)
+        if parsed and values:
+            try:
+                from solver import _relative_residual, _get_eval_context
+                return _relative_residual(parsed, values, _get_eval_context())
+            except Exception:
+                pass
+        return abs(residual)
+
+    @staticmethod
+    def _residual_color(relative: float) -> str:
+        if relative < 1e-8:
+            return COLORS["success"]
+        return COLORS["warning"] if relative < 1e-4 else COLORS["error"]
+
+    def _add_equation_row(self, parent, equation: str, var: str, value: float, residual: float, row: int,
+                          parsed: str = ''):
         """Fügt eine Zeile für eine Gleichung zu den Residuals hinzu."""
         row_frame = ctk.CTkFrame(parent, fg_color="transparent", height=22)
         row_frame.grid(row=row, column=0, sticky="ew", pady=1)
         row_frame.grid_columnconfigure(0, weight=1)
 
-        # Residual color based on magnitude
-        if abs(residual) < 1e-8:
-            res_color = COLORS["success"]
-        elif abs(residual) < 1e-4:
-            res_color = COLORS["warning"]
-        else:
-            res_color = COLORS["error"]
+        # Farbe nach dem relativen Residuum
+        res_color = self._residual_color(self._relative_residual(parsed, residual))
 
         # Equation (truncated if too long; _kw_lambda -> lambda)
         equation = unmangle(equation)
@@ -1253,7 +1274,7 @@ class EquationSolverApp(ctk.CTk):
             for i, eq_info in enumerate(analysis.constants):
                 self._add_equation_row(
                     content, eq_info.original, eq_info.variable,
-                    eq_info.value, eq_info.residual, i
+                    eq_info.value, eq_info.residual, i, eq_info.parsed
                 )
             current_row += 1
 
@@ -1267,7 +1288,7 @@ class EquationSolverApp(ctk.CTk):
             for i, eq_info in enumerate(analysis.direct_evals):
                 self._add_equation_row(
                     content, eq_info.original, eq_info.variable,
-                    eq_info.value, eq_info.residual, i
+                    eq_info.value, eq_info.residual, i, eq_info.parsed
                 )
             current_row += 1
 
@@ -1281,7 +1302,7 @@ class EquationSolverApp(ctk.CTk):
             for i, eq_info in enumerate(analysis.single_unknowns):
                 self._add_equation_row(
                     content, eq_info.original, eq_info.variable,
-                    eq_info.value, eq_info.residual, i
+                    eq_info.value, eq_info.residual, i, eq_info.parsed
                 )
             current_row += 1
 
@@ -1307,9 +1328,9 @@ class EquationSolverApp(ctk.CTk):
                 text_color=COLORS["text_dim"]
             ).pack(side="left")
 
-            max_res_color = COLORS["success"] if block.max_residual < 1e-8 else (
-                COLORS["warning"] if block.max_residual < 1e-4 else COLORS["error"]
-            )
+            max_res_color = self._residual_color(max(
+                (self._relative_residual(parsed, res)
+                 for parsed, res in zip(block.parsed_equations, block.residuals)), default=0.0))
             ctk.CTkLabel(
                 max_res_frame, text=f"Max Res: {block.max_residual:.2E}",
                 font=ctk.CTkFont(size=10, weight="bold"),
@@ -1317,8 +1338,8 @@ class EquationSolverApp(ctk.CTk):
             ).pack(side="right")
 
             # Gleichungen im Block
-            for i, (eq, res) in enumerate(zip(block.equations, block.residuals)):
-                self._add_equation_row(content, eq, "", 0, res, i + 1)
+            for i, (eq, parsed, res) in enumerate(zip(block.equations, block.parsed_equations, block.residuals)):
+                self._add_equation_row(content, eq, "", 0, res, i + 1, parsed)
 
             current_row += 1
 
@@ -1632,6 +1653,8 @@ class EquationSolverApp(ctk.CTk):
         # Alte Lösung verwerfen, BEVOR geparst wird - sonst bliebe sie bei einem
         # Parse-Fehler (z.B. unbekannte Einheit) stehen und Plot zeigte alte Daten
         self.last_solution = None
+        self._kelvin_display = set()     # Anzeige-Festlegungen des vorigen Laufs gelten nicht
+        self._dimensionless_results = set()
 
         try:
             # Bezugszustände der Fluide (REFERENCE R717 IIR) gelten für diesen Lauf
@@ -1674,6 +1697,9 @@ class EquationSolverApp(ctk.CTk):
             if not valid and n_equations == 0 and (initial_values or sweep_vars):
                 result = dict(initial_values)
                 result.update(sweep_vars)
+                # ohne Gleichungen ist der Charakter einer in K eingegebenen Temperatur offen:
+                # wie eingegeben in K (wie in Blättern mit Gleichungen)
+                self._kelvin_display = set(self._temperature_inputs(unit_values)[0])
                 if sweep_vars:
                     n_points = len(next(iter(sweep_vars.values())))
                     self._show_results(result, f"Parametric: {n_points} points", 0, 0, "OK")
@@ -1710,7 +1736,7 @@ class EquationSolverApp(ctk.CTk):
                     if uv.calc_unit:
                         known_units[var] = uv.calc_unit
                 # In K eingegebene Größen: absolut oder Differenz folgt aus den Gleichungen
-                open_k, celsius = self._temperature_inputs(unit_values)
+                open_k, _ = self._temperature_inputs(unit_values)
                 # Startwerte mit Einheit legen die Einheit berechneter Größen fest
                 self._start_units = {}
                 for name, uv in start_value_units(equations_text).items():
@@ -1782,7 +1808,9 @@ class EquationSolverApp(ctk.CTk):
                     progress_callback=progress_callback, constants=constants,
                     original_equations=original_equations
                 )
-                analysis = None
+                # keine Residuen je Punkt - Einheiten-Warnungen und Hinweise gelten trotzdem
+                analysis = SolveAnalysis()
+                self.last_analysis = analysis
             elif goals:
                 self.status_label.configure(text="Optimizing...")
                 self.update()
@@ -1797,8 +1825,9 @@ class EquationSolverApp(ctk.CTk):
                     progress_callback=progress_callback, constants=constants,
                     original_equations=original_equations
                 )
-                # Keine Residuals für Parameterstudien
-                analysis = None
+                # keine Residuen je Punkt - Einheiten-Warnungen und Hinweise gelten trotzdem
+                analysis = SolveAnalysis()
+                self.last_analysis = analysis
             else:
                 result = solve_system(
                     equations, variables, solver_initial, constants=constants,
@@ -1809,8 +1838,11 @@ class EquationSolverApp(ctk.CTk):
 
             # Einheiten der berechneten Variablen (auch bei Teillösung, damit
             # keine rohen SI-Zahlen ohne Einheit erscheinen)
+            # Werte der Lösung (Skalare) für die relative Bewertung der Residuen
+            self._residual_values = {name: value for name, value in {**constants, **(solution or {})}.items()
+                                     if np.ndim(value) == 0}
             if UNITS_AVAILABLE and solution:
-                self._assign_result_units(solution, original_equations, unit_values, constants)
+                self._assign_result_units(solution, original_equations, unit_values, constants, sweep_vars)
 
                 # Einheiten-Konsistenzprüfung
                 if CONSTRAINT_PROPAGATION_AVAILABLE and analysis:
@@ -1818,7 +1850,7 @@ class EquationSolverApp(ctk.CTk):
                     known_units = {var: uv.calc_unit for var, uv in self.current_unit_values.items()
                                    if uv.calc_unit is not None}
                     # Füge Konstanten ohne Einheit als dimensionslos hinzu
-                    for var in self._dimensionless_constants(constants):
+                    for var in self._dimensionless_constants(constants, sweep_vars):
                         if var not in known_units:
                             known_units[var] = ''
                     unit_warnings = check_all_unit_consistency(solution, original_equations, known_units)
@@ -1827,6 +1859,8 @@ class EquationSolverApp(ctk.CTk):
 
             # Generische Diagnose: Struktur/Numerik (bei Fehler) + Namens-Hinweise
             diagnosis_errors = []
+            if sweep_vars and analysis is not None:
+                analysis.hints = temperature_hints + self._single_phase_quality_hints(original_equations, solution)
             if DIAGNOSTICS_AVAILABLE and not sweep_vars:
                 try:
                     diagnosis_errors, hints = diagnose(
@@ -1850,7 +1884,12 @@ class EquationSolverApp(ctk.CTk):
                     self.status_label.configure(text="Parametric study: some points failed")
                 elif sweep_vars:
                     self.status_label.configure(text=f"Parametric study: {len(list(sweep_vars.values())[0])} points")
-                else:
+                if sweep_vars and analysis is not None:
+                    self._update_residuals_tab(analysis)
+                    self.unit_warning_label.configure(
+                        text=f"⚠ UNIT WARNINGS ({len(analysis.unit_warnings)})" if analysis.unit_warnings else "")
+                    self._update_hints_label(analysis)
+                if not sweep_vars:
                     self.status_label.configure(text="Optimum found" if goals else "Solution found")
                     if goals:
                         # Ergebnis der Optimierung (Minimum/Maximum, Grenzen) statt der Zählung
@@ -1965,17 +2004,30 @@ class EquationSolverApp(ctk.CTk):
     def _zero_point_evaluator(solution: dict):
         """
         (Werte, residual) für den Nullpunkt-Test des Temperatur-Charakters: Werte der Lösung
-        in SI (Parameterstudie: erster Punkt) und die Auswertung einer Gleichung wie im Solver.
+        in SI (Parameterstudie: der erste Punkt, an dem alle Größen gelöst sind) und die
+        Auswertung einer Gleichung wie im Solver.
         """
         try:
             from solver import _calculate_residual, _get_eval_context
             context = _get_eval_context()
         except Exception:
             return None
+        arrays = [np.asarray(value, dtype=float) for value in solution.values()
+                  if isinstance(value, np.ndarray) and value.ndim == 1]
+        point = 0
+        if arrays and len({a.size for a in arrays}) == 1:
+            # erster vollständig gelöster Punkt, möglichst ohne Nullwerte (m_2 = 0 macht eine
+            # Mischungsgleichung entartet - der Test wäre dort nicht aussagekräftig)
+            finite = np.all([np.isfinite(a) for a in arrays], axis=0)
+            regular = finite & np.all([a != 0 for a in arrays], axis=0)
+            for mask in (regular, finite):
+                if mask.any():
+                    point = int(np.argmax(mask))
+                    break
         values = {}
         for name, value in solution.items():
             try:
-                values[name] = float(value[0]) if isinstance(value, np.ndarray) else float(value)
+                values[name] = float(value[point]) if isinstance(value, np.ndarray) else float(value)
             except (TypeError, ValueError, IndexError):
                 continue
         return values, lambda equation, trial: _calculate_residual(equation, trial, context)
@@ -2043,7 +2095,7 @@ class EquationSolverApp(ctk.CTk):
             line = line_of.get(source)
             forms = []
             for label, unit in ((f"{scale}-Zahlenwerte", scale), ("Kelvin-Werte", 'K')):
-                form = numeric_value_form(source, points, unit)
+                form = numeric_value_form(source, points, unit, {**known_units, **all_units})
                 forms.append(f"  - {label}: {unmangle(form) if form else f'mit value(x, {unit}) schreiben'}")
             messages.append(
                 f"{f'Zeile {line}: ' if line else ''}'{unmangle(code).strip()}' - Kombination absoluter "
@@ -2054,7 +2106,7 @@ class EquationSolverApp(ctk.CTk):
         return messages
 
     def _assign_result_units(self, solution: dict, original_equations: dict, unit_values: dict,
-                             constants: dict):
+                             constants: dict, sweep_vars=()):
         """
         Bestimmt die Anzeige-Einheiten der berechneten Variablen.
 
@@ -2072,7 +2124,8 @@ class EquationSolverApp(ctk.CTk):
             return
         known_units = {var: uv.calc_unit for var, uv in unit_values.items() if uv.calc_unit}
         if any(uv.original_unit for uv in unit_values.values()):
-            for var in self._dimensionless_constants(constants):
+            # Konstanten und Parameterstudien/Wertelisten ohne Einheit: dimensionslos
+            for var in self._dimensionless_constants(constants, sweep_vars):
                 known_units.setdefault(var, '')
         open_k, _ = self._temperature_inputs(unit_values)
         for name, uv in getattr(self, '_start_units', {}).items():
@@ -2111,6 +2164,9 @@ class EquationSolverApp(ctk.CTk):
                                                 zero_point=zero_point)
         except Exception:
             return
+        # dimensionslos (Auswahl -, %, ‰, g/kg) nur, was die Ableitung so ergibt - nicht jede
+        # Größe ohne bekannte Einheit (T = 300 in einem Zahlenblatt ist nicht "30000 %")
+        self._dimensionless_results = {v for v, u in units.items() if u in ('', 'dimensionless')}
         for var, val in solution.items():
             existing = self.current_unit_values.get(var)
             if var in open_k:
@@ -2121,10 +2177,11 @@ class EquationSolverApp(ctk.CTk):
                         self.current_unit_values[var] = UnitValue.from_si_base(first, 'delta_K')
                     except Exception:
                         pass
-                elif safe.get(var) == 'delta_K':
+                    continue
+                if safe.get(var) == 'delta_K':
                     # In K eingegeben, Charakter nicht bestimmbar: wie eingegeben (K)
                     self._kelvin_display.add(var)
-                continue
+                # eine berechnete Größe (nur der Startwert in K) bekommt ihre Einheit unten
             if existing is not None and existing.original_unit:
                 continue  # Vom Benutzer angegebene Einheit hat Vorrang
             unit = units.get(var)
@@ -2347,7 +2404,8 @@ class EquationSolverApp(ctk.CTk):
                     width=80, anchor="center"
                 )
                 unit_label.pack(side="right", padx=2)
-            elif UNITS_AVAILABLE and not isinstance(val, np.ndarray):
+            elif (UNITS_AVAILABLE and not isinstance(val, np.ndarray)
+                  and var in getattr(self, '_dimensionless_results', ())):
                 # Dimensionslos: Zahl, %, ‰ oder g/kg (relative Feuchte, Wassergehalt, Wirkungsgrad)
                 self.current_unit_values[var] = UnitValue.from_si_base(float(display_val), '')
                 unit_dropdown = ctk.CTkOptionMenu(
@@ -2366,6 +2424,9 @@ class EquationSolverApp(ctk.CTk):
                 unit_dropdown.set('-')
                 unit_dropdown.pack(side="right", padx=2)
                 self.unit_dropdowns[var] = unit_dropdown
+            elif UNITS_AVAILABLE and not isinstance(val, np.ndarray):
+                # Einheit unbekannt (z.B. Blatt ohne Einheiten): SI-Wert, keine Umrechnung
+                ctk.CTkLabel(row, text="", width=80).pack(side="right", padx=2)
 
             # Value Label
             val_label = ctk.CTkLabel(
@@ -2779,7 +2840,10 @@ class EquationSolverApp(ctk.CTk):
             messagebox.showinfo("Plot", "Plot requires parametric study with vector data.")
             return
 
-        array_vars = sorted([k for k, v in self.last_solution.items() if isinstance(v, np.ndarray)])
+        # Größen der Parameterstudie zuerst (Reihenfolge im Blatt, Vorauswahl x-Achse), dann die übrigen
+        arrays = [k for k, v in self.last_solution.items() if isinstance(v, np.ndarray)]
+        sweeps = [k for k in getattr(self, 'last_sweep_vars', {}) if k in arrays]
+        array_vars = sweeps + sorted(k for k in arrays if k not in sweeps)
         shown_names = {display_name(v): v for v in array_vars}  # Anzeige -> intern
 
         dialog = ctk.CTkToplevel(self)

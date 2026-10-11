@@ -749,7 +749,7 @@ check("Blatt mit Einheiten: Konstante ohne Einheit dimensionslos -> Q_rad in kW"
 
 solve("m_dot = 2.78\np_1 = 3000000\nT_1 = 723.15\nh_1 = enthalpy(water, T=T_1, p=p_1)\n"
       "h_2 = enthalpy(water, T=373.15, p=100000)\nW_dot = m_dot*(h_1 - h_2)")
-check("Reines Zahlen-Blatt: W_dot ohne (falsches) kJ/kg-Label", shown("W_dot")[1] == "-",
+check("Reines Zahlen-Blatt: W_dot ohne (falsches) kJ/kg-Label und nicht dimensionslos", shown("W_dot")[1] == "",
       str(shown("W_dot")))
 check("Reines Zahlen-Blatt: h_1 = enthalpy(...) weiterhin in kJ/kg", shown("h_1")[1] == "kJ/kg")
 
@@ -979,6 +979,24 @@ check("Kein Rundungsrest nach Offset-Umrechnung (T_4 = 0 °C)", shown("T_4") == 
 solve("Q_HL = 10 kW\nt_S = 2 h\nf = 24/(24 - t_S)\nQ_WP = Q_HL*f")
 check("Zahl in Summe mit Zeit in h -> Hinweis 'gilt als 24 s'",
       any("gilt als 24 s" in h for h in app.last_analysis.hints), str(app.last_analysis.hints))
+
+# Anzeige ohne nicht allgemeingültige Sonderregeln (Prüfung Oktober 2026)
+solve("T_1 = 20 °C\nm = 2 kg/s\nc = 4.19 kJ/(kg*K)\nQ = 50 kW\nQ = m*c*(T_2 - T_1)\n{$Startwerte\nT_2 = 300 K\n$}")
+check("Startwert in K für eine berechnete Größe: Einheit bleibt (°C)",
+      close(shown("T_2")[0], 25.9666) and shown("T_2")[1] == "°C", str(shown("T_2")))
+solve("T_1 = 80 °C\nT_2 = 20 °C\ntheta = T_1 - T_2")
+check("Differenz: Einheitenauswahl nur K (°C ist immer absolut)",
+      list(app.unit_dropdowns["theta"].cget("values")) == ["K"], str(app.unit_dropdowns["theta"].cget("values")))
+solve("T = 300 K\nT_2 = 20 °C")
+check("Nur Konstanten: in K eingegebene Temperatur wie eingegeben in K",
+      shown("T") == (300.0, "K") and shown("T_2") == (20.0, "°C"), f"{shown('T')} {shown('T_2')}")
+solve("T = 300\np = 100000\nR = 287\np*v = R*T")
+check("Zahlenblatt: Einheit unbekannt, nicht dimensionslos (keine %-Auswahl)",
+      shown("T")[1] == "" and "T" not in app.unit_dropdowns, str(shown("T")))
+solve("Q = 5 W\nP = 2 W\nm = 1:1:3 kg/s\nZ = Q + P*m\nT_1 = 20:10:40 °C\nT_K = T_1 + 273.15")
+check("Parameterstudie: Einheiten-Warnungen und Hinweise wie ohne Studie",
+      app.unit_warning_label.cget("text") == "⚠ UNIT WARNINGS (1)" and app.hints_label.cget("text") == "ⓘ HINWEISE (1)",
+      f"{app.unit_warning_label.cget('text')} {app.hints_label.cget('text')}")
 
 # ---------------------------------------------------------------------------
 app.destroy()

@@ -29,6 +29,7 @@ import numpy as np
 from scipy.optimize import minimize, minimize_scalar
 
 import solver as _solver
+from parser import display_name
 from solver import SolveTimeout, solve_parametric, solve_system
 
 OPTIMIZE_TIME_LIMIT = 120.0   # s je Optimierung (je Punkt einer Parameterstudie)
@@ -40,7 +41,7 @@ _AT_BOUND = 1e-4              # Abstand zur Grenze (Anteil am Bereich) für "am 
 
 
 def _display(name: str) -> str:
-    return name.replace('_kw_', '')
+    return display_name(name)
 
 
 def _is_log(lower: float, upper: float) -> bool:
@@ -170,7 +171,9 @@ def _optimize_goal(ev: _Evaluator, start_u: Tuple[float, ...], full: bool,
     if full:
         grid = _grid_search(ev, hint_u)
         finite = [f for f in grid if np.isfinite(f)]
-        if len(finite) >= 2 and max(finite) - min(finite) <= 1e-12 * max(1.0, abs(min(finite))):
+        # Größenordnung der Zielgröße (relativ, unabhängig vom SI-Betrag: m^3/s wie Pa)
+        info['scale'] = max((abs(f) for f in finite), default=0.0)
+        if len(finite) >= 2 and max(finite) - min(finite) <= 1e-12 * info['scale']:
             info['flat'] = True
             return info
         if ev.best is None:
@@ -247,6 +250,7 @@ def optimize_system(
     warm = {k: v for k, v in initial_values.items() if k not in names}
     best_values: Dict[int, float] = {}     # bester Zielwert je Anweisung (Vorzeichen: min)
     infos: Dict[int, Dict[str, object]] = {}
+    scales: Dict[int, float] = {}        # Größenordnung je Zielgröße (aus dem Raster)
     n_solves = n_failed = 0
     timed_out = False
     coupled = False
@@ -263,6 +267,7 @@ def optimize_system(
                                   for n, lo, hi in zip(goal.names, goal.lower, goal.upper))
                 try:
                     infos[index] = _optimize_goal(ev, start, round_no == 0, hint_u)
+                    scales.setdefault(index, infos[index].get('scale', 0.0))
                 finally:
                     n_solves += ev.n_solves
                     n_failed += ev.n_failed
@@ -280,10 +285,10 @@ def optimize_system(
             n_solves += 1
             same = ok and all(
                 abs((1 if g.sense == 'min' else -1) * solution.get(g.objective, np.nan) - best_values[i])
-                <= 1e-9 * max(1.0, abs(best_values[i])) for i, g in enumerate(goals))
+                <= 1e-9 * max(scales.get(i, 0.0), abs(best_values[i])) for i, g in enumerate(goals))
             if same:
                 coupled = _coupled(equations, variables, goals, constants, current, warm,
-                                   original_equations, solution)
+                                   original_equations, solution, scales)
                 n_solves += len(goals)
                 break
         else:
@@ -346,14 +351,15 @@ def optimize_system(
     return success, solution, message
 
 
-def _coupled(equations, variables, goals, constants, current, warm, original_equations, solution) -> bool:
+def _coupled(equations, variables, goals, constants, current, warm, original_equations, solution,
+             scales) -> bool:
     """
     Hängt eine Zielgröße von den Größen einer ANDEREN Anweisung ab? Generisch:
     deren Größen leicht verschieben (1e-3 des Bereichs) und die Zielgröße vergleichen.
     Dann ist das Ergebnis nur ein Gleichgewicht (keine Zielgröße allein besser),
     kein gemeinsames Optimum.
     """
-    for goal in goals:
+    for index, goal in enumerate(goals):
         others = [g for g in goals if g is not goal]
         shifted = dict(current)
         for other in others:
@@ -365,7 +371,7 @@ def _coupled(equations, variables, goals, constants, current, warm, original_equ
         before, after = solution.get(goal.objective), moved.get(goal.objective) if ok else None
         if before is None or after is None:
             continue
-        if abs(after - before) > 1e-9 * max(1.0, abs(before)):
+        if abs(after - before) > 1e-9 * max(scales.get(index, 0.0), abs(before)):
             return True
     return False
 

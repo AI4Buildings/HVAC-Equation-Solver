@@ -13,7 +13,7 @@ from numpy import exp, log, log10, sqrt, pi
 from numpy import sinh, cosh, tanh
 import time as _time
 
-from parser import if_function
+from parser import if_function, display_name
 try:
     from units import unit_number, unit_quantity
 except ImportError:  # ohne pint: Zahlenwertgleichungen nicht verfügbar
@@ -53,12 +53,10 @@ except ImportError:
 
 # Versuche Unit-Constraints zu laden für generische Einheiten-Inferenz aus Funktionsargumenten
 try:
-    from unit_constraints import infer_units_from_function_arguments, propagate_all_units_complete
+    from unit_constraints import propagate_all_units_complete
     UNIT_INFERENCE_AVAILABLE = True
 except ImportError:
     UNIT_INFERENCE_AVAILABLE = False
-    def infer_units_from_function_arguments(equation, known_units):
-        return {}
     def propagate_all_units_complete(equations, known_units, max_iterations=15):
         return known_units.copy() if known_units else {}
 
@@ -171,6 +169,27 @@ def _structural_start_hints(equations: List[str]) -> tuple:
     return hints
 
 
+def _sum_net_scale(equation: str, known_values: Dict[str, float]) -> float:
+    """
+    Größenordnung GLEICHARTIGER Größen für die Rauschgrenze einer Prüfgleichung: die Größen,
+    die als Summanden der Gleichung stehen, und alle über Summen mit ihnen verbundenen (gleiche
+    Dimension, _start_hints) - q_x = 1e-17 aus q_x = q_1 - q_2 ist gegenüber q_1 numerisch null.
+    Nicht der größte Wert beliebiger Größen: 1e5 Pa darf einen Widerspruch zwischen
+    Volumenströmen von 1e-7 m^3/s nicht verdecken.
+    """
+    import ast
+    names = set()
+    for terms in _additive_chains(equation):
+        names.update(t.id for t in terms if isinstance(t, ast.Name))
+    if _start_hints is not None:
+        _, _, classes = _start_hints
+        labels = {classes[n] for n in names if n in classes}
+        names.update(n for n, c in classes.items() if c in labels)
+    values = [abs(float(known_values[n])) for n in names
+              if n in known_values and np.isscalar(known_values[n]) and np.isfinite(known_values[n])]
+    return max(values, default=0.0)
+
+
 def _structural_start(var: str, known_values: Optional[Dict[str, float]]) -> Optional[float]:
     """Startwert durch Interpolation im Netz der über Summen verbundenen Größen oder None."""
     if _start_hints is None or not known_values:
@@ -237,7 +256,12 @@ def _appearance_order(equations: List[str], names) -> Dict[str, Tuple[int, int]]
     import re
     names = set(names)
     order: Dict[str, Tuple[int, int]] = {}
+    blank = lambda m: ' ' * len(m.group(0))
     for i, eq in enumerate(equations):
+        # wie _get_equation_unknowns: Texte ('h', 'water') und Schlüsselwort-NAMEN (p=, T=) sind
+        # kein Vorkommen einer Variablen p bzw. T (Positionen bleiben erhalten)
+        eq = re.sub(r"'[^']*'|\"[^\"]*\"", blank, eq)
+        eq = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\s*=(?!=)', blank, eq)
         for match in re.finditer(r'[A-Za-z_][A-Za-z0-9_]*', eq):
             name = match.group(0)
             if name in names and name not in order:
@@ -414,67 +438,6 @@ def _as_real(value):
     return value
 
 
-def create_equation_function(equations: List[str], variables: List[str],
-                             constants: Optional[Dict[str, float]] = None):
-    """
-    Erstellt eine Funktion f(x) die das Gleichungssystem darstellt.
-
-    Args:
-        equations: Liste von Gleichungen in Python-Syntax (als f(x) = 0)
-        variables: Liste der Variablennamen (geordnet)
-        constants: Dictionary mit konstanten Werten (direkte Zuweisungen)
-
-    Returns:
-        Eine Funktion die einen Vektor x nimmt und einen Vektor f(x) zurückgibt
-    """
-    if constants is None:
-        constants = {}
-
-    def equation_system(x):
-        # Erstelle ein Dictionary mit Variablenwerten
-        var_dict = {var: val for var, val in zip(variables, x)}
-
-        # Füge Konstanten hinzu (überschreiben keine Unbekannten)
-        var_dict.update(constants)
-
-        # Füge mathematische Funktionen hinzu
-        var_dict.update({
-            'sin': sin, 'cos': cos, 'tan': tan,
-            'asin': asin, 'acos': acos, 'atan': atan,
-            'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
-            'exp': exp, 'log': log, 'log10': log10,
-            'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
-            'ceil': np.ceil, 'floor': np.floor, 'round': np.round,
-            'max': max, 'min': min, 'IF': if_function,
-            'value': unit_number, 'quantity': unit_quantity
-        })
-
-        # Füge Thermodynamik-Funktionen hinzu
-        if THERMO_AVAILABLE:
-            var_dict.update(THERMO_FUNCTIONS)
-
-        # Füge Strahlungs-Funktionen hinzu
-        if RADIATION_AVAILABLE:
-            var_dict.update(RADIATION_FUNCTIONS)
-
-        # Füge Feuchte-Luft-Funktionen hinzu
-        if HUMID_AIR_AVAILABLE:
-            var_dict.update(HUMID_AIR_FUNCTIONS)
-
-        # Evaluiere jede Gleichung
-        results = []
-        for eq in equations:
-            try:
-                result = eval(eq, {"__builtins__": {}}, var_dict)
-                results.append(result)
-            except Exception as e:
-                raise ValueError(f"Fehler beim Auswerten von '{eq}': {e}")
-
-        return np.array(results)
-
-    return equation_system
-
-
 def solve_system(
     equations: List[str],
     variables: Set[str],
@@ -509,7 +472,7 @@ def solve_system(
         if not own_deadline or not state:
             raise
         remaining = sorted(state['vars'])
-        names = ', '.join(v.replace('_kw_', '') for v in remaining[:8]) + (', ...' if len(remaining) > 8 else '')
+        names = ', '.join(display_name(v) for v in remaining[:8]) + (', ...' if len(remaining) > 8 else '')
         msg = (f"Zeitlimit von {SOLVE_TIME_LIMIT:.0f} s überschritten: {len(state['eqs'])} Gleichungen "
                f"mit {len(remaining)} Unbekannten ungelöst ({names}). Startwerte vorgeben "
                f"(Solve > Initial Values) oder das System vereinfachen")
@@ -659,9 +622,7 @@ def _solve_system_impl(
                 if len(unknowns) == 0:
                     # Überprüfe ob die Gleichung erfüllt ist (Residuum nahe 0)
                     residual = _calculate_residual(eq, known_values, context)
-                    involved = _get_equation_unknowns(eq, set(), set(known_values))
-                    value_scale = max((abs(float(known_values[v])) for v in involved
-                                       if np.isfinite(known_values[v])), default=0.0)
+                    value_scale = _sum_net_scale(eq, known_values)
                     rel_residual = _relative_residual(eq, known_values, context,
                                                       scale_floor=1e-9 * value_scale)
                     remaining_equations.remove(eq)
@@ -1023,102 +984,6 @@ def _relative_residual(equation: str, values: Dict[str, float], context: dict,
     # bekannte Werte) - sonst gilt z.B. "q_x = eps*y" mit eps = 0 und
     # q_x = 1e-17 (numerisch null) als um 100 % verletzt.
     return abs(float(res)) / max(scale, scale_floor, 1e-300)
-
-
-def format_solution(solution: Dict[str, Any], precision: int = 6) -> str:
-    """Formatiert die Lösung für die Anzeige."""
-    if not solution:
-        return "Keine Lösung"
-
-    lines = []
-    for var in sorted(solution.keys()):
-        val = solution[var]
-
-        # Prüfe ob es ein Array ist
-        if isinstance(val, np.ndarray):
-            if len(val) <= 5:
-                arr_str = ', '.join(f'{v:.{precision}g}' for v in val)
-                lines.append(f"{var} = [{arr_str}]")
-            else:
-                first = f'{val[0]:.{precision}g}'
-                last = f'{val[-1]:.{precision}g}'
-                lines.append(f"{var} = [{first}, ..., {last}] ({len(val)} Werte)")
-        else:
-            # Skalarer Wert
-            if abs(val) < 1e-10:
-                val = 0.0
-            if abs(val) >= 1e6 or (abs(val) < 1e-4 and val != 0):
-                lines.append(f"{var} = {val:.{precision}e}")
-            else:
-                lines.append(f"{var} = {val:.{precision}g}")
-
-    return "\n".join(lines)
-
-
-def create_equation_function_with_sweep(
-    equations: List[str],
-    variables: List[str],
-    sweep_values: Dict[str, float],
-    constants: Optional[Dict[str, float]] = None
-):
-    """
-    Erstellt eine Gleichungsfunktion mit fest eingesetzten Sweep-Werten.
-
-    Args:
-        equations: Liste von Gleichungen
-        variables: Liste der zu lösenden Variablen
-        sweep_values: Dict mit aktuellen Sweep-Werten {name: value}
-        constants: Dict mit Konstanten (direkte Zuweisungen)
-    """
-    if constants is None:
-        constants = {}
-
-    def equation_system(x):
-        # Erstelle ein Dictionary mit Variablenwerten
-        var_dict = {var: val for var, val in zip(variables, x)}
-
-        # Füge Konstanten hinzu
-        var_dict.update(constants)
-
-        # Füge Sweep-Werte hinzu
-        var_dict.update(sweep_values)
-
-        # Füge mathematische Funktionen hinzu
-        var_dict.update({
-            'sin': sin, 'cos': cos, 'tan': tan,
-            'asin': asin, 'acos': acos, 'atan': atan,
-            'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
-            'exp': exp, 'log': log, 'log10': log10,
-            'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
-            'ceil': np.ceil, 'floor': np.floor, 'round': np.round,
-            'max': max, 'min': min, 'IF': if_function,
-            'value': unit_number, 'quantity': unit_quantity
-        })
-
-        # Füge Thermodynamik-Funktionen hinzu
-        if THERMO_AVAILABLE:
-            var_dict.update(THERMO_FUNCTIONS)
-
-        # Füge Strahlungs-Funktionen hinzu
-        if RADIATION_AVAILABLE:
-            var_dict.update(RADIATION_FUNCTIONS)
-
-        # Füge Feuchte-Luft-Funktionen hinzu
-        if HUMID_AIR_AVAILABLE:
-            var_dict.update(HUMID_AIR_FUNCTIONS)
-
-        # Evaluiere jede Gleichung
-        results = []
-        for eq in equations:
-            try:
-                result = eval(eq, {"__builtins__": {}}, var_dict)
-                results.append(result)
-            except Exception as e:
-                raise ValueError(f"Fehler beim Auswerten von '{eq}': {e}")
-
-        return np.array(results)
-
-    return equation_system
 
 
 def _get_eval_context():
@@ -2243,7 +2108,7 @@ def _solve_block_simultaneously(
     Löst einen Block von Gleichungen simultan mit normalisiertem least_squares.
 
     Strategie:
-    1. Intelligente Startwerte basierend auf Einheiten (generisch) oder Variablennamen
+    1. Startwerte aus Einheiten bzw. der Struktur (nie aus Variablennamen)
     2. Normalisierung: Alle Variablen auf ~1.0 skalieren
     3. least_squares mit Levenberg-Marquardt (robuster als fsolve)
     4. Relative Toleranzen für Konvergenzprüfung
@@ -2433,7 +2298,7 @@ def _solve_block_simultaneously(
 def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = None,
                        known_values: Optional[Dict[str, float]] = None,
                        inferred_units: Optional[Dict[str, str]] = None,
-                       use_geometric_mean: bool = True) -> float:
+                       use_structure: bool = True) -> float:
     """
     Ermittelt sinnvolle Startwerte basierend auf Einheiten - OHNE Variablennamen-Heuristik.
 
@@ -2443,8 +2308,7 @@ def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = No
     3. Einheiten aus User-Definition (z.B. T = 20°C → T: K)
     4. Über Summen verbundene bekannte Größen (T_R - T_G1 -> T_G1 nahe T_R), siehe
        _start_hints (nur Iterationsstart, nicht für die Wurzelauswahl)
-    5. Geometrisches Mittel bekannter Werte
-    6. Ultimativer Fallback: 1.0
+    5. Sonst 1.0
 
     WICHTIG: Keine Variablennamen-Heuristik! Die Einheit wird NUR aus dem Kontext abgeleitet,
     nicht weil eine Variable mit 'T' oder 'p' beginnt.
@@ -2463,7 +2327,7 @@ def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = No
     # nur als Iterationsstart, nicht als Anker für die Wahl unter mehreren Wurzeln.
     # Bewusst KEINE Namensähnlichkeit (h_5 wie h_4): Startwerte und damit die Wahl unter
     # mehreren Wurzeln dürfen nicht von Formelzeichen abhängen
-    if use_geometric_mean:
+    if use_structure:
         structural = _structural_start(var, known_values)
         if structural is not None:
             return structural
@@ -2477,22 +2341,9 @@ def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = No
     # - Funktionsargument: enthalpy(water, T=T_1, h=hoehe) → hoehe: J/kg
     # - User-Definition: hoehe = 10 m → hoehe: m
 
-    # Fallback: Geometrisches Mittel aller bekannten Werte
-    # (abschaltbar: als WURZEL-AUSWAHL-Anker ungeeignet, weil sonst eine
-    # völlig unbeteiligte Konstante bestimmt, welche von mehreren Wurzeln
-    # gewählt wird - z.B. sin(alpha)=0.5 -> 150 statt 30)
-    if use_geometric_mean and known_values:
-        positive_vals = [abs(v) for v in known_values.values()
-                        if isinstance(v, (int, float)) and v > 0.01]
-        if positive_vals:
-            import math
-            try:
-                geo_mean = math.exp(sum(math.log(v) for v in positive_vals) / len(positive_vals))
-                return geo_mean
-            except (ValueError, OverflowError):
-                pass
-
-    return 1.0  # Ultimativer Fallback
+    # Sonst 1.0 - bewusst KEIN Mittel aller bekannten Werte: eine am Block unbeteiligte
+    # Konstante (z = 1e6) würde sonst bestimmen, welche von mehreren Lösungen gewählt wird
+    return 1.0
 
 
 # Auswertungsfehler der letzten erfolglosen 1-D-Suche je Gleichung (für die Meldung)
@@ -2630,7 +2481,30 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
     # Wurzeln (z.B. sin(alpha)=0.5) würde sonst eine unbeteiligte Konstante
     # bestimmen, zu welcher Wurzel Newton konvergiert
     initial_guess = _get_initial_value(unknown, manual_initial, known_values,
-                                       inferred_units, use_geometric_mean=False)
+                                       inferred_units, use_structure=False)
+
+    def nearer_root_possible(root):
+        """
+        Newton kann über eine nähere Wurzel springen (x^3 - 3.3*x + 1 = 0 ab 1 -> -1.95 statt
+        1.64). Gibt es im Intervall Startwert ± |Wurzel - Startwert| einen weiteren
+        Vorzeichenwechsel, entscheidet die Bracket-Suche (dem Startwert nächstgelegene Wurzel).
+        """
+        distance = abs(root - initial_guess)
+        if distance == 0 or not np.isfinite(distance):
+            return False
+        points = np.linspace(initial_guess - distance, initial_guess + distance, 65)
+        values = []
+        for point in points:
+            try:
+                values.append(func(point))
+            except Exception:
+                values.append(np.nan)
+        tol = 1e-9 * max(distance, abs(root))
+        for p_1, v_1, p_2, v_2 in zip(points, values, points[1:], values[1:]):
+            if (np.isfinite(v_1) and np.isfinite(v_2) and v_1 * v_2 < 0
+                    and not p_1 - tol <= root <= p_2 + tol):
+                return True
+        return False
 
     try:
         x = initial_guess
@@ -2641,9 +2515,9 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
             # Prüfe ob bereits Lösung gefunden (mit Schutz gegen
             # Underflow/Asymptote - siehe is_credible_root)
             if abs(fx) < 1e-10 or is_acceptable_root(x):
-                if is_credible_root(x):
+                if is_credible_root(x) and not nearer_root_possible(x):
                     return True, x
-                break  # Verdächtig flach -> Bracket-Suche
+                break  # Verdächtig flach bzw. nähere Wurzel möglich -> Bracket-Suche
 
             # Skalierte Schrittweite für numerische Ableitung
             # Bei großen x-Werten (z.B. 1e6) brauchen wir größere h
@@ -2665,7 +2539,8 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
             if abs(x_new - x) < 1e-10 * max(1, abs(x)):
                 # Verifiziere Lösung (Underflow-/Polstellen-sicher)
                 fx_new = func(x_new)
-                if (abs(fx_new) < 1e-8 or is_acceptable_root(x_new)) and is_credible_root(x_new):
+                if ((abs(fx_new) < 1e-8 or is_acceptable_root(x_new)) and is_credible_root(x_new)
+                        and not nearer_root_possible(x_new)):
                     return True, x_new
                 break
 
@@ -2836,9 +2711,12 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
         # Tie-Break: bevorzuge die positive/größere Wurzel - bei physikalischen
         # Größen wie T, p, m_dot ist das fast immer die gewünschte.
         anchor = _get_initial_value(unknown, manual_initial, known_values,
-                                    inferred_units, use_geometric_mean=False)
-        best = min(candidates, key=lambda c: (abs(c[1] - anchor), -c[1]))
-        return True, best[1]
+                                    inferred_units, use_structure=False)
+        # gleich weit entfernt bis auf Rundung (x^2 - 2*x = 5 ab 1: 1 ± sqrt(6)) -> positive Wurzel
+        distances = [(abs(root - anchor), root) for _, root in candidates]
+        nearest = min(d for d, _ in distances)
+        tie = 1e-9 * max(nearest, abs(anchor))
+        return True, max(root for d, root in distances if d <= nearest + tie)
 
     # Beste gefundene Näherung zurückgeben wenn akzeptabel (relativ zur Termgröße)
     if fallback_root is not None and fallback_residual < 1e-6:
@@ -2868,83 +2746,6 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
             pass
 
     return False, 0.0
-
-
-def _try_sequential_evaluation(
-    equations: List[str],
-    variables: Set[str],
-    constants: Dict[str, float]
-) -> Tuple[List[str], Set[str], Dict[str, float]]:
-    """
-    Versucht einfache Zuweisungen und Gleichungen mit einer Unbekannten sequentiell auszuwerten.
-
-    1. Gleichungen der Form "var = ausdruck" werden direkt ausgewertet
-    2. Gleichungen mit nur einer Unbekannten werden mit fsolve gelöst
-
-    Returns:
-        remaining_equations: Verbleibende Gleichungen für den iterativen Solver
-        remaining_variables: Verbleibende Unbekannte
-        computed_values: Dictionary mit berechneten Werten
-    """
-    context = _get_eval_context()
-
-    # Starte mit Konstanten als bekannte Werte
-    known_values = constants.copy()
-
-    remaining_equations = list(equations)
-    remaining_vars = set(variables)
-    computed_values = {}
-
-    max_iterations = len(equations) * 2 + 1
-    iteration = 0
-
-    while remaining_equations and iteration < max_iterations:
-        iteration += 1
-        made_progress = False
-
-        for eq in remaining_equations[:]:  # Kopie für Iteration
-            # Phase 1: Versuche direkte Auswertung für Gleichungen der Form "(var) - (expr)"
-            for var in list(remaining_vars):
-                if eq.startswith(f"({var}) - ("):
-                    expr = eq[len(f"({var}) - "):]
-                    if expr.startswith("(") and expr.endswith(")"):
-                        expr = expr[1:-1]
-
-                    try:
-                        local_context = context.copy()
-                        local_context.update(known_values)
-
-                        result = eval(expr, {"__builtins__": {}}, local_context)
-
-                        if np.isfinite(result):
-                            computed_values[var] = float(result)
-                            known_values[var] = float(result)
-                            remaining_vars.discard(var)
-                            remaining_equations.remove(eq)
-                            made_progress = True
-                            break
-                    except Exception:
-                        # Diese Variable kann noch nicht berechnet werden
-                        pass
-
-            # Phase 2: Wenn keine direkte Auswertung möglich, versuche Gleichungen
-            # mit nur einer Unbekannten iterativ zu lösen
-            if not made_progress and eq in remaining_equations:
-                unknowns = _get_equation_unknowns(eq, set(known_values.keys()), remaining_vars)
-                if len(unknowns) == 1:
-                    unknown = list(unknowns)[0]
-                    success, value = _solve_single_unknown(eq, unknown, known_values, context, None, None)
-                    if success:
-                        computed_values[unknown] = value
-                        known_values[unknown] = value
-                        remaining_vars.discard(unknown)
-                        remaining_equations.remove(eq)
-                        made_progress = True
-
-        if not made_progress:
-            break
-
-    return remaining_equations, remaining_vars, computed_values
 
 
 def _try_vectorized_evaluation(equations: List[str], variables: Set[str],
@@ -3066,8 +2867,10 @@ def solve_parametric(
         message: Status- oder Fehlermeldung
     """
     if not sweep_vars:
-        # Keine Sweep-Variablen -> normale Lösung
-        return solve_system(equations, variables, initial_values, constants=constants)
+        # Keine Sweep-Variablen -> ein Punkt (mit derselben Lösungsfunktion wie je Punkt)
+        solve_point = point_solver or solve_system
+        return solve_point(equations, variables, initial_values or {}, constants=constants,
+                           original_equations=original_equations)[:3]
 
     if initial_values is None:
         initial_values = {}
@@ -3241,7 +3044,7 @@ if __name__ == "__main__":
     success, solution, msg = solve_system(equations, variables)
     print(f"Erfolg: {success}")
     print(f"Nachricht: {msg}")
-    print(format_solution(solution))
+    print("\n".join(f"  {k} = {v:.6g}" for k, v in solution.items()))
     print()
 
     # Test: Nichtlineares System
@@ -3255,4 +3058,4 @@ if __name__ == "__main__":
     success, solution, msg = solve_system(equations, variables)
     print(f"Erfolg: {success}")
     print(f"Nachricht: {msg}")
-    print(format_solution(solution))
+    print("\n".join(f"  {k} = {v:.6g}" for k, v in solution.items()))

@@ -160,6 +160,12 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   (EES-Einheitenschreibweise) wird mit Hinweis abgelehnt
 - **Direct assignments** like `T_1 = 450`, `m = 10000/3600` or `m_dot = 10000/3600 kg/s`
   (numerischer Ausdruck + Einheit) are treated as constants
+- **Doppelte Vorgabe** derselben Größe (`x = 5` ... `x = 3`): die zweite Zeile ist eine Prüfgleichung
+  - gleiche Werte zulässig, verschiedene -> "Widersprüchliches System" mit der Zeile (früher gewann
+  still die letzte); bei Parameterstudien/Wertelisten ein Fehler
+- Eine Zeile wird am `=` auf oberster Ebene geteilt (`enthalpy(water, T=T_1, p=p_1) = h_1` geht);
+  `e` ist überall eine Variable (Eulersche Zahl: `exp(1)`), auch in "Ausdruck + Einheit";
+  `MINIMIZE`/`MAXIMIZE` nur mit folgendem Namen (eine Variable `minimize = 3` ist erlaubt)
 - **Wichtig:** Eine Zeile ist nur dann eine Direktzuweisung, wenn links ein REINER
   Variablenname steht. `x + 5 = 2`, `sin(alpha) = 0.5` oder `x^2 = 9` sind
   Gleichungen und werden iterativ gelöst
@@ -220,8 +226,11 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - **Brent's Methode**: Robuste Wurzelfindung bei Vorzeichenwechsel (Polstellen werden
   über einen Plausibilitätscheck verworfen, ebenso Underflow-Plateaus abklingender Funktionen)
 - **Wurzelauswahl**: Bei mehreren Wurzeln wird die dem Startwert nächstgelegene gewählt
-  (Tie-Break: positive Wurzel); `sin(alpha) = 0.5` liefert 30, nicht 150 oder −210
-- **Standard-Startwert**: 1.0 für alle Variablen bzw. einheitenbasiert
+  (Tie-Break bis auf Rundung gleicher Abstände: positive Wurzel); `sin(alpha) = 0.5` liefert 30,
+  nicht 150 oder −210. Auch die schnelle Newton-Phase: eine Newton-Wurzel gilt nur, wenn im
+  Intervall Startwert ± Abstand kein weiterer Vorzeichenwechsel liegt (sonst Bracket-Suche)
+- **Standard-Startwert**: 1.0 für alle Variablen bzw. einheitenbasiert (kein Mittel aller bekannten
+  Werte - eine unbeteiligte Konstante darf die gewählte Lösung nicht bestimmen)
   (`units.initial_values_from_units`): typischer Wert je Dimension; unbekannte ABSOLUTE
   Temperaturen starten beim Mittel der vorgegebenen Temperaturen (statt pauschal 350 K,
   sonst falsches Vorzeichen von Differenzen wie T_Raum - T_Scheibe -> Ra^(1/6) nicht reell).
@@ -489,13 +498,21 @@ Früher wurden sie nach Radiant (pint-Basis) umgerechnet und dann als Grad geles
 - **Additive Ketten**: Bei `A + B - C = 0` erhalten alle Terme die gleiche Dimension
 
 **Wichtige Funktionen:**
-- `propagate_all_units()` / `propagate_all_units_complete()`: Hauptfunktionen für Einheiten-Propagation
-- `analyze_equation()`: Analysiert eine Gleichung und leitet Einheiten ab
-- `_infer_from_additive_chain()`: Propagiert Dimensionen in Addition/Subtraktion-Ketten
-- `_collect_additive_terms()`: Sammelt alle Terme aus +/- Ketten (ignoriert numerische Konstanten)
-- `_infer_from_mult_div()`: Rückwärts-Inferenz für Multiplikation/Division
+- `propagate_all_units_complete()`: Einheiten-Propagation (Stufe 1 `_infer_dimensions`, Stufe 2
+  `_complete_inference`); `analyze_equation()`, `propagate_all_units()` und
+  `compute_expression_dimension()` sind dünne Hüllen darum (Test-Schnittstelle)
+- `check_all_unit_consistency()`: Einheitenwarnungen (Einheiten in value()/quantity() sind Text,
+  keine Namensliste)
+- Schlüsselwort-Argumente je Funktionsfamilie (`function_argument_unit`): `x=` ist bei Stoffwerten
+  der Dampfgehalt, bei HumidAir die Feuchtebeladung (= `w`, kg/kg)
+- ln-Regel: nur Paare `c*ln(a) - c*ln(b)` mit gleichem Faktor machen a und b gleichartig
+- Anzeige-Labels: Gleichstand -> zuerst im Blatt gefunden (nicht Alphabet); die in `value(x, Einheit)`
+  genannte Einheit ist eine Angabe (Q_a in kWh/m²); Energie je Fläche nur aus Leistung mal Zeit
+  als kWh/m² (sonst N/m, gleiche Dimension)
 - `temperature_sum_conflicts()`: Summen von Temperaturen, die mit keinem Charakter (absolut 1 /
-  Differenz 0) aufgehen - typisch eine Differenz in °C angegeben (GUI: Fehler, `_point_sum_errors`)
+  Differenz 0) aufgehen - typisch eine Differenz in °C angegeben (GUI: Fehler, `_point_sum_errors`).
+  Gesetz-Summanden (`Q/(m*c)`, `EER*(T_c - T_0)`) zählen offen als Temperatur (mal Zahlenfaktor)
+  oder Differenz - sie nehmen die übrige Summe nicht von der Prüfung aus
 
 ### Einheiten-Syntax
 
@@ -510,7 +527,15 @@ U = 0.3 W/(m²·K)         {Malpunkt erlaubt}
 ```
 
 - Unbekannte Einheiten sind ein **Fehler** ("Unbekannte Einheit 'qcm'") - früher wurde
-  der Zahlenwert stillschweigend unumgerechnet übernommen.
+  der Zahlenwert stillschweigend unumgerechnet übernommen. Auch eine Einheit, die pint liest, aber
+  nicht nach SI umrechnen kann, ist ein Fehler (nie unumgerechnet weiterrechnen).
+- Nenner ohne Klammern (`units._denominator_units`): pint liest ihn als Ganzes (`kg/kWh`, `1/kPa`,
+  `kg/MJ`, `W/hPa` - Präfixe bleiben Präfixe; früher k = Boltzmann-Konstante, M = molar); nur einen
+  unbekannten Nenner zerlegt das Programm in bekannte Einheiten (`kJ/kgK`, `W/cmK`, `W/m²°C`).
+  Feste Schreibweise: `W/mK` ist W/(m·K), nicht W/Millikelvin
+- °C/°F in zusammengesetzten Einheiten sind Kelvin-Differenzen (`2 °C/h`, `1/°C`, `W/(m²·°C)`)
+- Drehzahl: `rpm`, `U/min` = 1/min, `rps`, `U/s` = 1/s (Umdrehungen je Zeit, u = π·D·n; pint
+  rechnete rpm als 2π/min und U als Enzym-Einheit)
 - Einheiten in Funktionsargumenten werden auf die Dimension geprüft: `T=` Temperatur,
   `p=`/`p_tot=` Druck, `h=` J/kg, `s=` J/(kg·K), `x=`/`rh=`/`w=` dimensionslos, Strahlung
   `(T, λ, ...)` - `enthalpy(water, T=20 Grad, p=1 bar)` ergibt eine Fehlermeldung.
@@ -642,7 +667,7 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
   `EER_C*(T_c - T_0) = T_0`; `_kelvin_law_term`), sind Gesetze auf der Verhältnisskala Kelvin
   (Festlegung der Eingabesprache) und werden nicht geprüft
 - Anzeige: Differenzen in K (`pretty_unit('delta_K')` = 'K', DIN 1345 / ISO 80000-5; die
-  Einheiten-Auswahl rechnet sie ohne Offset in °C/°F um), absolute Temperaturen nach
+  Einheiten-Auswahl bietet nur K an - °C/°F sind immer absolut), absolute Temperaturen nach
   Settings (°C/K)
 
 ## Bekannte Einschränkungen / Design-Entscheidungen
@@ -696,7 +721,11 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
   System-Zwischenablage (macOS `pbcopy`, Linux `wl-copy`/`xclip`/`xsel`) - Tk stellt
   Inhalte sonst nur bereit, solange das Programm läuft (nach Neustart wäre er weg)
 - Einheiten-Warnungen: Klick auf "⚠ UNIT WARNINGS (n)" im Results-Tab springt zu den
-  Warnungen im Residuals-Tab (Variable, Gleichung, links/rechts in SI-Einheiten)
+  Warnungen im Residuals-Tab (Variable, Gleichung, links/rechts in SI-Einheiten) - auch in
+  Parameterstudien (Warnungen und Hinweise wie ohne Studie). Farbe der Residuen nach dem Residuum
+  RELATIV zur Termgröße (wie im Solver), nicht absolut in SI
+- Größe ohne bekannte Einheit (Blatt ohne Einheiten): SI-Wert ohne Einheit und ohne Auswahl;
+  dimensionslos ("-", umschaltbar %, ‰, g/kg) nur, was die Einheiten-Ableitung so ergibt
 - Widersprüchliches (überbestimmtes) System: Meldung nennt vorgegebenen und berechneten
   Wert, z.B. "q_dot ist vorgegeben (50), aus 'q_dot=...' folgt 29.06"
 - Anzeige-Einheiten berechneter Größen: Vielfache bzw. Summen gleichartiger Eingaben behalten deren

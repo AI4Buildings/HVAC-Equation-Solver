@@ -381,6 +381,11 @@ print("\n=== Determinismus ===")
 results = [opt("y = (x^2 - 4)^2 + x + sin(40*x)/10\nMINIMIZE y VARY x = -3 .. 3")[1]['x'] for _ in range(2)]
 check("Gleiches Ergebnis bei Wiederholung", results[0] == results[1], str(results))
 
+# Toleranzen relativ zur Zielgröße (nicht mit Untergrenze 1 in SI): kleine Beträge (m^3/s, m^2)
+ok, sol, msg = opt("y = 1e-13*(x - 2)^2 + 1e-13\nMINIMIZE y VARY x = 0 .. 5")[:3]
+check("Kleine Zielgröße (1e-13) wird optimiert, nicht 'ändert sich nicht'",
+      ok and abs(sol['x'] - 2) < 1e-3, msg)
+
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")
 if FAILED:

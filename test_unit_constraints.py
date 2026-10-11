@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore")
 
 from unit_constraints import (analyze_equation, check_equation_dimensions, check_all_unit_consistency,
                               compute_expression_dimension, propagate_all_units_complete,
-                              infer_units_from_function_arguments, unit_from_dimensionality)
+                              unit_from_dimensionality)
 from units import ureg, normalize_unit
 
 PASSED = []
@@ -240,11 +240,11 @@ check("(m*h_1) - (m*h_2) = Q -> keine 'Einheit unbekannt'", w == [], str([x.expl
 # ---------------------------------------------------------------------------
 print("=== #11 Funktionsargumente bei beliebiger linker Seite ===")
 
-r = infer_units_from_function_arguments('Q/m = enthalpy(water, T=T_2, p=p) - h_1', {})
+r = propagate(["Q/m = enthalpy(water, T=T_2, p=p) - h_1"], {})
 check("Q/m = enthalpy(..., T=T_2, p=p) -> T_2: K, p: Pa", r.get('T_2') == 'K' and r.get('p') == 'Pa', str(r))
 r = propagate(["Q/m = enthalpy(water, T=T_2, p=p) - h_1"], {'Q': 'W', 'm': 'kg/s', 'h_1': 'J/kg'})
 check("Propagation: T_2 aus Funktionsargument", r.get('T_2') == 'K', str(r))
-r = infer_units_from_function_arguments('E = Eb(T_s, L)', {})
+r = propagate(["E = Eb(T_s, L)"], {})
 check("Eb(T_s, L) -> T_s: K, L: Wellenlänge", r.get('T_s') == 'K' and same_dim(r.get('L'), 'm'), str(r))
 r = propagate(["h_m = enthalpy(water, T=(T_1 + T_2)/2, p=p)"], {'T_1': 'K', 'p': 'Pa'})
 check("T=(T_1 + T_2)/2 -> T_2 absolut", r.get('T_2') == 'K', str(r))
@@ -407,8 +407,14 @@ check("IF/max/min mit gleicher Eingabe-Einheit behalten sie",
 w = warnings_for(["Q_B = Q_HL*(T_i - T_B)/(T_i - T_a)", "Q_B = Q_1 + k_2*(T_B - T_s)"],
                  {'Q_HL': 'W', 'T_i': 'K', 'T_a': 'K', 'T_s': '', 'Q_1': 'W', 'k_2': 'W/K'})
 check("Warnung nennt die ohne Einheit eingegebene Größe (T_s), nicht die berechnete (T_B)",
-      w and w[0].variable == 'T_s' and 'über eine Summe mit T_s' in w[0].explanation,
+      len(w) == 1 and w[0].variable == 'T_s' and 'T_s dimensionslos (ohne Einheit eingegeben?)' in w[0].explanation,
       str([(x.variable, x.explanation) for x in w]))
+# Herkunft über die ganze Gleichung als Summe - unabhängig von der Schreibweise wird T_s genannt
+for lines in (["T_B = T_s + 2", "Q = k*(T_i - T_B)"], ["T_B - T_s = 2", "Q = k*(T_i - T_B)"]):
+    w = warnings_for(lines, {'T_s': '', 'k': 'W/K', 'T_i': 'K'})
+    check(f"Warnung nennt die Eingabe ohne Einheit (T_s): {lines[0]}",
+          w and w[0].variable == 'T_s' and 'T_s' in w[0].explanation and 'ohne Einheit eingegeben' in w[0].explanation,
+          str([(x.variable, x.explanation) for x in w]))
 from unit_constraints import si_number_literals
 found = si_number_literals(eqs("f = 24/(24 - t_S)", "p_2 = p_1 - 0.2", "x = 1 - eta", "T_2 = T_1 + 10",
                                "y = t_S*2 + 0"),
@@ -416,6 +422,44 @@ found = si_number_literals(eqs("f = 24/(24 - t_S)", "p_2 = p_1 - 0.2", "x = 1 - 
 check("Zahl in Summe mit Nicht-SI-Eingabe: 24 - t_S (h) -> 24 s, 0.2 bar -> Pa; nicht %, °C, 0",
       [(n, name, unit, si) for _, n, name, unit, si in found] == [(24.0, 't_S', 'h', 's'), (0.2, 'p_1', 'bar', 'Pa')],
       str(found))
+
+# ---------------------------------------------------------------------------
+print("=== Allgemeingültigkeit der Einheiten-Ableitung ===")
+# HumidAir: x ist dort die Feuchtebeladung (= w), nicht der Dampfgehalt der Stoffwertfunktionen
+r = propagate(["h_M = HumidAir(h, T=T_M, x=x_M, p=p)"], {'p': 'Pa', 'h_M': 'J/kg'})
+check("HumidAir x= wie w= (kg/kg)", r.get('x_M') == 'kg/kg', str(r))
+r = propagate(["h = enthalpy(water, T=T_1, x=x_1)"], {'T_1': 'K'})
+check("Stoffwert x= bleibt Dampfgehalt (dimensionslos)", r.get('x_1') == '', str(r))
+# ln-Regel nur für Paare c*ln(a) - c*ln(b) mit gleichem Faktor
+r = propagate(["ds = c_p*ln(T_2) - c_p*ln(T_1) - R*ln(p_2) + R*ln(p_1)"],
+              {'c_p': 'J/(kg*K)', 'R': 'J/(kg*K)', 'T_1': 'K', 'T_2': 'K', 'p_1': 'Pa', 'ds': 'J/(kg*K)'})
+check("ln-Paare je Faktor: p_2 ist ein Druck (nicht Temperatur)", same_dim(r.get('p_2'), 'Pa'), str(r))
+# Anzeige: Größenart aus den Faktoren, nicht aus der Dimension; Gleichstand -> Reihenfolge im Blatt
+r = propagate(["k = F/L"], {'F': 'N', 'L': 'm'})
+check("F/L in N/m (nicht kWh/m^2)", r.get('k') == 'N/m', str(r))
+r = propagate(["Q_a = q*t_H"], {'q': 'W/m^2', 't_H': 'h'})
+check("Leistung je Fläche mal Zeit -> kWh/m^2", r.get('Q_a') == 'kWh/m^2', str(r))
+r = propagate(["K_E = k_E*value(Q_a, kWh/m^2)"], {'k_E': ''})
+check("value(Q_a, kWh/m^2) legt die Anzeige-Einheit fest", r.get('Q_a') == 'kWh/m^2', str(r))
+for first, second, expected in (("V_3 = 2*V_1", "V_3 = 4*V_2", 'm3/h'), ("V_3 = 4*V_2", "V_3 = 2*V_1", 'L/s')):
+    r = propagate([first, second], {'V_1': 'm3/h', 'V_2': 'L/s'})
+    check(f"Gleichstand der Labels: zuerst im Blatt ({expected})", r.get('V_3') == expected, str(r))
+# Konsistenzprüfung ohne Namensliste: Einheiten in value() sind Text, Variablen namens m/W/g zählen
+w = warnings_for(["n = value(p, bar)", "T_VL = quantity(20 + 1.5*(20 - value(T_a, °C)), °C)"],
+                 {'p': 'Pa', 'T_a': 'K'})
+check("value(p, bar): keine Warnung 'bar unbekannt'", not w, str(w))
+w = warnings_for(["Q_3 = W*g + m"], {'W': 'm', 'g': '', 'm': 'kg'})
+check("Variablen W, g, m wie jede andere geprüft", len(w) == 1, str(w))
+# Punktsumme: Gesetz-Summanden (Q/(m*c)) als offen Temperatur/Differenz, nicht Ausnahme der Gleichung
+from unit_constraints import temperature_sum_conflicts, numeric_value_form
+known = {'T_1': 'K', 'T_2': 'K', 'x': 'K', 'Q': 'W', 'm': 'kg/s', 'c': 'J/(kg*K)', 'T_0': 'K', 'T_c': 'K'}
+for text, expected in (("T_3 = T_1 + T_2 + Q/(m*c)", 1), ("T_3 = T_1 + x + Q/(m*c)", 1),
+                       ("T_3 = T_1 + Q/(m*c)", 0), ("EER*(T_c - T_0) = T_0", 0), ("T_1 + T_2 = 2*p*v/R", 0)):
+    n = len(temperature_sum_conflicts(eqs(text), {**known, 'p': 'Pa', 'v': 'm^3/kg', 'R': 'J/(kg*K)'}))
+    check(f"Punktsumme mit Gesetz-Summand: {text} -> {expected}", n == expected, str(n))
+check("Zahlenwert-Schreibweise mit Gesetz-Summand",
+      numeric_value_form("T_3 = T_1 + T_2 + Q/(m*c)", ['T_1', 'T_2', 'T_3'], '°C', {**known, 'T_3': 'K'})
+      == "value(T_3, °C) = value(T_1, °C) + value(T_2, °C) + value(Q / (m * c), K)")
 
 # ---------------------------------------------------------------------------
 print()

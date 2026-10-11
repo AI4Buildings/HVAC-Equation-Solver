@@ -24,7 +24,7 @@ from parser import (parse_equations, parse_vector, remove_comments, tokenize_equ
 from solver import solve_system, solve_parametric, _get_equation_unknowns, _find_tear_candidates
 from unit_constraints import (analyze_equation, check_equation_dimensions, check_all_unit_consistency,
                               propagate_all_units_complete)
-from units import UnitValue, get_initial_from_unit, detect_unit_from_equation
+from units import UnitValue, get_initial_from_unit
 from radiation import Eb, Wien_displacement, Blackbody
 from diagnostics import analyze_structure, describe_structure, name_hints, diagnose
 
@@ -388,12 +388,6 @@ for unit, expected in (('1 / kelvin', 3.4e-3), ('kilogram / second', 1.0), ('W/m
     check(f"Startwert für '{unit}' = {expected}", get_initial_from_unit(unit) == expected,
           str(get_initial_from_unit(unit)))
 
-# Funktionseinheit nur bei reinem Funktionsaufruf auf der rechten Seite
-check("enthalpy() im Ausdruck -> keine J/kg-Einheit",
-      detect_unit_from_equation("Q = m*(enthalpy(water, T=T, p=p) - h_1)") == '')
-check("temperature() - 273.15 -> keine K-Übernahme",
-      detect_unit_from_equation("T_C = temperature(water, p=p, x=1) - 273.15") == '')
-check("h = enthalpy(...) -> J/kg", detect_unit_from_equation("h = enthalpy(water, T=T, p=p)") == 'J/kg')
 
 # Python-Schlüsselwörter als Variablennamen (lambda = Wärmeleitfähigkeit)
 eqs, variables, consts, _, orig, _ = parse_equations("lambda = 0.6\nd = 0.1\nalpha = 2*lambda/d")
@@ -1251,6 +1245,74 @@ for text, line_no in (("REFERENZ R717 IIR\nh_1 = 2", 1), ("a = 1\nh_1 - 100 kJ/k
     except EquationSyntaxError as exc:
         check(f"Zeile ohne '=' gemeldet: {text.splitlines()[line_no - 1]}",
               str(exc).startswith(f"Zeile {line_no}: ") and "keine Gleichung" in str(exc), str(exc))
+
+# ---------------------------------------------------------------------------
+# Prüfung auf nicht allgemeingültige Regeln (Oktober 2026): Einheiten, Parser, Solver
+# ---------------------------------------------------------------------------
+print("=== Allgemeingültigkeit ===")
+# Einheiten-Umrechnung: Präfixe im Nenner bleiben Präfixe (früher k = Boltzmann, M = molar),
+# °C in zusammengesetzten Einheiten ist eine Kelvin-Differenz, Drehzahl = Umdrehungen je Zeit
+for value, unit, si in ((0.25, 'kg/kWh', 0.25 / 3.6e6), (2, 'K/kW', 2e-3), (1, '1/kPa', 1e-3),
+                        (1, 'kg/MJ', 1e-6), (1, 'J/MPa', 1e-6), (1, 'm3/kWh', 1 / 3.6e6), (2, '°C/h', 2 / 3600),
+                        (6.5, '°C/km', 6.5e-3), (2.1e-4, '1/°C', 2.1e-4), (0.5, 'W/m²°C', 0.5),
+                        (1, 'kJ/(kg*°C)', 1000), (1, 'W/mK', 1), (1, 'W/cmK', 100), (3, 'kJ/kgK', 3000),
+                        (1450, 'rpm', 1450 / 60), (1450, 'U/min', 1450 / 60), (68, '°F', 293.15)):
+    calc = UnitValue.from_input(value, unit).calc_value
+    check(f"Einheit {value} {unit} -> {si:g} SI", abs(calc - si) <= 1e-9 * abs(si), str(calc))
+# e ist überall eine Variable (früher in "Ausdruck + Einheit" die Eulersche Zahl)
+try:
+    parse_equations("e = 2 m\nL = 2*e m")
+    check("e in 'Ausdruck + Einheit' ist eine Variable (Einheit nur bei Zahlen)", False)
+except EquationSyntaxError as exc:
+    check("e in 'Ausdruck + Einheit' ist eine Variable (Einheit nur bei Zahlen)", "Zeile 2" in str(exc), str(exc))
+# Doppelte Vorgabe: zweite Zeile als Prüfgleichung (Widerspruch statt still überschreiben)
+for text, consistent in (("x = 5\nx = 3\ny = 2*x", False), ("x = 5\nx = 5.0\ny = 2*x", True),
+                         ("p = 2 bar\np = 200 kPa\ny = 2*p", True)):
+    eqs, variables, consts, _, orig, _ = parse_equations(text)
+    ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    check(f"Doppelte Vorgabe {text.splitlines()[:2]} -> {'zulässig' if consistent else 'Widerspruch'}",
+          ok == consistent and (consistent or "Widersprüchlich" in msg), msg)
+# Funktionsaufruf mit Schlüsselwort-Argumenten links vom '='
+eqs, variables, consts, _, orig, _ = parse_equations("p_1 = 1 bar\nT_1 = 20 °C\nenthalpy(water, T=T_1, p=p_1) = h_1")
+ok, sol, _ = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("enthalpy(water, T=T_1, p=p_1) = h_1 (T= links)", ok and abs(sol['h_1'] - 84006.1) < 1, str(sol))
+# Variable namens minimize ist keine Optimierungs-Anweisung
+eqs, variables, consts, _, _, _ = parse_equations("minimize = 3\ny = 2*minimize")
+check("minimize = 3 ist eine Variable", consts.get('minimize') == 3.0, str(consts))
+# Startwert: keine unbeteiligte Konstante als Anker (früher geometrisches Mittel aller Werte)
+for extra in ("", "z = 1e6\n"):
+    eqs, variables, consts, _, orig, _ = parse_equations(f"a = 101\nb = 96\nc = 4\n{extra}x^2 + y^2 = a*x - b\nx^2*y^2 = c*x^2")
+    ok, sol, _ = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    check(f"Unbeteiligte Konstante ändert die Lösung nicht ({extra.strip() or 'ohne'})",
+          ok and abs(sol['x'] - 1) < 1e-6 and abs(sol['y'] - 2) < 1e-6, str(sol))
+# Reihenfolge im Blatt: Schlüsselwort-NAMEN (p=) sind kein Vorkommen einer Variablen p
+results = []
+for name in ("v", "p", "q"):
+    eqs, variables, consts, _, orig, _ = parse_equations(
+        f"0 = 0*prandtl(water, T=300, p=100000) + u - {name}^2\n{name} + 6 = u")
+    ok, sol, _ = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    results.append((round(sol['u'], 6), round(sol[name], 6)))
+check("Lösung unabhängig vom Namen (p= im Aufruf zählt nicht)", len(set(results)) == 1, str(results))
+# 1-D: Newton springt nicht über die nähere Wurzel; Gleichstand -> positive Wurzel
+s, sol, _ = solve_system(["(x**3 - 3.3*x + 1) - (0)"], {'x'}, initial_values={'x': 1.0})
+check("Newton: nächstgelegene Wurzel (1.640, nicht -1.953)", abs(sol['x'] - 1.64022) < 1e-4, str(sol))
+s, sol, _ = solve_system(["(x**2 - 2*x) - (5)"], {'x'}, initial_values={'x': 1.0})
+check("Gleich weit entfernte Wurzeln: positive (1 + sqrt(6))", abs(sol['x'] - (1 + 6 ** 0.5)) < 1e-6, str(sol))
+# Widerspruchsprüfung: Rauschgrenze nur aus gleichartigen Größen (nicht aus 1e5 Pa)
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "p = 1 bar\nV_dot = 1.05e-7 m^3/s\nk = 1e-12 m^3/(s*Pa)\nV_dot = k*p")
+ok, _, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Widerspruch kleiner SI-Werte erkannt (V_dot = k*p, 5 %)", not ok and "Widersprüchlich" in msg, msg)
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "q_1 = 500.0000000000001\nq_2 = 500\nq_x = q_1 - q_2\neps = 0\ny = 20\nq_x = eps*y")
+ok, _, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Rundungsrest gegenüber gleichartigen Größen ist null (kein Widerspruch)", ok, msg)
+# HumidAir: Reihenfolge der Feuchte-Eingaben aus dem Aufruf (nicht aus einer Menge)
+import subprocess as _sp
+code = "from humid_air import HumidAir; print(repr(HumidAir('h', rh=0.5, w=0.01, p_tot=1e5)))"
+outputs = {_sp.run([sys.executable, '-c', code], cwd=os.path.dirname(os.path.abspath(__file__)), capture_output=True, text=True,
+                   env={**os.environ, 'PYTHONHASHSEED': str(seed)}).stdout for seed in (0, 1, 3)}
+check("HumidAir unabhängig vom Hash-Seed", len(outputs) == 1, str(outputs))
 
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")

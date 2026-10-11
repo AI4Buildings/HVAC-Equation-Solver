@@ -7,7 +7,7 @@ Unterstützte Syntax:
 - Vektoren: T = 0:10:100 (start:step:end) oder T = 0:100 (start:end, step=1)
 - Operatoren: +, -, *, /, ^ (Potenz)
 - Funktionen: sin, cos, tan, exp, ln, log10, sqrt, abs, max, min, IF(a, b, x, y, z)
-- Thermodynamik: enthalpy(water, T=100, p=1), density(R134a, T=25, x=1)
+- Thermodynamik: enthalpy(water, T=373.15, p=1e5), density(R134a, T=25 °C, x=1) (SI bzw. mit Einheit)
 - Kommentare: "..." oder {...}
 """
 
@@ -156,8 +156,11 @@ def parse_vector(value_str: str) -> Union[np.ndarray, None]:
     if match2:
         start = float(match2.group(1))
         end = float(match2.group(2))
-        step = 1.0 if end >= start else -1.0
-        return _build_vector(start, step, end)
+        if end < start:
+            # nicht still Schrittweite -1 annehmen (MATLAB: leerer Vektor)
+            raise VectorSyntaxError(f"'{value_str}': Endwert kleiner als Startwert - Schrittweite "
+                                    f"angeben, z.B. {match2.group(1)}:-1:{match2.group(2)}")
+        return _build_vector(start, 1.0, end)
 
     return None
 
@@ -530,16 +533,6 @@ def _replace_calls_balanced(text: str, func_names: Set[str], keep_case: bool = F
     return text
 
 
-def convert_thermo_call(match) -> str:
-    """Regex-Wrapper (Kompatibilität): konvertiert einen Thermodynamik-Aufruf."""
-    return _convert_call_parts(match.group(1), match.group(2), keep_case=False)
-
-
-def convert_humid_air_call(match) -> str:
-    """Regex-Wrapper (Kompatibilität): konvertiert einen HumidAir-Aufruf."""
-    return _convert_call_parts(match.group(1), match.group(2), keep_case=True)
-
-
 def tokenize_equation(equation: str) -> str:
     """Konvertiert EES-Syntax zu Python-Syntax."""
     # Ersetze ^ durch **
@@ -659,7 +652,7 @@ def _get_const_eval_context() -> dict:
     def _atan(x): return np.degrees(np.arctan(x))
 
     return {
-        'pi': np.pi, 'e': np.e,
+        'pi': np.pi,     # e ist eine normale Variable (Eulersche Zahl: exp(1)), auch hier
         'sin': _sin, 'cos': _cos, 'tan': _tan,
         'asin': _asin, 'acos': _acos, 'atan': _atan,
         'sqrt': np.sqrt, 'log': np.log, 'log10': np.log10,
@@ -1015,6 +1008,23 @@ def _join_bracket_lines(lines: List[str], spans: Optional[Dict[int, int]] = None
     return result
 
 
+def _split_at_equals(line: str) -> List[str]:
+    """
+    Teilt eine Zeile am Gleichheitszeichen auf oberster Ebene - nicht an einem '=' in einer
+    Klammer: enthalpy(water, T=T_1, p=p_1) = h_1 -> ['enthalpy(water, T=T_1, p=p_1) ', ' h_1'].
+    Ohne solches '=' die ganze Zeile.
+    """
+    depth = 0
+    for index, char in enumerate(line):
+        if char in '([{':
+            depth += 1
+        elif char in ')]}':
+            depth -= 1
+        elif char == '=' and depth == 0:
+            return [line[:index], line[index + 1:]]
+    return [line]
+
+
 def _mangle_line(line: str) -> str:
     """
     Wendet mangle_keywords() auf eine Eingabezeile an - aber nicht auf eine
@@ -1022,7 +1032,10 @@ def _mangle_line(line: str) -> str:
     """
     if '=' not in line:
         return mangle_keywords(line)
-    left, right = line.split('=', 1)
+    parts = _split_at_equals(line)
+    if len(parts) != 2:
+        return mangle_keywords(line)
+    left, right = parts
     right_stripped = right.strip()
     keep_right = False
     if UNITS_AVAILABLE and right_stripped:
@@ -1176,6 +1189,22 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
         if not vars_in_right and _eval_constant_expression(right_tokenized) is not None:
             pre_constants.add(var_name)
 
+    def _repeated_assignment(var_name: str, value: float) -> bool:
+        """
+        Zweite Vorgabe derselben Größe (x = 5 ... x = 3): nicht still überschreiben, sondern als
+        Prüfgleichung aufnehmen - gleiche Werte sind zulässig, verschiedene meldet die
+        Widerspruchsprüfung mit der Zeile.
+        """
+        if var_name in sweep_vars:
+            raise EquationSyntaxError(f"'{display_name(var_name)}' ist bereits eine Parameterstudie/"
+                                      f"Werteliste - eine Größe nur einmal vorgeben")
+        if var_name not in initial_values:
+            return False
+        equation = f"({var_name}) - ({value!r})"
+        equations.append(equation)
+        original_equations[equation] = original_line
+        return True
+
     # Pass 2: Normale Verarbeitung
     for i, line in enumerate(lines):
         position[0] = i + 1
@@ -1205,6 +1234,9 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
             # Prüfe ob Vektor erfolgreich geparst wurde
             if vec_array is None:
                 continue
+            if var_name in sweep_vars or var_name in initial_values:
+                raise EquationSyntaxError(f"'{display_name(var_name)}' ist bereits vorgegeben - "
+                                          f"eine Größe nur einmal vorgeben")
             # Wenn Einheit angegeben: Konvertiere zu Standard-Berechnungseinheit
             if vec_unit and UNITS_AVAILABLE:
                 try:
@@ -1221,9 +1253,9 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
                     unit_values[var_name] = UnitValue.from_input(float(vec_array[0]), vec_unit)
                 except UnknownUnitError:
                     raise
-                except Exception:
-                    # Bei Fehler: verwende Original-Werte ohne Konvertierung
-                    sweep_vars[var_name] = vec_array
+                except Exception as exc:
+                    # nie unumgerechnet weiterrechnen
+                    raise EquationSyntaxError(f"Einheit '{vec_unit}' lässt sich nicht umrechnen ({exc})") from None
             else:
                 sweep_vars[var_name] = vec_array
             # Variable NICHT zu all_variables hinzufügen (wird separat behandelt)
@@ -1233,8 +1265,8 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
         if '==' in line:
             line = line.replace('==', '=')
 
-        # Teile bei = (nur das erste =)
-        parts = line.split('=', 1)
+        # Teile beim '=' auf oberster Ebene (nicht T= in einem Funktionsaufruf links)
+        parts = _split_at_equals(line)
         if len(parts) != 2:
             continue
 
@@ -1267,6 +1299,8 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
                     unit_value = unit_value_strict(magnitude, unit_str, line)
                     # Verwende calc_value für Berechnungen (konvertiert zu Standard-Einheit)
                     # z.B. 10 kg/h → 0.00278 kg/s, 20 °C → 293.15 K
+                    if _repeated_assignment(var_name, unit_value.calc_value):
+                        continue
                     initial_values[var_name] = unit_value.calc_value
 
                     # Speichere Einheiten-Info nur wenn parse_units aktiviert
@@ -1294,15 +1328,14 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
             # Versuche als einfache Zahl
             try:
                 value = float(right)
-                initial_values[var_name] = value
-                continue
             except ValueError:
                 # Versuche als arithmetischen Ausdruck auszuwerten
                 # (Trigonometrie in GRAD, gleicher Kontext wie Pass 1)
                 value = _eval_constant_expression(right)
-                if value is not None:
+            if value is not None:
+                if not _repeated_assignment(var_name, value):
                     initial_values[var_name] = value
-                    continue
+                continue
 
         # Füge Variablen hinzu (nur wenn keine direkte Zuweisung)
         # WICHTIG: Entferne vor-identifizierte Konstanten (aus Pass 1)
@@ -1365,7 +1398,7 @@ def find_start_values_block(text: str) -> Optional[Tuple[int, Optional[int]]]:
 def _single_assignment(line: str):
     """
     Wertet eine einzelne Zuweisung 'Name = Wert [Einheit]' genau wie im Blatt aus
-    (Einheit -> SI, Temperaturdifferenzen dT.../delta... ohne Offset).
+    (Einheit -> SI; °C/°F immer absolut, Differenzen in K - unabhängig vom Namen).
     Liefert (interner Name, SI-Wert, UnitValue oder None) bzw. None, wenn die
     Zeile keine solche Zuweisung ist. Einlesefehler werden weitergereicht.
     """
@@ -1471,7 +1504,8 @@ def start_values_edit(text: str, lines: List[str]) -> Tuple[int, int, str]:
 # variierten Größen sind keine Unbekannten mehr - optimizer.py wählt sie so,
 # dass die Zielgröße minimal bzw. maximal wird.
 # ---------------------------------------------------------------------------
-_OPTIMIZE_PATTERN = re.compile(r'^\s*(MINIMIZE|MAXIMIZE)\b', re.IGNORECASE)
+# Anweisung: Schlüsselwort und Name der Zielgröße (minimize = 3 ist eine Variable)
+_OPTIMIZE_PATTERN = re.compile(r'^\s*(MINIMIZE|MAXIMIZE)\s+[A-Za-z_]', re.IGNORECASE)
 _OPTIMIZE_SYNTAX = "MAXIMIZE ziel VARY x = a .. b Einheit (mehrere Größen durch Komma getrennt)"
 
 
@@ -1504,7 +1538,7 @@ def _optimization_line_groups(lines: List[str]) -> List[Tuple[int, List[int]]]:
 
 
 def _bound_in_si(name: str, value_text: str, unit: str, line_no: int):
-    """Grenze 'Wert' + Einheit in SI (wie eine Zuweisung; dT... ohne Offset)."""
+    """Grenze 'Wert' + Einheit in SI (wie eine Zuweisung; °C absolut, unabhängig vom Namen)."""
     try:
         result = _single_assignment(f"{name} = {value_text} {unit}".strip())
     except (EquationSyntaxError, UnknownUnitError) as exc:
@@ -1670,8 +1704,8 @@ if __name__ == "__main__":
     # Test 2: Vektor-Syntax
     print("=== Test 2: Vektor-Syntax ===")
     test_vector = """
-    T = 0:10:100
-    p = 1
+    T = 0:10:100 °C
+    p = 1 bar
     h = enthalpy(water, T=T, p=p)
     """
 

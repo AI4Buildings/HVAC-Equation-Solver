@@ -428,7 +428,11 @@ V = 200 L
 Every unit is converted to SI for the calculation (also cm², L, kW/m², kW/(m²K),
 mPa·s, mm²/s, µm). Exponents may be written without `^` (`20 cm2`, `500 m3/h`,
 `10 W/m2K`), and `·` is accepted as multiplication (`W/(m²·K)`). `%` and `‰` are units
-(`eta = 89.2 %` is 0.892, also `rh=50 %` in function arguments). Unknown units are
+(`eta = 89.2 %` is 0.892, also `rh=50 %` in function arguments). Prefixed units in a
+denominator stay prefixes (`kg/kWh`, `1/kPa`, `kg/MJ`), °C in a compound unit is a kelvin-sized
+difference (`2 °C/h`, `1/°C`, `W/(m²·°C)`), and `rpm` / `U/min` mean revolutions per minute
+(1/min, as in u = π·D·n). Assigning the same quantity twice (`x = 5`, later `x = 3`) is reported
+as a contradiction instead of silently using the last value. Unknown units are
 reported as an error instead of being silently ignored, and units in function
 arguments are checked against the expected dimension (`T=` temperature, `p=`
 pressure, ...). Numbers without unit are SI values, also in equations: in `24/(24 - t_S)`
