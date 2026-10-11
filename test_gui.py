@@ -998,6 +998,17 @@ check("Parameterstudie: Einheiten-Warnungen und Hinweise wie ohne Studie",
       app.unit_warning_label.cget("text") == "⚠ UNIT WARNINGS (1)" and app.hints_label.cget("text") == "ⓘ HINWEISE (1)",
       f"{app.unit_warning_label.cget('text')} {app.hints_label.cget('text')}")
 
+# Winkel intern rad: berechnete Winkel in rad (umschaltbar deg), Zahl + Winkel -> Hinweis
+solve("omega = 10 rad/s\nt = 2 s\nphi = omega*t\ny = sin(phi)\nalpha = 30 deg\nbeta = 2*alpha")
+check("Winkel: phi = omega*t in rad, sin(phi) in rad, 2*alpha in deg",
+      shown("phi") == (20.0, "rad") and close(shown("y")[0], 0.912945) and close(shown("beta")[0], 60)
+      and shown("beta")[1] == "deg" and list(app.unit_dropdowns["phi"].cget("values")) == ["rad", "deg"],
+      f"{shown('phi')} {shown('y')} {shown('beta')}")
+solve("alpha = 30 deg\nh = 90 - alpha")
+check("Winkel: Zahl ohne Einheit in Summe mit Winkel -> Hinweis (rad)",
+      app.hints_label.cget("text") == "ⓘ HINWEISE (1)" and "gilt als Wert in rad" in app.last_analysis.hints[0],
+      str(app.last_analysis.hints if app.last_analysis else None))
+
 # ---------------------------------------------------------------------------
 app.destroy()
 faulthandler.cancel_dump_traceback_later()

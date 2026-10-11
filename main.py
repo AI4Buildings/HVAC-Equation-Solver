@@ -23,7 +23,7 @@ import customtkinter as ctk
 from parser import (parse_equations, validate_system, display_name, unmangle,
                     parse_start_values, parse_start_value, start_value_entries, start_values_edit,
                     parse_optimization, start_value_units, parse_reference_states, remove_comments,
-                    wavelength_literals)
+                    wavelength_literals, declared_angle_exponents)
 from version import __version__
 from solver import solve_system, solve_parametric, SolveAnalysis
 import solver as solver_module
@@ -46,7 +46,8 @@ except ImportError:
 try:
     from unit_constraints import (check_all_unit_consistency, propagate_all_units_complete,
                                   temperature_sum_conflicts, scale_origin, numeric_value_form,
-                                  missing_unit_annotations, scale_offset_literals, si_number_literals)
+                                  missing_unit_annotations, scale_offset_literals, si_number_literals,
+                                  angle_exponents, angle_sum_numbers)
     CONSTRAINT_PROPAGATION_AVAILABLE = True
 except ImportError:
     CONSTRAINT_PROPAGATION_AVAILABLE = False
@@ -157,6 +158,7 @@ All calculations use SI base units internally:
   Enthalpy     J/kg        Entropy, cp    J/(kg K)
   Energy       J           Power          W
   Length       m           (also µm, cm, mm -> m)
+  Angle        rad         (30 deg -> 0.5236; see ANGLES)
 Inputs with units are converted automatically:
   T = 25 °C    p = 1 bar    h = 100 kJ/kg    Q = 5 kW
 Plain numbers WITHOUT unit are SI values (p=1 means 1 Pa!).
@@ -166,10 +168,10 @@ Results are displayed in °C, bar, kJ/kg, kW (see Settings).
 
 MATHEMATICAL FUNCTIONS:
 -----------------------
-sin(x), cos(x), tan(x)     Trigonometric (x in degrees)
+sin(x), cos(x), tan(x)     Trigonometric (number x in degrees,
+                           angle with unit in its unit)
 asin(x), acos(x), atan(x)  Inverse trig functions (result in degrees)
 sinh(x), cosh(x), tanh(x)  Hyperbolic functions (radians)
-Angles with a unit are converted to degrees: a = 0.5236 rad -> 30.
 exp(x)                      e^x
 ln(x)                       Natural logarithm
 log10(x), lg(x)             Base 10 logarithm
@@ -182,8 +184,14 @@ IF(a, b, x, y, z)           Case distinction: x if a < b,
 value(x, unit)              Number of x in a unit (see below)
 quantity(z, unit)           Quantity from a number in a unit
 pi                          Pi constant
-Angles are in degrees. Formulas from the literature that use radians
-(e.g. view factors): atan(x)*pi/180 gives the angle in radians.
+ANGLES: a number without unit in sin/cos/tan is in degrees
+(sin(30) = 0.5), asin/acos/atan give degrees. Angles with a unit are
+SI internally (rad, like all quantities): with a = 30 deg and
+omega = 10 rad/s, sin(a), sin(omega*t), s = a*r and u = omega*r
+are correct; asin/acos/atan give the angle if the result is used as
+an angle with a unit (a + asin(x)). A number in a sum with an angle
+is a value in rad (hint ⓘ) - write c = 90 deg. Formulas from the
+literature that use radians (e.g. view factors): atan(x)*pi/180.
 Not available (unlike EES): own functions.
 
 CASE DISTINCTION - IF:
@@ -1676,6 +1684,13 @@ class EquationSolverApp(ctk.CTk):
             for goal in goals:
                 unit_values.update(goal.unit_values)   # Anzeige in der Einheit der Grenzen
 
+            # Winkelgrößen (Einheit mit Winkel, auch berechnet): Anzeige in rad/deg statt "-"
+            declared_angles = declared_angle_exponents(equations_text, initial_values, sweep_vars, unit_values)
+            self._angle_quantities = set()
+            if CONSTRAINT_PROPAGATION_AVAILABLE and any(declared_angles.values()):
+                self._angle_quantities = {name for name, exponent in
+                                          angle_exponents(equations, declared_angles).items() if exponent == 1}
+
             self.known_variables = variables.copy()
             self.current_unit_values = unit_values
             self.known_variables.update(sweep_vars.keys())
@@ -1774,6 +1789,18 @@ class EquationSolverApp(ctk.CTk):
                         f"{display_name(name)} (in {unit} eingegeben) und gilt als {number:g} {si} - "
                         f"Zahlen ohne Einheit sind SI-Werte. Ist {number:g} {unit} gemeint, als Größe "
                         f"mit Einheit angeben (z.B. c = {number:g} {unit})")
+                if any(declared_angles.values()):
+                    plain = {name for name in list(constants) + list(sweep_vars) if name not in unit_values}
+                    for source, number, angle in angle_sum_numbers(original_equations, declared_angles, plain,
+                                                                   {**all_units, **known_units}):
+                        value = constants.get(number, number)
+                        example = (f"{unmangle(number)} = {value:g} deg" if number in constants
+                                   else f"c = {number} deg")
+                        temperature_hints.append(
+                            f"'{unmangle(remove_comments(source)).strip()}': {unmangle(number)} ohne Einheit "
+                            f"steht in einer Summe mit dem Winkel {unmangle(angle)} und gilt als Wert in rad - "
+                            f"Winkel mit Einheit sind intern rad, Zahlen ohne Einheit SI-Werte. Sind Grad "
+                            f"gemeint, mit Einheit angeben (z.B. {example})")
                 for source, number in wavelength_literals(original_equations):
                     temperature_hints.append(
                         f"'{unmangle(remove_comments(source)).strip()}': Die Wellenlänge {number:g} ohne "
@@ -2166,6 +2193,10 @@ class EquationSolverApp(ctk.CTk):
             return
         # dimensionslos (Auswahl -, %, ‰, g/kg) nur, was die Ableitung so ergibt - nicht jede
         # Größe ohne bekannte Einheit (T = 300 in einem Zahlenblatt ist nicht "30000 %")
+        # Winkelgrößen (aus den Einheiten, siehe _angle_quantities): rad statt dimensionslos
+        for var in getattr(self, '_angle_quantities', ()):
+            if units.get(var) in (None, '', 'dimensionless'):
+                units[var] = 'rad'
         self._dimensionless_results = {v for v, u in units.items() if u in ('', 'dimensionless')}
         for var, val in solution.items():
             existing = self.current_unit_values.get(var)

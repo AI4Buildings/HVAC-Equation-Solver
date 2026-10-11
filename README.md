@@ -295,7 +295,9 @@ The solver uses robust block decomposition:
 - Residuals are evaluated relative to the magnitude of the equation terms
   (divergence to an asymptote is never accepted as a solution)
 - With multiple roots, the one closest to the initial value is chosen
-  (`sin(alpha) = 0.5` yields 30, not 150)
+  (`sin(alpha) = 0.5` yields 30, not 150); for a coupled block solved by tearing, the distance of
+  all block variables to their initial values counts, so the solution does not depend on how the
+  equations are written (`u = v^2` with `v = u - 6` or `u = v + 6` both give (4; -2))
 - Contradictory systems (e.g. `x+1=3` and `x+1=4`) are reported as errors; redundant but
   consistent equations (an extra balance) are allowed and checked, whichever way they are written
 - Linearly dependent equations (`x + y = 1`, `2*x + 2*y = 2`, a balance written twice) are
@@ -324,10 +326,18 @@ equations and are solved iteratively. Expression constants with units like
 | Temperature difference | delta_K | `dT = 7 K` (always in K; °C is an absolute temperature) |
 | Pressure p | Pa | `1 bar`, `101325 Pa` |
 | Enthalpy h | J/kg | `100 kJ/kg` |
-| Angles (sin, cos, tan) | Degrees (°) | `30 deg`, `0.5236 rad` (→ 30) |
+| Angle | rad (as SI) | `30 deg` (→ 0.5236), `10 rad/s`, `15 deg/h` |
 | Entropy s | J/(kg·K) | |
 | Density rho | kg/m³ | |
 | Vapor quality x | - (0-1) | |
+
+**Angles:** a number without unit in `sin`/`cos`/`tan` is in degrees (`sin(30) = 0.5`), and
+`asin`/`acos`/`atan` return degrees (as in EES). Angles with a unit are SI internally (rad), like
+every quantity: with `alpha = 30 deg` and `omega = 10 rad/s`, `sin(alpha)`, `sin(omega*t)`,
+`s = alpha*r` and `u = omega*r` are correct; `asin`/`acos`/`atan` return the angle when the
+result is used as an angle with a unit (`k = asin(x) + alpha`). Which expressions are angles follows
+from the units, never from names. A number in a sum with an angle (`90 - alpha`) is a value in rad
+(hint ⓘ) - write `c = 90 deg`. Computed angles are shown in rad (switchable to deg).
 
 `°C`/`°F` are always absolute temperatures; temperature differences are entered in `K`.
 Whether a quantity is a temperature or a difference follows from the equations, never from

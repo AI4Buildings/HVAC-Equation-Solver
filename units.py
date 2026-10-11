@@ -291,6 +291,15 @@ COMPATIBLE_UNITS = {
     '°C': ['degC', 'K', 'degF'],
     '°F': ['degF', 'degC', 'K'],
 
+    # Winkel (intern rad) und Winkelgeschwindigkeit; Drehzahl 1/min ist kein Winkel je Zeit
+    'deg': ['deg', 'rad'],
+    'rad': ['rad', 'deg'],
+    'degree': ['deg', 'rad'],
+    'radian': ['rad', 'deg'],
+    'rad/s': ['rad/s', 'deg/s'],
+    'deg/s': ['deg/s', 'rad/s'],
+    'deg/h': ['deg/h', 'deg/s', 'rad/s'],
+
     # Druck
     'bar': ['bar', 'Pa', 'kPa', 'MPa', 'mbar', 'atm', 'psi'],
     'Pa': ['Pa', 'kPa', 'MPa', 'bar', 'mbar', 'atm', 'psi'],
@@ -432,11 +441,7 @@ def _convert_to_standard(quantity) -> Tuple[float, str]:
         if 'delta_' in units_str and quantity.dimensionality == _dimensionality('kelvin'):
             return (float(quantity.to('delta_degC').magnitude), 'delta_K')
 
-        # Winkel: intern Grad, wie die Winkelfunktionen (sin(30) = 0.5); 0.5236 rad -> 30
-        if quantity.dimensionless and units_str in _ANGLE_UNITS:
-            return (float(quantity.to('degree').magnitude), '')
-
-        # Dimensionslos (inkl. kg/kg, g/kg): Zahlenwert ohne Einheiten-Präfix
+        # Dimensionslos (inkl. kg/kg, g/kg und Winkel: SI-Einheit rad = 1, 30 deg -> 0.5236)
         if quantity.dimensionless:
             label = 'kg/kg' if 'gram' in units_str else ''
             return (float(quantity.to('dimensionless').magnitude), label)
@@ -628,8 +633,6 @@ class UnitValue:
             # Erstelle temporäre Quantity um SI-Basis zu ermitteln
             temp_qty = 1.0 * ureg(normalized_unit)
             si_base_unit = str(temp_qty.to_base_units().units)
-            if temp_qty.dimensionless and str(temp_qty.units) in _ANGLE_UNITS:
-                si_base_unit = 'degree'   # Winkel sind intern Grad (wie die Winkelfunktionen)
 
             # Erstelle SI-Quantity
             si_quantity = si_value * ureg(si_base_unit)
@@ -839,10 +842,9 @@ def check_unit_dimension(unit_value: 'UnitValue', expected_unit: str, context: s
 # (Heizkurve in °C, h = 5.7 + 3.8*v mit v in m/s). Intern ist alles SI; diese
 # Funktionen rechnen ausdrücklich in die genannte Einheit bzw. zurück - generisch
 # für jede Einheit (Nullpunkt und Faktor aus pint, auch °C, °F, bar, kW, m3/h).
-# Winkel sind intern Grad (Trigonometrie in Grad), daher Bezug auf Grad.
+# Winkel wie alles in SI (rad): value(a, deg) ist der Zahlenwert in Grad.
 # ---------------------------------------------------------------------------
 _AFFINE_CACHE: Dict[str, Tuple[float, float]] = {}
-_ANGLE_UNITS = {'degree', 'radian', 'arcminute', 'arcsecond', 'gradian', 'turn', 'revolution'}
 
 
 def unit_affine(unit_str: str) -> Tuple[float, float]:
@@ -858,18 +860,30 @@ def unit_affine(unit_str: str) -> Tuple[float, float]:
     try:
         normalized = normalize_unit(key)
         one = ureg.Quantity(1.0, normalized)
-        if one.dimensionless and str(one.units) in _ANGLE_UNITS:
-            result = (0.0, float(one.to('degree').magnitude))
-        else:
-            zero_si = float(ureg.Quantity(0.0, normalized).to_base_units().magnitude)
-            one_si = float(one.to_base_units().magnitude)
-            result = (zero_si, one_si - zero_si)
+        zero_si = float(ureg.Quantity(0.0, normalized).to_base_units().magnitude)
+        one_si = float(one.to_base_units().magnitude)
+        result = (zero_si, one_si - zero_si)
     except Exception:
         raise UnknownUnitError(f"Unbekannte Einheit '{key}'") from None
     if result[1] == 0:
         raise UnknownUnitError(f"Einheit '{key}' hat keinen Umrechnungsfaktor")
     _AFFINE_CACHE[key] = result
     return result
+
+
+@functools.lru_cache(maxsize=None)
+def angle_exponent(unit_str: str) -> int:
+    """
+    Exponent des Winkels in einer Einheit: deg, rad, gon -> 1, rad/s, deg/h -> 1, sr -> 2, 1/deg -> -1,
+    sonst 0 (auch unbekannte Einheit). pint führt rad als dimensionslose Basiseinheit;
+    Drehzahlen (rpm, U/min = 1/min) sind keine Winkel.
+    """
+    try:
+        units = ureg.Quantity(1.0, normalize_unit(unit_str.strip())).to_root_units().units
+        exponent = dict(units._units).get('radian', 0)
+    except Exception:
+        return 0
+    return int(exponent) if float(exponent).is_integer() else 0
 
 
 def unit_number(x, unit_str: str):

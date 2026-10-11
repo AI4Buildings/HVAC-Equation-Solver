@@ -461,6 +461,28 @@ check("Zahlenwert-Schreibweise mit Gesetz-Summand",
       numeric_value_form("T_3 = T_1 + T_2 + Q/(m*c)", ['T_1', 'T_2', 'T_3'], '°C', {**known, 'T_3': 'K'})
       == "value(T_3, °C) = value(T_1, °C) + value(T_2, °C) + value(Q / (m * c), K)")
 
+# Winkel: Exponent aus der Einheit über Summen/Produkte, nie aus Namen; Schreibweise mit Grad
+from unit_constraints import angle_exponents, angle_function_forms, angle_sum_numbers
+declared = {'omega': 1, 't': 0, 'r': 0, 'theta': 0, 'alpha': 1, 'z': 0}
+forms = angle_function_forms(["(y) - (sin(omega*t))", "(c) - (cos(theta))", "(g) - (asin(z))",
+                              "(k) - (g + alpha)", "(w) - (sin(asin(z)))"], declared)
+check("Winkelgröße: sin(omega*t) -> sin(value(omega*t, 'deg'))",
+      forms.get("(y) - (sin(omega*t))") == "(y) - (sin(value(omega*t, 'deg')))", str(forms))
+check("Winkelgröße: asin als Winkel verwendet -> quantity(asin(z), 'deg')",
+      forms.get("(g) - (asin(z))") == "(g) - (quantity(asin(z), 'deg'))", str(forms))
+check("Zahl ohne Einheit bleibt Grad: cos(theta), sin(asin(z))",
+      "(c) - (cos(theta))" not in forms and "(w) - (sin(asin(z)))" not in forms, str(forms))
+check("Winkel-Exponent: phi = omega*t, u = omega*r, keine Namensregel",
+      angle_exponents(["(phi) - (omega*t)", "(u) - (omega*r)", "(x) - (theta*2)"], declared)
+      == {'phi': 1, 'u': 1}, str(angle_exponents(["(phi) - (omega*t)", "(u) - (omega*r)", "(x) - (theta*2)"], declared)))
+check("Winkel: Reihenfolge der Summanden egal (theta + alpha wie alpha + theta)",
+      angle_function_forms(["(y) - (sin(theta + alpha))"], declared)
+      and angle_function_forms(["(y) - (sin(alpha + theta))"], declared))
+found = angle_sum_numbers({"(h) - (90 - alpha)": "h = 90 - alpha", "(q) - (omega*r + v)": "q = omega*r + v"},
+                          declared, set(), {'alpha': 'deg', 'omega': 'rad/s', 'r': 'm', 'v': 'm/s'})
+check("Zahl in Summe mit Winkel -> Hinweis; u = omega*r + v (m/s) nicht",
+      found == [("h = 90 - alpha", "90", "alpha")], str(found))
+
 # ---------------------------------------------------------------------------
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")

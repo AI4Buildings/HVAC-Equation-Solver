@@ -2280,6 +2280,283 @@ def si_number_literals(equations: Dict[str, str],
     return found
 
 
+# ----------------------------------------------------------------------------
+# Winkel: intern SI (rad = 1) wie alles. Zahlen ohne Einheit sind in sin/cos/tan Grad
+# (Festlegung der Eingabesprache wie EES: sin(30) = 0.5), asin/acos/atan liefern Grad.
+# Eine Winkelgröße (Einheit mit Winkel: deg, rad, rad/s * s, quantity(z, deg)) liest die
+# Funktion dagegen in ihrer Einheit: sin(phi) mit phi = 30 deg, sin(omega*t) mit omega in rad/s.
+# Welche Ausdrücke Winkelgrößen sind, folgt aus den Einheiten (Exponent des Winkels, wie die
+# Dimension über Summen/Produkte), nie aus Namen; nicht bestimmbar -> Zahl (Grad).
+# ----------------------------------------------------------------------------
+_TRIG_FUNCS = {'sin', 'cos', 'tan'}
+_INVERSE_TRIG_FUNCS = {'asin', 'acos', 'atan'}
+
+
+def _numeric_literal(node) -> Optional[float]:
+    """Zahlenwert eines Ausdrucks nur aus Zahlen (2, -1, 1/3), sonst None."""
+    if any(isinstance(n, (ast.Name, ast.Call)) for n in ast.walk(node)):
+        return None
+    try:
+        value = eval(compile(ast.Expression(body=node), '<exponent>', 'eval'), {'__builtins__': {}}, {})
+        return float(value)
+    except Exception:
+        return None
+
+
+def _angle_analysis(equations: List[str], declared: Dict[str, int]):
+    """
+    Winkel-Exponenten aller Größen und Ausdrücke (lineares System wie _complete_inference, ein
+    Exponent je Größe; widersprechende Gleichungen ausgelassen - rad = 1 erlaubt u = omega*r).
+    Summen: ein Winkel unter Zahlen bzw. Größen ohne Winkel macht die Summe zum Winkel (die
+    übrigen Summanden sind SI-Werte in rad), unabhängig von der Reihenfolge der Summanden.
+
+    Returns:
+        (resolve, Größen-Exponenten, [(Gleichung, Aufruf-Knoten, Form, invers), ...],
+         [(Gleichung, [(Summand, Form), ...]), ...])
+    """
+    from fractions import Fraction
+    from units import angle_exponent
+    rows = []
+    order: Dict[str, int] = {}
+    fresh = [0]
+    calls = []
+    sums = []
+
+    def const(value):
+        return ({}, Fraction(value))
+
+    def variable(name):
+        order.setdefault(name, len(order))
+        return ({name: Fraction(1)}, Fraction(0))
+
+    def new_variable():
+        fresh[0] += 1
+        return variable(f"#{fresh[0]}")
+
+    def combine(a, b, factor=1):
+        coeffs = dict(a[0])
+        for name, c in b[0].items():
+            coeffs[name] = coeffs.get(name, Fraction(0)) + factor * c
+        return ({n: c for n, c in coeffs.items() if c != 0}, a[1] + factor * b[1])
+
+    def equal(a, b):
+        coeffs, rhs = combine(a, b, -1)
+        if coeffs:
+            rows.append((coeffs, -rhs))
+
+    def unify(forms):
+        forms = [f for f in forms if f is not _ANY]
+        if not forms:
+            return _ANY
+        constants = {f[1] for f in forms if not f[0]}
+        nonzero = constants - {0}
+        if len(nonzero) > 1:
+            reference = new_variable()          # verschiedene Winkel-Exponenten: offen
+        elif constants:
+            reference = const(next(iter(nonzero)) if nonzero else 0)
+        else:
+            reference = forms[0]
+        for f in forms:
+            if f[0] and f is not reference:
+                equal(f, reference)
+        return reference
+
+    def unit_text(node):
+        return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+    def form(node, eq):
+        if isinstance(node, ast.Constant):
+            return _ANY
+        if isinstance(node, ast.Name):
+            if node.id == 'pi':
+                return _ANY
+            if node.id in declared:
+                return const(declared[node.id])
+            return variable(node.id)
+        if isinstance(node, ast.UnaryOp):
+            return form(node.operand, eq)
+        if isinstance(node, ast.BinOp):
+            if isinstance(node.op, (ast.Add, ast.Sub)):
+                terms = [(term, form(term, eq)) for _, term in _flatten_additive(node)]
+                sums.append((eq, terms))
+                return unify([f for _, f in terms])
+            if isinstance(node.op, (ast.Mult, ast.Div)):
+                left, right = form(node.left, eq), form(node.right, eq)
+                if left is _ANY and right is _ANY:
+                    return _ANY
+                left = const(0) if left is _ANY else left
+                right = const(0) if right is _ANY else right
+                return combine(left, right, 1 if isinstance(node.op, ast.Mult) else -1)
+            if isinstance(node.op, ast.Pow):
+                base = form(node.left, eq)
+                n = _numeric_literal(node.right)
+                if base is _ANY:
+                    return _ANY
+                if n is None:
+                    return const(0)
+                n = Fraction(n).limit_denominator(1000)
+                return ({k: c * n for k, c in base[0].items() if c * n != 0}, base[1] * n)
+            return const(0)
+        if isinstance(node, ast.Call):
+            fname = _func_name(node)
+            args = node.args
+            if fname in ('value', 'quantity') and len(args) == 2 and unit_text(args[1]) is not None:
+                exponent = angle_exponent(unit_text(args[1]))
+                argument = form(args[0], eq)
+                if fname == 'value' and argument is not _ANY:
+                    equal(argument, const(exponent))       # value(x, deg): x ist ein Winkel
+                return const(0) if fname == 'value' else const(exponent)
+            if fname in _TRIG_FUNCS and len(args) == 1:
+                calls.append((eq, node, form(args[0], eq), False))
+                return const(0)
+            if fname in _INVERSE_TRIG_FUNCS and len(args) == 1:
+                result = new_variable()
+                calls.append((eq, node, result, True))
+                form(args[0], eq)
+                return result
+            if fname == 'sqrt' and len(args) == 1:
+                f = form(args[0], eq)
+                return f if f is _ANY else ({k: c / 2 for k, c in f[0].items()}, f[1] / 2)
+            if fname in ('abs', 'ceil', 'floor', 'round') and args:
+                return form(args[0], eq)
+            if fname in ('max', 'min', 'IF'):
+                if fname == 'IF' and len(args) == 5:
+                    unify([form(args[0], eq), form(args[1], eq)])
+                return unify([form(a, eq) for a in (args[2:] if fname == 'IF' else args)])
+            for a in args:
+                form(a, eq)
+            for keyword in node.keywords:
+                form(keyword.value, eq)
+            return const(0)
+        return const(0)
+
+    for eq in equations:
+        try:
+            tree = ast.parse(eq, mode='eval').body
+            unify([form(tree, eq)])
+        except Exception:
+            continue
+
+    # Gauss-Elimination (exakt), widersprüchliche Zeilen auslassen (wie _complete_inference)
+    pivots: Dict[str, Tuple[Dict[str, Any], Any]] = {}
+    for coeffs, rhs in rows:
+        coeffs = dict(coeffs)
+        for name in [n for n in coeffs if n in pivots]:
+            factor = coeffs.get(name)
+            if not factor:
+                continue
+            p_coeffs, p_rhs = pivots[name]
+            for n2, c2 in p_coeffs.items():
+                coeffs[n2] = coeffs.get(n2, 0) - factor * c2
+            rhs = rhs - factor * p_rhs
+            coeffs = {n: c for n, c in coeffs.items() if c != 0}
+        if not coeffs:
+            continue
+        pivot = min(coeffs, key=lambda n: order.get(n, 0))
+        factor = coeffs[pivot]
+        coeffs = {n: c / factor for n, c in coeffs.items()}
+        rhs = rhs / factor
+        for name, (p_coeffs, p_rhs) in list(pivots.items()):
+            f = p_coeffs.get(pivot)
+            if f:
+                new_coeffs = dict(p_coeffs)
+                for n2, c2 in coeffs.items():
+                    new_coeffs[n2] = new_coeffs.get(n2, 0) - f * c2
+                pivots[name] = ({n: c for n, c in new_coeffs.items() if c != 0}, p_rhs - f * rhs)
+        pivots[pivot] = (coeffs, rhs)
+    determined = {name: rhs for name, (coeffs, rhs) in pivots.items() if set(coeffs) == {name}}
+
+    def resolve(f):
+        """Exponent einer Form; None = nicht bestimmbar."""
+        if f is _ANY:
+            return None
+        total = f[1]
+        for name, c in f[0].items():
+            if name not in determined:
+                return None
+            total += c * determined[name]
+        return total
+
+    exponents = {name: value for name, value in determined.items() if not name.startswith('#')}
+    return resolve, exponents, calls, sums
+
+
+def angle_exponents(equations: List[str], declared: Dict[str, int]) -> Dict[str, int]:
+    """Winkel-Exponenten der berechneten Größen (1 = Winkel in rad), siehe _angle_analysis."""
+    exponents = _angle_analysis(equations, declared)[1]
+    return {name: int(value) for name, value in exponents.items() if value and value.denominator == 1}
+
+
+def angle_sum_numbers(equations: Dict[str, str], declared: Dict[str, int], plain_names: Set[str],
+                      units: Dict[str, str]) -> List[Tuple[str, str, str]]:
+    """
+    Zahlen bzw. Größen ohne Einheit in einer Summe mit einem Winkel (alpha + 90, omega*t + phi_0
+    mit phi_0 = 30): Winkel sind intern rad, die Zahl ist daher ein SI-Wert in rad - auch wenn
+    Grad gemeint sind. Nur für einen Hinweis; die Rechnung bleibt unverändert.
+
+    Returns:
+        [(Originalgleichung, Summand ohne Einheit, Winkel-Summand), ...] - je Gleichung einmal
+    """
+    resolve, _, _, sums = _angle_analysis(list(equations), declared)
+    dimensionless = ureg.dimensionless.dimensionality if PINT_AVAILABLE else None
+    found, seen = [], set()
+    for eq, terms in sums:
+        if eq in seen:
+            continue
+        plain = [t for t, _ in terms
+                 if (isinstance(t, ast.Constant) and isinstance(t.value, (int, float))
+                     and not isinstance(t.value, bool) and t.value)
+                 or (isinstance(t, ast.Name) and t.id in plain_names)]
+        angles = [t for t, f in terms if resolve(f) not in (None, 0)]
+        if not plain or not angles:
+            continue
+        # vorgegebene Winkel zuerst nennen (alpha in h = 90 - alpha, nicht h)
+        angles.sort(key=lambda t: not (isinstance(t, ast.Name) and declared.get(t.id)))
+        for angle in angles:
+            text = ast.unparse(angle)
+            try:
+                if _expression_dimension(text, units)[0] != dimensionless:
+                    continue
+            except Exception:
+                continue
+            seen.add(eq)
+            found.append((equations[eq] or eq, ast.unparse(plain[0]), text))
+            break
+    return found
+
+
+def angle_function_forms(equations: List[str], declared: Dict[str, int]) -> Dict[str, str]:
+    """
+    Gleichungen mit Winkelfunktionen einer Winkelgröße in der Schreibweise mit Zahlenwert in Grad
+    (die Funktionen rechnen in Grad): sin(phi) -> sin(value(phi, 'deg')), alpha = asin(z) ->
+    quantity(asin(z), 'deg'), wenn alpha eine Winkelgröße ist. {alte Gleichung: neue}.
+    declared: Winkel-Exponent der vorgegebenen Größen (mit Einheit; ohne Einheit 0).
+    """
+    resolve, _, calls, _ = _angle_analysis(equations, declared)
+    edits: Dict[str, list] = defaultdict(list)
+    for eq, node, f, inverse in calls:
+        exponent = resolve(f)
+        if not exponent:
+            continue
+        if inverse:
+            edits[eq].append((node.col_offset, node.end_col_offset, 'quantity(', ", 'deg')"))
+        else:
+            arg = node.args[0]
+            edits[eq].append((arg.col_offset, arg.end_col_offset, 'value(', ", 'deg')"))
+    result = {}
+    for eq, items in edits.items():
+        data = eq.encode('utf-8')        # ast-Positionen sind Byte-Positionen
+        inserts = []
+        for depth, (start, end, before, after) in enumerate(sorted(items, key=lambda e: (e[0], -e[1]))):
+            inserts.append((start, depth, before))
+            inserts.append((end, -depth, after))
+        # von hinten einfügen; an gleicher Stelle zuerst der innere Ausdruck
+        for position, _, text in sorted(inserts, key=lambda i: (i[0], i[1]), reverse=True):
+            data = data[:position] + text.encode('utf-8') + data[position:]
+        result[eq] = data.decode('utf-8')
+    return result
+
+
 def scale_origin(unit: str) -> Optional[float]:
     """Nullpunkt einer Temperatur-Einheit in K (°C 273.15, °F 255.37, K 0) aus pint."""
     if not PINT_AVAILABLE or not unit:

@@ -228,7 +228,12 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - **Wurzelauswahl**: Bei mehreren Wurzeln wird die dem Startwert nächstgelegene gewählt
   (Tie-Break bis auf Rundung gleicher Abstände: positive Wurzel); `sin(alpha) = 0.5` liefert 30,
   nicht 150 oder −210. Auch die schnelle Newton-Phase: eine Newton-Wurzel gilt nur, wenn im
-  Intervall Startwert ± Abstand kein weiterer Vorzeichenwechsel liegt (sonst Bracket-Suche)
+  Intervall Startwert ± Abstand kein weiterer Vorzeichenwechsel liegt (sonst Bracket-Suche).
+  **Blöcke per Tearing**: Abstand ALLER Blockgrößen zu ihren Startwerten (je relativ zum
+  Startwert, `block_anchors`; Gleichstand: größere Werte in Blattreihenfolge) - nicht nur der
+  Tearing-Größe, sonst hinge die Lösung von der Schreibweise ab (`u = v^2` mit `v = u - 6` bzw.
+  `u = v + 6`: früher (4; -2) bzw. (9; 3), jetzt beide (4; -2)). Simultan gelöste Blöcke
+  (least_squares) konvergieren vom Startpunkt aus - dort entscheidet ein Startwert
 - **Standard-Startwert**: 1.0 für alle Variablen bzw. einheitenbasiert (kein Mittel aller bekannten
   Werte - eine unbeteiligte Konstante darf die gewählte Lösung nicht bestimmen)
   (`units.initial_values_from_units`): typischer Wert je Dimension; unbekannte ABSOLUTE
@@ -426,7 +431,7 @@ Eingaben mit anderen Einheiten (°C, bar, kJ) werden automatisch konvertiert.
 | Fläche, Volumen | m², m³ | `50 cm^2`, `200 L` |
 | Spektrale Emission Eb | W/m³ (Anzeige W/(m²·µm)) | |
 | Gesamtemission E | W/m² | |
-| **Winkel (Trigonometrie)** | **Grad (°)** | `30 deg`, `0.5236 rad` (-> 30) |
+| Winkel | rad (wie SI) | `30 deg` (-> 0.5236), `10 rad/s`, `15 deg/h` |
 
 ### Humid Air Units
 
@@ -443,7 +448,8 @@ Eingaben mit anderen Einheiten (°C, bar, kJ) werden automatisch konvertiert.
 
 ### Trigonometrische Funktionen
 
-Alle trigonometrischen Funktionen verwenden **Grad**:
+Eine **Zahl ohne Einheit** ist in den Winkelfunktionen **Grad** (Festlegung der Eingabesprache
+wie EES):
 
 ```
 cos(60) = 0.5       {60°}
@@ -456,10 +462,24 @@ atan(1) = 45        {Ergebnis in Grad}
 
 Hyperbolische Funktionen (`sinh`, `cosh`, `tanh`) verwenden Radiant.
 
-Winkel mit Einheit werden nach Grad umgerechnet (interne Einheit wie die Winkelfunktionen;
-`units._convert_to_standard`, Anzeige `from_si_base`): `a = 0.5236 rad` -> 30, `sin(a)` = 0.5.
-Früher wurden sie nach Radiant (pint-Basis) umgerechnet und dann als Grad gelesen
-(sin(30 deg) = 0.009, ohne Meldung).
+**Winkel mit Einheit sind intern SI (rad)** wie alle Größen, auch zusammengesetzt (`30 deg` ->
+0.5236, `15 deg/h` -> rad/s): `s = alpha*r`, `u = omega*r` stimmen. sin/cos/tan lesen eine
+**Winkelgröße in ihrer Einheit** (`sin(alpha)`, `sin(omega*t)`, `cos(w*t)` mit w in deg/h);
+asin/acos/atan liefern die Winkelgröße, wenn das Ergebnis als Winkel mit Einheit verwendet wird
+(`k = asin(x) + alpha`, Startwert mit Einheit deg), sonst eine Zahl in Grad. Umsetzung
+(`parser._angle_function_forms` nach dem Einlesen, `unit_constraints.angle_function_forms`):
+Winkel-Exponent jeder Größe aus den Einheiten (deg, rad, rad/s -> 1; Summen/Produkte wie
+Dimensionen; Summen: ein Winkel macht die Summe zum Winkel, unabhängig von der Reihenfolge;
+widersprechende Gleichungen ausgelassen - rad = 1 erlaubt `u = omega*r` in m/s; nicht bestimmbar
+-> Zahl), dann `sin(phi)` -> `sin(value(phi, 'deg'))`, `asin(z)` -> `quantity(asin(z), 'deg')`.
+Eine Zuweisung `g = asin(0.5)` bzw. `y = sin(quantity(30, deg))` ist deshalb eine Gleichung,
+keine beim Einlesen ausgewertete Konstante (`parser._angle_dependent`). Quellen: Einheiten von
+Konstanten, Parameterstudien, Wertelisten, VARY-Grenzen und Startwerten; ohne Einheit 0 (Zahl).
+Berechnete Winkel werden in rad angezeigt (umschaltbar deg; `main._angle_quantities`).
+Zahl/Größe ohne Einheit in einer Summe mit einem dimensionslosen Winkel (`90 - alpha`,
+`omega*t + phi_0`): ein SI-Wert in rad -> Hinweis "ⓘ" (`unit_constraints.angle_sum_numbers`).
+Drehzahlen (`rpm`, `U/min` = 1/min) sind keine Winkel je Zeit. Früher waren Winkel intern Grad,
+zusammengesetzte (rad/s) aber rad: `sin(omega*t)` und `s = alpha*r` waren still falsch.
 
 ## Einheiten-System (v3.0)
 
@@ -677,7 +697,7 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
    Formeln, die nur für Zahlenwerte in bestimmten Einheiten gelten (Heizkurve in °C,
    Magnus-Formel, cp(ϑ)-Polynome, h = 5.7 + 3.8·v), werden mit `value(x, Einheit)` und
    `quantity(z, Einheit)` geschrieben (units.unit_number/unit_quantity, Nullpunkt und Faktor
-   aus pint, Winkel bezogen auf Grad). Ohne diese Funktionen: falsches Ergebnis ohne Meldung -
+   aus pint; Winkel intern rad, `value(alpha, deg)` = Zahlenwert in Grad). Ohne diese Funktionen: falsches Ergebnis ohne Meldung -
    eine Zahlenwertgleichung ist strukturell nicht von einem Gesetz in K unterscheidbar.
    Die Einheiten-Ableitung kennt beide Funktionen (Argument von value hat die Dimension der
    Einheit, quantity liefert sie; °C/°F -> absolute Temperatur; falsche Einheit -> Warnung).

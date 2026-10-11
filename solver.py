@@ -1407,6 +1407,13 @@ def _solve_block_by_tearing(
     explicit = _find_tear_candidates(equations, variables, known)[:max_candidates]
     with_linear = [c for c in _find_tear_candidates(equations, variables, known, allow_linear=True)
                    if any(isinstance(step, _LinearStep) for _, step in c[1])][:max_candidates]
+    # Mehrere Lösungen: Wahl nach dem Abstand ALLER Blockgrößen zu ihren Startwerten - nicht nur
+    # der Tearing-Größe, sonst hinge die Wahl von der Schreibweise ab (u = v^2 mit v = u - 6
+    # bzw. u = v + 6 riss u bzw. v auf: (4; -2) bzw. (9; 3))
+    appearance = _appearance_order(equations, variables)
+    block_vars = sorted(variables, key=lambda v: appearance[v])
+    anchors = {v: _get_initial_value(v, manual_initial, known_values, inferred_units, use_structure=False)
+               for v in block_vars}
     for tear, sequence, residual_eq in explicit + with_linear:
         def chain(x, tear=tear, sequence=sequence):
             values = dict(known_values)
@@ -1420,7 +1427,8 @@ def _solve_block_by_tearing(
             return values
 
         success, x = _solve_single_unknown(
-            residual_eq, tear, known_values, context, manual_initial, inferred_units, chain=chain
+            residual_eq, tear, known_values, context, manual_initial, inferred_units, chain=chain,
+            block_anchors=(block_vars, anchors)
         )
         if not success:
             continue
@@ -2354,7 +2362,7 @@ _LAST_SEARCH_ERROR: Dict[str, str] = {}
 def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, float],
                           context: dict, manual_initial: Optional[Dict[str, float]] = None,
                           inferred_units: Optional[Dict[str, str]] = None,
-                          chain=None) -> Tuple[bool, float]:
+                          chain=None, block_anchors=None) -> Tuple[bool, float]:
     """
     Wie _solve_single_unknown_search; findet die Suche keine Wurzel, wird die Fehlermeldung
     des ungültigen Testpunkts gemerkt, der dem besten gültigen Punkt am nächsten liegt - dort
@@ -2362,7 +2370,7 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
     """
     _SEARCH_LOG['ok'], _SEARCH_LOG['err'] = [], []
     result = _solve_single_unknown_search(equation, unknown, known_values, context, manual_initial,
-                                          inferred_units, chain)
+                                          inferred_units, chain, block_anchors)
     if result[0]:
         _LAST_SEARCH_ERROR.pop(equation, None)
     elif _SEARCH_LOG['err']:
@@ -2380,7 +2388,7 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
 def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict[str, float],
                                  context: dict, manual_initial: Optional[Dict[str, float]] = None,
                                  inferred_units: Optional[Dict[str, str]] = None,
-                                 chain=None) -> Tuple[bool, float]:
+                                 chain=None, block_anchors=None) -> Tuple[bool, float]:
     """
     Löst eine Gleichung mit einer einzelnen Unbekannten.
 
@@ -2398,6 +2406,8 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
         chain: Optional (Tearing): Funktion x -> Dict aller Werte (bekannte Werte,
                unknown=x und daraus direkt berechnete Blockvariablen). Die
                Gleichung wird dann mit diesen Werten ausgewertet.
+        block_anchors: Optional (Tearing): ([Blockgrößen in Blattreihenfolge], {Größe: Startwert}) -
+               bei mehreren Wurzeln zählt der Abstand aller Blockgrößen (relativ zum Startwert)
 
     Returns:
         (success, value)
@@ -2483,13 +2493,34 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
     initial_guess = _get_initial_value(unknown, manual_initial, known_values,
                                        inferred_units, use_structure=False)
 
+    def root_distance(root):
+        """
+        (Abstand zum Startpunkt, Vergleichsvektor) einer Wurzel. Beim Tearing über alle
+        Blockgrößen, je relativ zu ihrem Startwert (Größen verschiedener Dimension); der Vektor
+        (Blattreihenfolge) entscheidet bei gleichem Abstand: größere Werte zuerst.
+        """
+        if block_anchors is None or chain is None:
+            return abs(root - initial_guess), (root,)
+        names, anchors = block_anchors
+        values = chain(root)
+        vector = tuple(float(values[v]) for v in names)
+        squares = (((x - anchors[v]) / (abs(anchors[v]) or 1.0)) ** 2 for v, x in zip(names, vector))
+        return float(np.sqrt(sum(squares))), vector
+
     def nearer_root_possible(root):
         """
         Newton kann über eine nähere Wurzel springen (x^3 - 3.3*x + 1 = 0 ab 1 -> -1.95 statt
         1.64). Gibt es im Intervall Startwert ± |Wurzel - Startwert| einen weiteren
         Vorzeichenwechsel, entscheidet die Bracket-Suche (dem Startwert nächstgelegene Wurzel).
+        Beim Tearing liegt jede Wurzel mit kleinerem Abstand aller Blockgrößen im Intervall
+        Startwert ± Abstand * Bezugswert der Tearing-Größe.
         """
-        distance = abs(root - initial_guess)
+        try:
+            distance = root_distance(root)[0]
+        except Exception:
+            return True
+        if block_anchors is not None and chain is not None:
+            distance *= abs(initial_guess) or 1.0
         if distance == 0 or not np.isfinite(distance):
             return False
         points = np.linspace(initial_guess - distance, initial_guess + distance, 65)
@@ -2710,13 +2741,21 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
         # (z.B. sin(alpha)=0.5 mit F=100 -> sonst 150 statt 30).
         # Tie-Break: bevorzuge die positive/größere Wurzel - bei physikalischen
         # Größen wie T, p, m_dot ist das fast immer die gewünschte.
-        anchor = _get_initial_value(unknown, manual_initial, known_values,
-                                    inferred_units, use_structure=False)
-        # gleich weit entfernt bis auf Rundung (x^2 - 2*x = 5 ab 1: 1 ± sqrt(6)) -> positive Wurzel
-        distances = [(abs(root - anchor), root) for _, root in candidates]
-        nearest = min(d for d, _ in distances)
-        tie = 1e-9 * max(nearest, abs(anchor))
-        return True, max(root for d, root in distances if d <= nearest + tie)
+        # Beim Tearing zählt der Abstand aller Blockgrößen (root_distance)
+        ranked = []
+        for _, root in candidates:
+            try:
+                distance, vector = root_distance(root)
+            except Exception:
+                continue
+            if np.isfinite(distance):
+                ranked.append((distance, vector, root))
+        if ranked:
+            # gleich weit entfernt bis auf Rundung (x^2 - 2*x = 5 ab 1: 1 ± sqrt(6)) -> positive Wurzel
+            nearest = min(d for d, _, _ in ranked)
+            reference = 1.0 if block_anchors is not None and chain is not None else abs(initial_guess)
+            tie = 1e-9 * max(nearest, reference)
+            return True, max((vector, root) for d, vector, root in ranked if d <= nearest + tie)[1]
 
     # Beste gefundene Näherung zurückgeben wenn akzeptabel (relativ zur Termgröße)
     if fallback_root is not None and fallback_residual < 1e-6:

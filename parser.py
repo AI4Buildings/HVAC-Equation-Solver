@@ -663,6 +663,19 @@ def _get_const_eval_context() -> dict:
     }
 
 
+_INVERSE_TRIG_CALL = re.compile(r'\b(?:asin|acos|atan)\s*\(')
+_TRIG_CALL = re.compile(r'\b(?:sin|cos|tan)\s*\(')
+
+
+def _angle_dependent(expr: str) -> bool:
+    """
+    Hängt der Wert eines Ausdrucks ohne Variablen davon ab, ob ein Winkel eine Zahl in Grad oder
+    eine Winkelgröße ist (asin(0.5); sin(quantity(30, deg)))? Dann ist die Zeile eine Gleichung,
+    die _angle_function_forms wie jede andere behandelt - keine beim Einlesen ausgewertete Konstante.
+    """
+    return bool(_INVERSE_TRIG_CALL.search(expr) or (_TRIG_CALL.search(expr) and 'quantity' in expr))
+
+
 def _eval_constant_expression(expr: str) -> Optional[float]:
     """
     Wertet einen rein numerischen Ausdruck aus (ohne Variablen).
@@ -1057,9 +1070,54 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
     """
     position = [0]
     try:
-        return _parse_equations(text, parse_units, position)
+        result = _parse_equations(text, parse_units, position)
     except (EquationSyntaxError, UnknownUnitError) as exc:
         raise type(exc)(f"Zeile {position[0]}: {exc}") from None
+    return _angle_function_forms(text, *result)
+
+
+def declared_angle_exponents(text: str, initial_values: dict, sweep_vars: dict,
+                             unit_values: dict) -> Dict[str, int]:
+    """
+    Winkel-Exponent der vorgegebenen Größen aus ihrer Einheit (deg, rad -> 1, rad/s -> 1, m -> 0):
+    Konstanten, Parameterstudien/Wertelisten, Grenzen von VARY und Startwerte mit Einheit.
+    Ohne Einheit vorgegeben: 0 (Zahl - in sin/cos/tan Grad).
+    """
+    if not UNITS_AVAILABLE:
+        return {}
+    from units import angle_exponent
+    declared = {name: 0 for name in list(initial_values) + list(sweep_vars)}
+    sources = dict(unit_values)
+    try:
+        for goal in parse_optimization(text):
+            for name in goal.names:
+                declared.setdefault(name, 0)
+            sources.update(goal.unit_values)
+        for name, unit_value in start_value_units(text).items():
+            sources.setdefault(name, unit_value)
+    except Exception:
+        pass                    # Fehler meldet das Einlesen der Anweisung bzw. der Startwerte
+    for name, unit_value in sources.items():
+        declared[name] = angle_exponent(getattr(unit_value, 'original_unit', '') or '')
+    return declared
+
+
+def _angle_function_forms(text, equations, variables, initial_values, sweep_vars,
+                          original_equations, unit_values):
+    """
+    Winkel sind intern SI (rad); sin/cos/tan rechnen mit Zahlen in Grad (sin(30) = 0.5). Einer
+    Winkelgröße (Einheit mit Winkel, auch berechnet: phi = omega*t) übergibt die Gleichung den
+    Zahlenwert in Grad: sin(phi) -> sin(value(phi, 'deg')); asin/acos/atan liefern für eine
+    Winkelgröße quantity(asin(z), 'deg') (unit_constraints.angle_function_forms).
+    """
+    declared = declared_angle_exponents(text, initial_values, sweep_vars, unit_values)
+    if any(declared.values()) or any('value(' in eq or 'quantity(' in eq for eq in equations):
+        from unit_constraints import angle_function_forms
+        forms = angle_function_forms(equations, declared)
+        if forms:
+            equations = [forms.get(eq, eq) for eq in equations]
+            original_equations = {forms.get(eq, eq): line for eq, line in original_equations.items()}
+    return equations, variables, initial_values, sweep_vars, original_equations, unit_values
 
 
 def _check_ascii_names(line: str) -> None:
@@ -1186,7 +1244,8 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
         # Gleicher Eval-Kontext wie Pass 2, damit beide Pässe konsistent erkennen
         right_tokenized = tokenize_equation(right)
         vars_in_right = extract_variables(right_tokenized)
-        if not vars_in_right and _eval_constant_expression(right_tokenized) is not None:
+        if (not vars_in_right and not _angle_dependent(right_tokenized)
+                and _eval_constant_expression(right_tokenized) is not None):
             pre_constants.add(var_name)
 
     def _repeated_assignment(var_name: str, value: float) -> bool:
@@ -1322,7 +1381,10 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
         # WICHTIG: Links muss ein REINER Variablenname stehen (wie in Pass 1).
         # "x + 5 = 2", "sin(alpha) = 0.5" oder "x^2 = 9" sind GLEICHUNGEN,
         # keine Zuweisungen - sonst würde z.B. alpha = 0.5 statt 30 gesetzt!
-        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', left) and len(vars_right) == 0:
+        # asin/acos/atan: Ergebnis Zahl in Grad oder Winkelgröße je nach Verwendung (siehe
+        # _angle_dependent) - daher eine Gleichung wie mit einer Variablen als Argument
+        if (re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', left) and len(vars_right) == 0
+                and not _angle_dependent(right)):
             var_name = left
 
             # Versuche als einfache Zahl

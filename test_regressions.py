@@ -49,11 +49,14 @@ for text in ("x + 5 = 2", "sin(alpha) = 0.5", "2*pi*r = 10", "x^2 = 9",
     check(f"'{text}' ist Gleichung", len(eqs) == 1 and not consts)
 
 # Echte Direktzuweisungen bleiben Konstanten
-for text, expected in (("T1 = 300", 300.0), ("m = 10000/3600", 10000 / 3600),
-                       ("alpha = asin(0.5)", 30.0)):
+for text, expected in (("T1 = 300", 300.0), ("m = 10000/3600", 10000 / 3600)):
     eqs, _, consts, _, _, _ = parse_equations(text)
     val = list(consts.values())[0] if consts else None
     check(f"'{text}' ist Konstante", not eqs and val is not None and abs(val - expected) < 1e-9)
+# asin/acos/atan: Zahl in Grad oder Winkelgröße je nach Verwendung -> Gleichung (wie asin(x))
+eqs, variables, consts, _, orig, _ = parse_equations("alpha = asin(0.5)")
+check("'alpha = asin(0.5)' ist Gleichung (Ergebnis 30)", len(eqs) == 1 and not consts
+      and abs(solve_system(eqs, variables, constants=consts, original_equations=orig)[1]['alpha'] - 30) < 1e-9)
 
 # Ausdruck + Einheit (CLAUDE.md-Beispiel)
 eqs, _, consts, _, _, uv = parse_equations("m_dot_1 = 10000/3600 kg/s")
@@ -997,28 +1000,48 @@ check("Block ersetzen (Rest unverändert)",
       apply_edit("a = 1\n{$Startwerte\nx = 1\n$}\nb = 2", ["x = 5"]) == "a = 1\n{$Startwerte\nx = 5\n$}\nb = 2")
 check("Block entfernen", apply_edit("x^2 = 9\n\n{$Startwerte\nx = -3\n$}\n", []) == "x^2 = 9\n")
 
-# Winkel mit Einheit: intern Grad wie die Winkelfunktionen (früher Radiant -> sin(30 deg) = 0.009)
+# Winkel: intern SI (rad) wie alles; sin/cos/tan lesen eine Winkelgröße in ihrer Einheit, eine
+# Zahl ohne Einheit in Grad (früher: Winkel intern Grad -> sin(omega*t) mit rad/s, s = alpha*r falsch)
 from units import UnitValue
 for text, name, expected in (("a = 30 deg\ny = sin(a)", 'y', 0.5),
                              ("a = 0.5235987756 rad\ny = sin(a)", 'y', 0.5),
                              ("a = 0.25 turn\ny = cos(a)", 'y', 0.0),
-                             ("a = 60\ny = cos(a)", 'y', 0.5)):
+                             ("a = 60\ny = cos(a)", 'y', 0.5),
+                             ("a = 30 deg\nr = 2 m\ns = a*r", 's', np.pi / 3),
+                             ("omega = 10 rad/s\nt = 2 s\ny = sin(omega*t)", 'y', np.sin(20)),
+                             ("omega = 10 rad/s\nt = 2 s\nphi = omega*t\ny = sin(phi)", 'y', np.sin(20)),
+                             ("w = 15 deg/h\nt = 2 h\nH = w*t\nc = cos(H)", 'c', np.cos(np.pi / 6)),
+                             ("omega = 10 rad/s\nr = 0.5 m\nu = omega*r", 'u', 5.0),
+                             ("a = 30 deg\ng = asin(0.5)\nk = g + a", 'k', np.pi / 3),
+                             ("a = 30 deg\nsin(b) = 0.5\nc = b + a", 'c', np.pi / 3),
+                             ("g = asin(0.5)\nk = 2*g", 'k', 60.0),
+                             ("x = 0.5\ng = acos(x)\nc = cos(g)", 'c', 0.5),
+                             ("a = 30 deg\ny = sin(value(a, deg))", 'y', 0.5),
+                             ("y = sin(quantity(30, deg))", 'y', 0.5)):
     eqs, variables, consts, _, orig, _ = parse_equations(text)
     sol = solve_system(eqs, variables, constants=consts, original_equations=orig)[1]
-    check(f"Winkel mit Einheit: {text.splitlines()[0]} -> {name} = {expected}",
+    check(f"Winkel: {text.splitlines()[-1]} -> {name} = {expected:.6g}",
           abs(sol.get(name, np.nan) - expected) < 1e-9, str(sol))
 _, _, _, sweeps, _, _ = parse_equations("b = 0:30:90 deg")
-check("Winkel-Sweep in deg intern Grad", np.allclose(sweeps['b'], [0, 30, 60, 90]), str(sweeps['b']))
-check("Winkel-Anzeige: interner Wert Grad -> deg/rad",
-      UnitValue.from_si_base(30.0, 'deg').original_value == 30.0
-      and abs(UnitValue.from_si_base(30.0, 'rad').original_value - np.pi / 6) < 1e-12)
+check("Winkel-Sweep in deg intern rad", np.allclose(sweeps['b'], np.radians([0, 30, 60, 90])), str(sweeps['b']))
+check("Winkel-Anzeige: interner Wert rad -> deg/rad",
+      abs(UnitValue.from_si_base(np.pi / 6, 'deg').original_value - 30) < 1e-12
+      and UnitValue.from_si_base(np.pi / 6, 'rad').original_value == np.pi / 6)
+eqs, variables, consts, sweeps, orig, _ = parse_equations("b = 0:30:90 deg\ny = cos(b)")
+ok, results, _ = solve_parametric(eqs, variables, sweeps, constants=consts, original_equations=orig)[:3]
+check("Winkel-Sweep: cos(b) mit b in deg", ok and np.allclose(results['y'], [1, np.sqrt(3) / 2, 0.5, 0]),
+      str(results.get('y')))
+eqs, variables, consts, _, orig, _ = parse_equations("g = asin(0.5)\n{$Startwerte\ng = 10 deg\n$}")
+check("Startwert mit Winkeleinheit: asin liefert die Winkelgröße",
+      abs(solve_system(eqs, variables, constants=consts, original_equations=orig)[1]['g'] - np.pi / 6) < 1e-9)
 
 # Zahlenwertgleichungen: value(x, Einheit), quantity(z, Einheit) - generisch über pint
 from units import unit_number, unit_quantity
 check("value/quantity: °C, °F, bar, %, Winkel",
       abs(unit_number(293.15, '°C') - 20) < 1e-12 and abs(unit_quantity(68, '°F') - 293.15) < 1e-5
       and unit_number(3e5, 'bar') == 3 and abs(unit_number(0.5, '%') - 50) < 1e-12
-      and abs(unit_number(180, 'rad') - np.pi) < 1e-12)
+      and abs(unit_number(np.pi, 'deg') - 180) < 1e-12 and unit_number(np.pi, 'rad') == np.pi
+      and abs(unit_quantity(90, 'deg') - np.pi / 2) < 1e-12)
 for text, name, expected in (
         ("T_a = -5 °C\nT_VL = quantity(20 + 1.5*(20 - value(T_a, °C)), °C)", 'T_VL', 330.65),
         ("v = 2 m/s\nh = quantity(5.7 + 3.8*value(v, m/s), W/(m^2*K))", 'h', 13.3),
@@ -1298,6 +1321,18 @@ s, sol, _ = solve_system(["(x**3 - 3.3*x + 1) - (0)"], {'x'}, initial_values={'x
 check("Newton: nächstgelegene Wurzel (1.640, nicht -1.953)", abs(sol['x'] - 1.64022) < 1e-4, str(sol))
 s, sol, _ = solve_system(["(x**2 - 2*x) - (5)"], {'x'}, initial_values={'x': 1.0})
 check("Gleich weit entfernte Wurzeln: positive (1 + sqrt(6))", abs(sol['x'] - (1 + 6 ** 0.5)) < 1e-6, str(sol))
+# Block mit mehreren Lösungen: Wahl nach dem Abstand ALLER Blockgrößen zu ihren Startwerten - nicht
+# nach der Tearing-Größe (früher u = v^2 mit v = u - 6 -> (4; -2), mit u = v + 6 -> (9; 3))
+results = set()
+for text in ("u = v^2\nv = u - 6", "u = v^2\nu = v + 6", "v^2 = u\nu - v = 6", "u - v = 6\nu = v^2"):
+    eqs, variables, consts, _, orig, _ = parse_equations(text)
+    ok, sol, _ = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    results.add((round(sol['u'], 9), round(sol['v'], 9)))
+check("Block: Lösung unabhängig von der Schreibweise (4; -2)", results == {(4.0, -2.0)}, str(results))
+eqs, variables, consts, _, orig, _ = parse_equations("u = v^2\nv = u - 6")
+ok, sol, _ = solve_system(eqs, variables, constants=consts, original_equations=orig, initial_values={'u': 10.0})
+check("Block: Startwert wählt die Lösung (u = 10 -> (9; 3))", abs(sol['u'] - 9) < 1e-9 and abs(sol['v'] - 3) < 1e-9,
+      str(sol))
 # Widerspruchsprüfung: Rauschgrenze nur aus gleichartigen Größen (nicht aus 1e5 Pa)
 eqs, variables, consts, _, orig, _ = parse_equations(
     "p = 1 bar\nV_dot = 1.05e-7 m^3/s\nk = 1e-12 m^3/(s*Pa)\nV_dot = k*p")
