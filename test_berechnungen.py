@@ -744,5 +744,187 @@ check("F6 Freie Konvektion (Filmtemperatur-Iteration) MIT Einheiten", natk.forma
 check("F6 Freie Konvektion (Filmtemperatur-Iteration) OHNE Einheiten", natk.format(Ti="293.15", H="0.5", q="100", p="100000"), ref)
 
 
+# ---------------------------------------------------------------------------
+# G1  Heizwert und Brennwert von Methan aus Bildungsenthalpien (IG:, NASA thermo.inp)
+#     Referenz: H_u = 50.03 MJ/kg, H_o = 55.51 MJ/kg (Literatur, ±0.05 MJ/kg)
+# ---------------------------------------------------------------------------
+heizwert = """
+T_0 = {T0}
+M_CH4 = molarmass(IG:CH4)
+h_CH4 = enthalpy(IG:CH4, T=T_0)*M_CH4
+h_O2 = enthalpy(IG:O2, T=T_0)*molarmass(IG:O2)
+h_CO2 = enthalpy(IG:CO2, T=T_0)*molarmass(IG:CO2)
+h_H2O = enthalpy(IG:H2O, T=T_0)*molarmass(IG:H2O)
+h_H2O_l = enthalpy(IG:H2O(L), T=T_0)*molarmass(IG:H2O(L))
+H_u = -(h_CO2 + 2*h_H2O - h_CH4 - 2*h_O2)/M_CH4
+H_o = -(h_CO2 + 2*h_H2O_l - h_CH4 - 2*h_O2)/M_CH4
+"""
+ref = {'H_u': 50.03e6, 'H_o': 55.51e6}
+check("G1 Heizwert/Brennwert CH4 MIT Einheiten", heizwert.format(T0="25 °C"), ref, rtol=0, atol=0.05e6)
+check("G1 Heizwert/Brennwert CH4 OHNE Einheiten", heizwert.format(T0="298.15"), ref, rtol=0, atol=0.05e6)
+
+# ---------------------------------------------------------------------------
+# G2  Brennstoffzelle H2 + 1/2 O2 -> H2O: reversible Zellspannung E_0 = -ΔG/(2F)
+#     Referenz (Literatur, ±1 mV): 1.2289 V (flüssig, 25 °C), 1.1845 V (Gas, 25 °C),
+#     0.9769 V (Gas, 800 °C)
+# ---------------------------------------------------------------------------
+zelle = """
+T = {T}
+p = {p}
+F = 96485.33212{F}
+g_H2O = gibbs(IG:{prod}, T=T, p=p)*molarmass(IG:{prod})
+g_H2 = gibbs(IG:H2, T=T, p=p)*molarmass(IG:H2)
+g_O2 = gibbs(IG:O2, T=T, p=p)*molarmass(IG:O2)
+Delta_G = g_H2O - g_H2 - 0.5*g_O2
+E_0 = -Delta_G/(2*F)
+"""
+for prod, T_u, T_si, E_ref in (("H2O(L)", "25 °C", "298.15", 1.2289), ("H2O", "25 °C", "298.15", 1.1845),
+                               ("H2O", "800 °C", "1073.15", 0.9769)):
+    check(f"G2 Brennstoffzelle E_0 ({prod}, {T_u}) MIT Einheiten",
+          zelle.format(T=T_u, p="1 bar", F=" C/mol", prod=prod), {'E_0': E_ref}, rtol=0, atol=1e-3)
+    check(f"G2 Brennstoffzelle E_0 ({prod}, {T_u}) OHNE Einheiten",
+          zelle.format(T=T_si, p="100000", F="", prod=prod), {'E_0': E_ref}, rtol=0, atol=1e-3)
+check("G2 Brennstoffzelle E_0(T) als Werteliste MIT Einheiten",
+      zelle.format(T="[25 800] °C", p="1 bar", F=" C/mol", prod="H2O"), {'E_0': [1.1845, 0.9769]}, rtol=0, atol=1e-3)
+
+# ---------------------------------------------------------------------------
+# G3  Isotherme Verdichtung von N2 (ideales Gas): Δs = -R·ln(p_2/p_1), R = R_m/M
+# ---------------------------------------------------------------------------
+R_N2 = 8.314462618 / 0.0280134
+ref = {'Delta_s': -R_N2 * math.log(10), 'v_2': R_N2 * 300 / 10e5}
+iso = """
+T = {T}
+p_1 = {p1}
+p_2 = {p2}
+Delta_s = entropy(IG:N2, T=T, p=p_2) - entropy(IG:N2, T=T, p=p_1)
+v_2 = volume(IG:N2, T=T, p=p_2)
+"""
+check("G3 Isotherme Verdichtung N2 MIT Einheiten", iso.format(T="300 K", p1="1 bar", p2="10 bar"), ref, rtol=1e-12)
+check("G3 Isotherme Verdichtung N2 OHNE Einheiten", iso.format(T="300", p1="100000", p2="1000000"), ref, rtol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# H  Chemisches Gleichgewicht mit EQUILIBRIUM (Gibbs-Minimierung). Referenzen unabhängig vom
+#    Verfahren: Gleichgewichtskonstanten aus g° (NASA-Daten, ideal_gas) mit fsolve bzw. geschlossen
+# ---------------------------------------------------------------------------
+import ideal_gas as _ig
+from scipy.optimize import fsolve as _fsolve
+
+
+def _g_rt(name, T):
+    return _ig.standard_gibbs_RT(_ig.find_species(name), T)
+
+
+def _h_molar(name, T):
+    return float(_ig.molar_enthalpy(_ig.find_species(name), T))
+
+
+def _cpox(n_ch4, lam, T=None, H_in=None):
+    """CH4 + Luft (O2 21 %), Gleichgewicht SR + Shift; mit H_in zusätzlich adiabat (T unbekannt)."""
+    n_o2, n_n2 = 2 * lam * n_ch4, 2 * lam * n_ch4 * 0.79 / 0.21
+
+    def comp(ch4, co, co2):
+        h2o = 2 * n_o2 - co - 2 * co2
+        h2 = (4 * n_ch4 - 4 * ch4 - 2 * h2o) / 2
+        return {'CH4': ch4, 'CO': co, 'CO2': co2, 'H2O': h2o, 'H2': h2, 'N2': n_n2}
+
+    def residuals(v):
+        ch4, co, co2 = v[0] * n_ch4, v[1] * n_ch4, v[2] * n_ch4
+        temp = T if H_in is None else v[3] * 1000
+        n = comp(ch4, co, co2)
+        tot = sum(n.values())
+        K_sr = math.exp(-(_g_rt('CO', temp) + 3 * _g_rt('H2', temp) - _g_rt('CH4', temp) - _g_rt('H2O', temp)))
+        K_wgs = math.exp(-(_g_rt('CO2', temp) + _g_rt('H2', temp) - _g_rt('CO', temp) - _g_rt('H2O', temp)))
+        r = [(ch4 + co + co2) / n_ch4 - 1, n['CO'] * n['H2'] ** 3 / (n['CH4'] * n['H2O'] * tot ** 2) / K_sr - 1,
+             n['CO2'] * n['H2'] / (n['CO'] * n['H2O']) / K_wgs - 1]
+        if H_in is not None:
+            r.append(sum(v_ * _h_molar(s_, temp) for s_, v_ in n.items()) / H_in - 1)
+        return r
+    start = [0.01, 0.85, 0.13] + ([1.05] if H_in is not None else [])
+    v = _fsolve(residuals, start, xtol=1e-14)
+    n = comp(v[0] * n_ch4, v[1] * n_ch4, v[2] * n_ch4)
+    return n, (T if H_in is None else v[3] * 1000)
+
+
+gg = """
+n_CH4_1 = {n}
+lambda = {lam}
+n_O2_1 = 2*lambda*n_CH4_1
+n_N2_1 = n_O2_1*0.79/0.21
+p = {p}
+T_1 = {T1}
+EQUILIBRIUM T=T_2, p=p
+  IN  IG:CH4 = n_CH4_1, IG:O2 = n_O2_1, IG:N2 = n_N2_1
+  OUT IG:CH4 = n_CH4, IG:H2O = n_H2O, IG:CO = n_CO, IG:CO2 = n_CO2, IG:H2 = n_H2, IG:N2 = n_N2
+{energy}
+"""
+_n0, _lam = 1.0, 0.33
+_ref, _ = _cpox(_n0, _lam, T=1018.15)
+check("H1 Gleichgewicht CH4/Luft 745 °C (EQUILIBRIUM) MIT Einheiten",
+      gg.format(n="1 mol", lam=_lam, p="1 bar", T1="20 °C", energy="T_2 = 745 °C"),
+      {'n_CH4': _ref['CH4'], 'n_CO': _ref['CO'], 'n_CO2': _ref['CO2'], 'n_H2': _ref['H2']}, rtol=1e-7)
+check("H1 Gleichgewicht CH4/Luft 745 °C (EQUILIBRIUM) OHNE Einheiten",
+      gg.format(n="1", lam=_lam, p="100000", T1="293.15", energy="T_2 = 1018.15"),
+      {'n_CH4': _ref['CH4'], 'n_CO': _ref['CO'], 'n_CO2': _ref['CO2'], 'n_H2': _ref['H2']}, rtol=1e-7)
+
+# Adiabater CPOX-Reformer (Austrittstemperatur unbekannt), ohne Startwerte
+_n0, _lam = 0.003717, 0.34
+_H_in = (_n0 * _h_molar('CH4', 293.15) + 2 * _lam * _n0 * _h_molar('O2', 293.15)
+         + 2 * _lam * _n0 * 0.79 / 0.21 * _h_molar('N2', 293.15))
+_ref, _T2 = _cpox(_n0, _lam, H_in=_H_in)
+_energy = """H_1 = n_CH4_1*enthalpy(IG:CH4, T=T_1)*molarmass(IG:CH4) + n_O2_1*enthalpy(IG:O2, T=T_1)*molarmass(IG:O2) + n_N2_1*enthalpy(IG:N2, T=T_1)*molarmass(IG:N2)
+H_1 = (n_CH4*enthalpy(IG:CH4, T=T_2)*molarmass(IG:CH4) + n_H2O*enthalpy(IG:H2O, T=T_2)*molarmass(IG:H2O)
+  + n_CO*enthalpy(IG:CO, T=T_2)*molarmass(IG:CO) + n_CO2*enthalpy(IG:CO2, T=T_2)*molarmass(IG:CO2)
+  + n_H2*enthalpy(IG:H2, T=T_2)*molarmass(IG:H2) + n_N2*enthalpy(IG:N2, T=T_2)*molarmass(IG:N2))"""
+check("H2 Adiabater CPOX-Reformer (EQUILIBRIUM + Energiebilanz) MIT Einheiten",
+      gg.format(n="0.003717 mol/s", lam=_lam, p="1 bar", T1="20 °C", energy=_energy),
+      {'T_2': _T2, 'n_H2': _ref['H2'], 'n_CO': _ref['CO']}, rtol=1e-7)
+check("H2 Adiabater CPOX-Reformer (EQUILIBRIUM + Energiebilanz) OHNE Einheiten",
+      gg.format(n="0.003717", lam=_lam, p="100000", T1="293.15", energy=_energy),
+      {'T_2': _T2, 'n_H2': _ref['H2'], 'n_CO': _ref['CO']}, rtol=1e-7)
+
+# Rußbildung: Methanspaltung CH4 = C(gr) + 2 H2 bei 1000 K, 1 bar - x_H2^2/(1 - x_H2) = K
+_K = math.exp(-(_g_rt('C(gr)', 1000.0) + 2 * _g_rt('H2', 1000.0) - _g_rt('CH4', 1000.0)))
+_x = (-_K + math.sqrt(_K ** 2 + 4 * _K)) / 2
+_n_c = 1 - 2 * (1 - _x) / (2 - _x)     # C: n_CH4 + n_C = 1, H: n_H2 = 2(1 - n_CH4) -> n_CH4 = 2(1-x)/(2-x)
+russ = """
+n_1 = {n}
+T = {T}
+p = {p}
+EQUILIBRIUM T=T, p=p
+  IN  IG:CH4 = n_1
+  OUT IG:CH4 = n_CH4, IG:H2 = n_H2, IG:C(gr) = n_C
+x_H2 = n_H2/(n_H2 + n_CH4)
+"""
+check("H3 Rußbildung Methanspaltung 1000 K MIT Einheiten", russ.format(n="1 mol", T="726.85 °C", p="1 bar"),
+      {'x_H2': _x, 'n_C': _n_c}, rtol=1e-9)
+check("H3 Rußbildung Methanspaltung 1000 K OHNE Einheiten", russ.format(n="1", T="1000", p="100000"),
+      {'x_H2': _x, 'n_C': _n_c}, rtol=1e-9)
+
+# Kondensat am Kathodenaustritt einer PEM-Zelle: H2O(L) im Gleichgewicht, p_H2O = Sättigungsdruck der
+# Daten (g°_L = g°_G + R T ln(p_s/p°)), Kondensatmenge aus der Bilanz
+_T = 333.15
+_ps = 1e5 * math.exp(_g_rt('H2O(L)', _T) - _g_rt('H2O', _T))
+_n_dry = 0.012
+_n_vap = _ps / (1e5 - _ps) * _n_dry
+pem = """
+n_N2 = {n_N2}
+n_O2 = {n_O2}
+n_W = {n_W}
+T = {T}
+p = {p}
+EQUILIBRIUM T=T, p=p
+  IN  IG:N2 = n_N2, IG:O2 = n_O2, IG:H2O = n_W
+  OUT IG:N2 = n_N2_a, IG:O2 = n_O2_a, IG:H2O = n_D, IG:H2O(L) = n_L
+p_D = n_D/(n_N2_a + n_O2_a + n_D)*p
+"""
+check("H4 PEM Kathodenaustritt mit Kondensat MIT Einheiten",
+      pem.format(n_N2="0.01 mol/s", n_O2="0.002 mol/s", n_W="0.004 mol/s", T="60 °C", p="1 bar"),
+      {'p_D': _ps, 'n_L': 0.004 - _n_vap}, rtol=1e-9)
+check("H4 PEM Kathodenaustritt mit Kondensat OHNE Einheiten",
+      pem.format(n_N2="0.01", n_O2="0.002", n_W="0.004", T="333.15", p="100000"),
+      {'p_D': _ps, 'n_L': 0.004 - _n_vap}, rtol=1e-9)
+
+
 if __name__ == '__main__':
     summary()

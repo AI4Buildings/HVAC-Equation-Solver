@@ -136,6 +136,18 @@ _LABEL_ENTRIES = [
     ('K^4', 'K^4'),
     ('m^2*K', 'm^2*K'),
     ('K*s', 'K*s'),
+    # molare Größen (Verbrennung, Brennstoffzelle; IG:-Stoffe) und Elektrochemie
+    ('J/mol', 'kJ/mol'),
+    ('J/(mol*K)', 'J/(mol*K)'),
+    ('kg/mol', 'kg/kmol'),
+    ('mol', 'mol'),
+    ('mol/s', 'mol/s'),
+    ('V', 'V'),
+    ('A', 'A'),
+    ('A/m^2', 'A/m^2'),
+    ('C/mol', 'C/mol'),
+    ('ohm', 'ohm'),
+    ('ohm*m^2', 'ohm*m^2'),          # flächenbezogener Widerstand (ASR)
 ]
 
 # Basis-Dimensionen -> (Symbol für generische Labels, pint-Basiseinheit)
@@ -287,6 +299,8 @@ _THERMO_OUT = {
     'conductivity': 'W/(m*K)',
     'soundspeed': 'm/s',
     'prandtl': '',
+    'gibbs': 'J/kg',
+    'molarmass': 'kg/kmol',      # Anzeige-Label; der Wert ist SI (kg/mol) wie überall
 }
 
 # HumidAir: Ausgabe-Label abhängig vom ersten Argument
@@ -888,6 +902,10 @@ def _eval_call(node, ctx: _Ctx) -> DimensionInfo:
             return _literal(None)
         return _same_dimension_result(dims, ctx)
 
+    if fname == 'equilibrium' and len(args) >= 6:
+        # EQUILIBRIUM (Gibbs-Minimierung): Austrittsmenge in der Einheit der Eintrittsmengen
+        return _same_dimension_result([_eval(a, ctx) for a in args[5:]], ctx)
+
     if fname in ('max', 'min'):
         dims = [_eval(a, ctx) for a in args]
         if not dims:
@@ -1102,8 +1120,10 @@ def _rev(node, target: DimensionInfo, known, rank: int, out):
         fname = _func_name(node)
         if fname in ('abs', 'ceil', 'floor', 'round') and node.args:
             _rev(node.args[0], target, known, rank, out)
-        elif fname in ('max', 'min') or (fname == 'IF' and len(node.args) == 5):
-            for a in (node.args[2:] if fname == 'IF' else node.args):
+        elif fname in ('max', 'min') or (fname == 'IF' and len(node.args) == 5) or (
+                fname == 'equilibrium' and len(node.args) >= 6):
+            branches = {'IF': node.args[2:], 'equilibrium': node.args[5:]}.get(fname, node.args)
+            for a in branches:
                 d, miss = _eval_collect(a, known)
                 if miss and not d.literal:
                     _rev(a, target, known, rank, out)
@@ -1221,6 +1241,9 @@ def _function_argument_candidates(side, known, out):
             if unit_dim.quantity is not None:
                 # value(x, 'bar'): x ist ein Druck; quantity(z, 'bar'): z ist eine Zahl
                 targets.append((node.args[0], unit_dim if name == 'value' else _dim(_dimless_q())))
+        elif fl == 'equilibrium' and len(node.args) >= 6:
+            targets.append((node.args[3], _dim(_q_for('K'), 1.0, 'K')))
+            targets.append((node.args[4], _dim(_q_for('Pa'), None, 'Pa')))
         elif fl in _RADIATION_ARGS:
             for arg, kind in zip(node.args, _RADIATION_ARGS[fl]):
                 if kind == 'T':
@@ -1550,6 +1573,20 @@ def _complete_inference(parsed_eqs, known: Dict[str, DimensionInfo],
                 return _ANY if f is _ANY else scale(f, Fraction(1, 2))
             if fname in ('abs', 'ceil', 'floor', 'round') and args:
                 return form(args[0])
+            if fname == 'equilibrium' and len(args) >= 6:
+                # T absolut in K, p in Pa; Austrittsmenge wie die Eintrittsmengen
+                equal(form(args[3]), const(_exponent_vector(_q_for('K'))))
+                equal(form(args[4]), const(_exponent_vector(_q_for('Pa'))))
+                result = _ANY
+                for a in args[5:]:
+                    f = form(a)
+                    if f is _ANY:
+                        continue
+                    if result is _ANY:
+                        result = f
+                    else:
+                        equal(result, f)
+                return result if result is not _ANY else new_variable()
             if fname in ('max', 'min', 'IF'):
                 branches = args[2:] if fname == 'IF' else args
                 if fname == 'IF' and len(args) == 5:
@@ -1750,6 +1787,8 @@ def _weight_candidates(parsed, known, free: Set[str], out, products: bool = Fals
                           if kw.arg and kw.arg.lower() in ('t', 't_dp', 't_wb')]
             elif fl in _RADIATION_ARGS and node.args:
                 values = [node.args[0]]
+            elif fl == 'equilibrium' and len(node.args) >= 6:
+                values = [node.args[3]]          # Gleichgewichtstemperatur: absolut
             elif fl == 'value':
                 unit_call = _unit_function_unit(node)
                 if unit_call is not None and unit_call[1].weight == 1.0:
@@ -2839,7 +2878,9 @@ def check_all_unit_consistency(solution: Dict[str, float],
     sources = _dimensionless_sources(equations, all_units, {v for v, u in known_units.items() if u == ''})
 
     for parsed_eq, original_eq in equations.items():
-        error = check_equation_dimensions(original_eq, all_units, sources)
+        # Anzeige ohne Gleichung (EQUILIBRIUM (Zeile n): ...): die interne Form prüfen
+        source = original_eq if _parse_equation(original_eq) is not None else parsed_eq
+        error = check_equation_dimensions(source, all_units, sources)
 
         if error:
             if error['type'] == 'missing_units':
@@ -2882,7 +2923,128 @@ def check_all_unit_consistency(solution: Dict[str, float],
                     conversion_factor=0
                 ))
 
-    return warnings
+    # Argument mit falscher Dimension (Masse als Stoffmenge, Druck als T=): diese Warnung nennt die
+    # Ursache - die Folgewarnung "Inkompatible Terme" derselben Gleichung entfällt
+    arguments = _argument_dimension_warnings(equations, all_units)
+    explained = {eq for w in arguments for eq in w.equations}
+    if explained:
+        warnings = [w for w in warnings if not (set(w.equations) & explained)]
+    return _merge_same_warnings(warnings + arguments)
+
+
+def _merge_same_warnings(warnings: list) -> list:
+    """Warnungen mit gleichem Text (dieselbe Summe in mehreren Gleichungen, z.B. je OUT-Stoff einer
+    EQUILIBRIUM-Anweisung) einmal, mit allen Gleichungen."""
+    merged, index = [], {}
+    for w in warnings:
+        key = (w.explanation, tuple(sorted(set(w.units.values()))))
+        if key in index:
+            first = index[key]
+            for eq in w.equations:
+                if eq not in first.equations:
+                    first.equations.append(eq)
+            continue
+        index[key] = w
+        merged.append(w)
+    return merged
+
+
+def pretty_label(unit: str) -> str:
+    """Einheit für Meldungen (degC -> °C, delta_K -> K, um -> µm, mole -> mol)."""
+    if not unit:
+        return '-'
+    text = unit
+    if ' ' in unit or unit.isalpha():
+        # pint-Langform (mole / second, kelvin) -> Kurzzeichen; eingegebene Labels bleiben wie sie sind
+        try:
+            from units import ureg
+            text = f"{ureg.Unit(unit):~}".replace(' / ', '/').replace(' * ', '*').replace(' ** ', '^')
+        except Exception:
+            pass
+    text = text.replace('delta_K', 'K').replace('Δ°C', 'K').replace('degC', '°C').replace('degF', '°F')
+    return re.sub(r'(?<![A-Za-z])um(?![A-Za-z])', 'µm', text.replace('mole', 'mol'))
+
+
+def _argument_dimension_warnings(equations: Dict[str, str], all_units: Dict[str, str]) -> list:
+    """
+    Funktionsargumente mit bekannter, aber unpassender Dimension: T = 1 bar in
+    enthalpy(water, T=T, p=p), eine Masse als Menge in EQUILIBRIUM (Stoffmenge mol bzw. mol/s
+    erwartet), p in K. Zahlen ohne Einheit zählen nicht (SI-Werte); Zahlen mit Einheit prüft
+    schon der Parser.
+    """
+    from solver import UnitWarning
+    found = []
+    seen = {}
+    for parsed_key, original in equations.items():
+        tree = _parse_equation(original) or _parse_equation(parsed_key)
+        if tree is None:
+            continue
+        for side in tree:
+            for node in ast.walk(side):
+                fname = _func_name(node)
+                if fname is None:
+                    continue
+                fl = fname.lower()
+                checks = []
+                if fl in _THERMO_FUNCS or fl == 'humidair':
+                    for kw in node.keywords:
+                        expected = function_argument_unit(fl, kw.arg) if kw.arg else None
+                        if expected is not None:
+                            checks.append((kw.value, expected, f"{kw.arg}="))
+                elif fl == 'equilibrium' and len(node.args) >= 6:
+                    checks += [(node.args[3], 'K', 'T='), (node.args[4], 'Pa', 'p=')]
+                    checks += [(a, 'amount', 'Menge') for a in node.args[5:]]
+                    # alle Mengen in derselben Einheit (mol neben mol/s ergäbe eine sinnlose Summe)
+                    kinds = {}
+                    for a in node.args[5:]:
+                        expr = ast.unparse(a)
+                        dim, missing = compute_expression_dimension(expr, all_units)
+                        if dim is not None and not missing and not isinstance(dim, str) \
+                                and dict(dim).get('[substance]') == 1:
+                            kinds.setdefault(dim, expr)
+                    key = (fl, 'Mengen', tuple(sorted(str(d) for d in kinds)))
+                    if len(kinds) > 1 and key not in seen:
+                        labels = ', '.join(f"{e} in {pretty_label(all_units.get(e) or _generic_label(d))}"
+                                           for d, e in kinds.items())
+                        text = (f"equilibrium(): Mengen in verschiedenen Einheiten ({labels}) - alle Mengen "
+                                f"unter IN in derselben Einheit angeben (mol oder mol/s)")
+                        seen[key] = UnitWarning(variable=next(iter(kinds.values())), equations=[original],
+                                                units={original: text}, explanation=text, conversion_factor=0)
+                        found.append(seen[key])
+                    elif key in seen and original not in seen[key].equations:
+                        seen[key].equations.append(original)
+                elif fl in _RADIATION_ARGS:
+                    for arg, kind in zip(node.args, _RADIATION_ARGS[fl]):
+                        checks.append((arg, 'K' if kind == 'T' else 'm', 'T' if kind == 'T' else 'Wellenlänge'))
+                for arg, expected, label in checks:
+                    if isinstance(arg, ast.Constant) or (_func_name(arg) or '') in ('quantity', 'value'):
+                        continue
+                    expr = ast.unparse(arg)
+                    dim, missing = compute_expression_dimension(expr, all_units)
+                    if dim is None or missing or isinstance(dim, str):
+                        continue
+                    dims = dict(dim)
+                    if expected == 'amount':
+                        ok = dims.get('[substance]') == 1
+                        wanted = "eine Stoffmenge (mol bzw. mol/s; aus einer Masse m/molarmass(IG:...))"
+                    else:
+                        reference = _q_for(expected)
+                        ok = reference is not None and dim == reference.dimensionality
+                        wanted = f"die Dimension von {pretty_label(expected) if expected else 'einer Zahl (-)'}"
+                    if ok:
+                        continue
+                    unit = all_units.get(expr) or _generic_label(dim)
+                    key = (fl, expr, label)          # einmal je Größe und Argument (nicht je OUT-Stoff)
+                    if key in seen:
+                        if original not in seen[key].equations:
+                            seen[key].equations.append(original)
+                        continue
+                    text = (f"{fname}(): {label} {expr} hat die Einheit {pretty_label(unit)}, erwartet ist "
+                            f"{wanted}")
+                    seen[key] = UnitWarning(variable=expr, equations=[original], units={original: text},
+                                            explanation=text, conversion_factor=0)
+                    found.append(seen[key])
+    return found
 
 
 # ============================================================================

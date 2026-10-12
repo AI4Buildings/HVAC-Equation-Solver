@@ -521,6 +521,27 @@ check("Beispiel: NH3 mit REFERENCE R717 IIR (h' 0 °C = 200 kJ/kg) und Carnot im
       abs(shown("h_r1")[0] - 1450.274) < 0.01 and abs(shown("h_r3")[0] - 365.880) < 0.01
       and abs(app.last_solution["EER"] - 4.86227) < 1e-4 and abs(app.last_solution["EER_C"] - 263.15/45) < 1e-6,
       f"{shown('h_r1')} {shown('h_r3')} {app.last_solution.get('EER')} {app.last_solution.get('EER_C')}")
+check("Beispiel: IG: Heizwert CH4 = 50.03 MJ/kg, Zellspannung 1.229 V, molare Enthalpie in kJ/mol",
+      abs(app.last_solution["H_u"] - 50.03e6) < 0.05e6 and abs(app.last_solution["E_0"] - 1.2289) < 1e-3
+      and shown("E_0")[1] == "V" and shown("h_CO2")[1] == "kJ/mol" and abs(shown("h_CO2")[0] + 393.51) < 0.01
+      and shown("M_CH4")[1] == "kg/kmol" and abs(shown("M_CH4")[0] - 16.04246) < 1e-4,
+      f"{shown('H_u')} {shown('E_0')} {shown('h_CO2')} {shown('M_CH4')}")
+# Dampfreformer im Gleichgewicht (EQUILIBRIUM): unabhängig über die Gleichgewichtskonstanten
+import ideal_gas as _ig
+from scipy.optimize import fsolve as _fsolve
+_T_R = 1023.15
+_gr = {n: _ig.standard_gibbs_RT(_ig.find_species(n), _T_R) for n in ('CH4', 'H2O', 'CO', 'CO2', 'H2')}
+_Ksr = np.exp(-(_gr['CO'] + 3 * _gr['H2'] - _gr['CH4'] - _gr['H2O']))
+_Kwgs = np.exp(-(_gr['CO2'] + _gr['H2'] - _gr['CO'] - _gr['H2O']))
+def _sr(v):
+    ch4, co, co2 = v
+    h2o, h2 = 3 - co - 2 * co2, 2 * (1 - ch4) + co + 2 * co2
+    tot = ch4 + h2o + co + co2 + h2
+    return [ch4 + co + co2 - 1, co * h2 ** 3 / (ch4 * h2o * tot ** 2) / _Ksr - 1, co2 * h2 / (co * h2o) / _Kwgs - 1]
+_x_ref = 1 - _fsolve(_sr, [0.1, 0.6, 0.3], xtol=1e-14)[0]
+check("Beispiel: Dampfreformer mit EQUILIBRIUM (Umsatz wie Gleichgewichtskonstanten, Mengen in mol)",
+      abs(app.last_solution["X_CH4"] - _x_ref) < 1e-9 and shown("n_H2_eq")[1] == "mol",
+      f"{app.last_solution.get('X_CH4')} {_x_ref} {shown('n_H2_eq')}")
 check("Beispiel: keine Einheitenwarnung, kein Hinweis",
       app.unit_warning_label.cget("text") == "" and app.hints_label.cget("text") == "",
       app.unit_warning_label.cget("text") + app.hints_label.cget("text"))
@@ -892,6 +913,12 @@ all_fluids = _CP.get_global_param_string("fluids_list").split(",")
 check("Fluidliste enthält alle CoolProp-Fluide", all(f in fluids_text for f in all_fluids),
       str([f for f in all_fluids if f not in fluids_text][:5]))
 check("Fluidliste enthält alle Kurznamen", all(a in fluids_text for a in __import__("thermodynamics").FLUID_ALIASES))
+_ig_names = __import__("ideal_gas").species_names()
+_missing = [n for n in _ig_names if not re.search(r"(?<!\S)" + re.escape(n) + r" +\d", fluids_text)]
+check("Fluidliste enthält alle IG:-Spezies mit Datenbereich, Quelle und Lizenz",
+      not _missing and "Air              300-6000 K" in fluids_text and "Apache License 2.0" in fluids_text
+      and "NASA TP-2002-211556" in fluids_text and max(len(l) for l in fluids_text.splitlines()) <= 75,
+      str(_missing[:5]))
 
 solve("e_1 = 0.94:-0.35:0.24\nT = 300 + 10*e_1")
 check("Sweep-Anzeige: erster -> letzter Punkt (fallend)",
@@ -1008,6 +1035,30 @@ solve("alpha = 30 deg\nh = 90 - alpha")
 check("Winkel: Zahl ohne Einheit in Summe mit Winkel -> Hinweis (rad)",
       app.hints_label.cget("text") == "ⓘ HINWEISE (1)" and "gilt als Wert in rad" in app.last_analysis.hints[0],
       str(app.last_analysis.hints if app.last_analysis else None))
+
+# ---------------------------------------------------------------------------
+print("\n=== EQUILIBRIUM: Meldungen nennen die Anweisung ===")
+solve("n_1 = 1 mol\nn_2 = 0.1 mol\nEQUILIBRIUM T=100 K, p=1 bar\n  IN IG:N2 = n_1, IG:H2O = n_2\n"
+      "  OUT IG:N2 = a, IG:H2O = b")
+info = app.info_label.cget("text")
+check("Auswertungsfehler zeigt 'EQUILIBRIUM (Zeile 3): IG:N2 = a' statt der internen Form",
+      "EQUILIBRIUM (Zeile 3): IG:N2 = a" in info and "equilibrium(" not in info, repr(info[:200]))
+
+solve("T = -10 °C\np = 1 bar\nEQUILIBRIUM T=T, p=p\n  IN IG:N2 = 0.07 mol/s, IG:H2O = 0.0226 mol/s\n"
+      "  OUT IG:N2 = a, IG:H2O = b, IG:H2O(L) = c")
+hints = list(getattr(app.last_analysis, 'hints', []) or [])
+check("Hinweis: H2O(L) bei -10 °C ausgelassen, IG:H2O(cr) vorgeschlagen",
+      any('IG:H2O(L)' in h and 'IG:H2O(cr) unter OUT' in h for h in hints), str(hints))
+solve("T = -20:20:80 °C\np = 1 bar\nEQUILIBRIUM T=T, p=p\n  IN IG:N2 = 0.07 mol/s, IG:H2O = 0.0226 mol/s\n"
+      "  OUT IG:N2 = a, IG:H2O = b, IG:H2O(L) = c, IG:H2O(cr) = e")
+hints = list(getattr(app.last_analysis, 'hints', []) or [])
+check("Kein Hinweis, wenn Eis und Wasser unter OUT stehen (Studie -20 ... 80 °C)",
+      not any('nicht berücksichtigt' in h for h in hints), str(hints))
+solve("T = 25 °C\np = 1 bar\nEQUILIBRIUM T=T, p=p\n  IN IG:H2 = 2 mol, IG:O2 = 1.5 mol, IG:N2 = 5.6 mol\n"
+      "  OUT IG:H2O = a_D, IG:H2O(L) = a_L, IG:O2 = a_O2, IG:N2 = a_N2, IG:NO2 = a_NO2, IG:H2 = a_H2")
+hints = list(getattr(app.last_analysis, 'hints', []) or [])
+check("Gas außerhalb seines Datenbereichs (NO2 bei 25 °C): gelöst, Warnhinweis",
+      (app.last_solution or {}).get('a_NO2') == 0 and any('Achtung' in h and 'IG:NO2' in h for h in hints), str(hints))
 
 # ---------------------------------------------------------------------------
 app.destroy()

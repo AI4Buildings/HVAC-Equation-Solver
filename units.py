@@ -37,6 +37,8 @@ ureg.define('@alias kilogram = kg')
 ureg.define('@alias meter = m')
 ureg.define('@alias second = s')
 ureg.define('@alias liter = L = l')
+# Ohm: deutsche Schreibweise und Ohm-Zeichen U+2126 (pint kennt ohm und das griechische Ω)
+ureg.define('@alias ohm = Ohm = \u2126')
 
 
 # Einheiten-Mapping für CoolProp-Funktionen (Ausgabe-Einheiten, alle in SI)
@@ -55,6 +57,8 @@ COOLPROP_UNITS = {
     'quality': '',  # dimensionslos
     'prandtl': '',  # dimensionslos
     'soundspeed': 'm/s',
+    'gibbs': 'J/kg',          # SI: J/kg (g = h - T*s)
+    'molarmass': 'kg/kmol',   # Anzeige; Wert in SI (kg/mol)
 }
 
 # Einheiten für HumidAir-Funktionen (alle in SI)
@@ -216,11 +220,21 @@ def initial_values_from_units(variables, all_units: Dict[str, Optional[str]],
         if mean_temperature is not None and is_absolute_temperature_unit(unit):
             result[var] = mean_temperature
         else:
-            result[var] = get_initial_from_unit(unit)
+            typical = typical_value_from_unit(unit)
+            # ohne typischen Wert (mol/s, A, V, ...) kein fester Startwert: sonst verdrängte der
+            # Ersatzwert 1.0 den Startwert aus der Struktur (Molenströme ~1e-4 mol/s)
+            if typical is not None:
+                result[var] = typical
     return result
 
 
 def get_initial_from_unit(unit_str: str) -> float:
+    """Typischer Startwert (SI) zur Einheit, ohne bekannten typischen Wert 1.0."""
+    typical = typical_value_from_unit(unit_str)
+    return 1.0 if typical is None else typical
+
+
+def typical_value_from_unit(unit_str: str) -> Optional[float]:
     """
     Liefert einen typischen Startwert (in SI) basierend auf der Einheit.
 
@@ -261,7 +275,7 @@ def get_initial_from_unit(unit_str: str) -> float:
     try:
         quantity = ureg.Quantity(1.0, normalize_unit(unit_normalized))
     except Exception:
-        return 1.0
+        return None
 
     if quantity.dimensionless:
         # Feuchtebeladung (kg/kg, g/kg) ~ 0.01, sonst Wirkungsgrad/Qualität/rel. Feuchte
@@ -271,8 +285,8 @@ def get_initial_from_unit(unit_str: str) -> float:
         if quantity.dimensionality == _dimensionality(pint_unit):
             return value
 
-    # Fallback: 1.0 ist ein neutraler Startwert
-    return 1.0
+    # kein typischer Wert bekannt (Startwert dann aus der Struktur bzw. neutral 1.0)
+    return None
 
 
 # Kompatible Einheiten für Dropdown-Menüs
@@ -360,8 +374,9 @@ COMPATIBLE_UNITS = {
     'kN': ['kN', 'N'],
 
     # Enthalpie / spezifische Energie
-    'kJ/kg': ['kJ/kg', 'J/kg', 'BTU/lb'],
-    'J/kg': ['J/kg', 'kJ/kg'],
+    'kJ/kg': ['kJ/kg', 'J/kg', 'MJ/kg', 'BTU/lb'],
+    'J/kg': ['J/kg', 'kJ/kg', 'MJ/kg'],
+    'MJ/kg': ['MJ/kg', 'kJ/kg', 'J/kg'],          # Heizwert
 
     # Entropie / spezifische Wärme
     'kJ/(kg*K)': ['kJ/(kg*K)', 'J/(kg*K)'],
@@ -398,19 +413,44 @@ COMPATIBLE_UNITS = {
 
     # Wärmeleitfähigkeit
     'W/(m*K)': ['W/(m*K)'],
+
+    # Molare Größen (IG:-Stoffe, Verbrennung) und Elektrochemie (Brennstoffzelle)
+    'kg/kmol': ['kg/kmol', 'g/mol', 'kg/mol'],
+    'g/mol': ['g/mol', 'kg/kmol', 'kg/mol'],
+    'kg/mol': ['kg/mol', 'kg/kmol', 'g/mol'],
+    'kJ/mol': ['kJ/mol', 'J/mol', 'kJ/kmol', 'MJ/kmol'],
+    'J/mol': ['J/mol', 'kJ/mol', 'kJ/kmol', 'MJ/kmol'],
+    'kJ/kmol': ['kJ/kmol', 'kJ/mol', 'J/mol', 'MJ/kmol'],
+    'MJ/kmol': ['MJ/kmol', 'kJ/kmol', 'kJ/mol', 'J/mol'],
+    'J/(mol*K)': ['J/(mol*K)', 'kJ/(kmol*K)'],
+    'kJ/(kmol*K)': ['kJ/(kmol*K)', 'J/(mol*K)'],
+    'mol': ['mol', 'kmol'],
+    'kmol': ['kmol', 'mol'],
+    'mol/s': ['mol/s', 'kmol/s', 'kmol/h'],
+    'kmol/s': ['kmol/s', 'mol/s', 'kmol/h'],
+    'kmol/h': ['kmol/h', 'kmol/s', 'mol/s'],
+    'V': ['V', 'mV'],
+    'mV': ['mV', 'V'],
+    'A': ['A', 'mA'],
+    'A/m^2': ['A/m^2', 'A/cm^2', 'mA/cm^2'],
+    'A/cm^2': ['A/cm^2', 'A/m^2', 'mA/cm^2'],
+    'C/mol': ['C/mol'],
+    'ohm': ['ohm', 'mohm', 'kohm'],
+    'ohm*cm^2': ['ohm*cm^2', 'ohm*m^2', 'mohm*cm^2'],
+    'ohm*m^2': ['ohm*m^2', 'ohm*cm^2'],
 }
 
 
 # Regex für Wert mit Einheit
 # Matches: "15", "15.5", "-3.14", "1.5e-3", "15°C", "100kJ/kg", "4.18kJ/(kg*K)", "89.2 %"
-_UNIT_BODY = r'(?:[a-zA-Z0-9²³µ°/*()·⋅%‰]|\^-?)*'   # Zeichen einer Einheit, auch h^-1
+_UNIT_BODY = r'(?:[a-zA-Z0-9²³µ°/*()·⋅%‰Ω\u2126]|\^-?)*'   # Zeichen einer Einheit, auch h^-1
 VALUE_WITH_UNIT_PATTERN = re.compile(
     r'^'
     r'(-?\d+\.?\d*(?:[eE][+-]?\d+)?)'  # Zahl (inkl. wissenschaftliche Notation)
     r'(?:'
     # Einheit, beginnend mit Buchstabe/°/µ (auch W/(m²·K), h^-1). Darf nicht mit
     # einem Exponenten beginnen: sonst zerlegt Backtracking "1e5*y" in 1 und e5*y
-    r'\s*((?![eE][+-]?\d)°?[a-zA-Z²³µ%‰]' + _UNIT_BODY + r')'
+    r'\s*((?![eE][+-]?\d)°?[a-zA-Z²³µ%‰Ω\u2126]' + _UNIT_BODY + r')'
     # oder Kehrwert-Einheit "1/h", "1/K" - nur NACH einem Leerzeichen
     # (sonst wäre "0.51/h" mehrdeutig)
     r'|\s+(1/(?:\(|°?[a-zA-Z²³µ])' + _UNIT_BODY + r')'

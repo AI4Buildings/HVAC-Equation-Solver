@@ -20,9 +20,13 @@ Syntax (wie EES):
     h = enthalpy(Water, T=373.15, p=100000)  # T in K, p in Pa
     rho = density(R134a, T=298.15, x=1)
     s = entropy(Water, p=1000000, h=500000)  # p in Pa, h in J/kg
+
+Ideale Gase und kondensierte Stoffe aus der NASA-Datenbank mit dem Präfix IG:
+(ideal_gas.py), z.B. enthalpy(IG:N2, T=293.15), entropy(IG:N2, T=293.15, p=1e6).
 """
 
 import CoolProp.CoolProp as CP
+import ideal_gas
 from functools import lru_cache
 from typing import Dict, List, Tuple, Optional
 import re
@@ -254,6 +258,11 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
     """
     func_name = func_name.lower()
 
+    # IG:-Stoffe (NASA-Datenbank) - vor CoolProp, ohne Bezugszustand (REFERENCE)
+    species = ideal_gas.species_part(fluid)
+    if species is not None:
+        return ideal_gas.calculate_property(func_name, species, **kwargs)
+
     # Bestimme Output-Property
     if func_name == 'enthalpy':
         output_prop = 'H'
@@ -283,6 +292,8 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
         output_prop = 'O'
     elif func_name == 'soundspeed':
         output_prop = 'A'
+    elif func_name == 'gibbs':
+        output_prop = 'G'
     else:
         raise ValueError(f"Unbekannte Funktion: {func_name}")
 
@@ -376,6 +387,11 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
     else:
         result = result_si
     shift = dh if output_prop in ('H', 'U') else ds if output_prop == 'S' else 0.0
+    if output_prop == 'G' and (dh or ds):
+        # g = h - T*s: verschiebt sich um dh - T*ds
+        T_state = inputs['T'] if 'T' in inputs else CP.PropsSI(
+            'T', keys[0], values[0], keys[1], values[1], coolprop_fluid)
+        shift = dh - T_state * ds
     if shift:
         shifted = result + shift
         # im Bezugspunkt selbst bleibt sonst ein Rundungsrest (-1.2e-9 J/kg statt 0)
@@ -441,6 +457,22 @@ def soundspeed(fluid: str, **kwargs) -> float:
     """Schallgeschwindigkeit [m/s]"""
     return calculate_property('soundspeed', fluid, **kwargs)
 
+def gibbs(fluid: str, **kwargs) -> float:
+    """Spez. freie Enthalpie g = h - T*s [J/kg]"""
+    return calculate_property('gibbs', fluid, **kwargs)
+
+def molarmass(fluid: str, **kwargs) -> float:
+    """Molmasse [kg/mol] (Anzeige kg/kmol) - IG:-Stoffe und CoolProp-Fluide"""
+    species = ideal_gas.species_part(fluid)
+    if species is not None:
+        return ideal_gas.calculate_property('molarmass', species, **kwargs)
+    if kwargs:
+        raise ValueError(f"molarmass({fluid}) hat keine Zustandsgrößen (nur den Stoff)")
+    try:
+        return CP.PropsSI('M', get_fluid_name(fluid))
+    except Exception as e:
+        raise ValueError(f"Molmasse von {fluid} nicht verfügbar (CoolProp: {e})") from None
+
 
 # Dictionary aller Thermodynamik-Funktionen für den Solver
 THERMO_FUNCTIONS = {
@@ -458,6 +490,8 @@ THERMO_FUNCTIONS = {
     'cp': cp,
     'cv': cv,
     'soundspeed': soundspeed,
+    'gibbs': gibbs,
+    'molarmass': molarmass,
 }
 
 

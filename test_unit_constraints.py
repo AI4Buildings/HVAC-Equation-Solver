@@ -483,6 +483,32 @@ found = angle_sum_numbers({"(h) - (90 - alpha)": "h = 90 - alpha", "(q) - (omega
 check("Zahl in Summe mit Winkel -> Hinweis; u = omega*r + v (m/s) nicht",
       found == [("h = 90 - alpha", "90", "alpha")], str(found))
 
+# IG:-Stoffe (NASA): molarmass in kg/kmol angezeigt (Wert SI), molare Größen, Zellspannung
+units = propagate_all_units_complete({
+    "(M) - (molarmass('IG:H2O'))": "M = molarmass(IG:H2O)",
+    "(h_m) - (enthalpy('IG:H2O', T=298.15)*M)": "h_m = enthalpy(IG:H2O, T=298.15)*M",
+    "(s_m) - (entropy('IG:H2O', T=298.15, p=1e5)*M)": "s_m = entropy(IG:H2O, T=298.15, p=1e5)*M",
+    "(g) - (gibbs('IG:H2O(L)', T=298.15, p=1e5))": "g = gibbs(IG:H2O(L), T=298.15, p=1e5)",
+    "(E) - (-g*M/(2*F))": "E = -g*M/(2*F)"}, {'F': 'C/mol'})
+check("IG: molarmass kg/kmol, h*M kJ/mol, s*M J/(mol*K), gibbs J/kg, -g*M/(2F) in V",
+      units.get('M') == 'kg/kmol' and units.get('h_m') == 'kJ/mol' and units.get('s_m') == 'J/(mol*K)'
+      and same_dim(units.get('g'), 'J/kg') and units.get('E') == 'V', str(units))
+check("Label molare Größen und Elektrochemie aus der Dimension",
+      [unit_from_dimensionality(ureg.Quantity(1.0, u).dimensionality) for u in ('J/mol', 'kg/mol', 'A/m^2')]
+      == ['kJ/mol', 'kg/kmol', 'A/m^2'])
+
+# EQUILIBRIUM: Austrittsmengen in der Einheit der Eintrittsmengen, T absolute Temperatur, p Druck
+eq_call = "(a) - (equilibrium('IG:H2', 'IG:CH4|IG:O2', 'IG:CH4|IG:H2|IG:CO', T_x, p_x, n_1, n_2))"
+units = propagate_all_units_complete({eq_call: "a = equilibrium('IG:H2', 'IG:CH4|IG:O2', 'IG:CH4|IG:H2|IG:CO', T_x, p_x, n_1, n_2)"},
+                                     {'n_1': 'mol/s', 'n_2': 'mol/s'})
+check("EQUILIBRIUM: Ergebnis mol/s wie die Eintrittsmengen, T_x in K, p_x in Pa",
+      same_dim(units.get('a'), 'mol/s') and units.get('T_x') == 'K' and same_dim(units.get('p_x'), 'Pa'), str(units))
+warnings_ = check_all_unit_consistency(
+    {'a': 1.0, 'n_1': 1.0, 'n_2': 1.0, 'T_x': 1000.0, 'p_x': 1e5},
+    {eq_call: "a = equilibrium('IG:H2', 'IG:CH4|IG:O2', 'IG:CH4|IG:H2|IG:CO', T_x, p_x, n_1, n_2)"},
+    {'n_1': 'mol/s', 'n_2': 'mol', 'T_x': 'K', 'p_x': 'Pa'})
+check("EQUILIBRIUM: Eintrittsmengen in mol und mol/s gemischt -> Einheitenwarnung", bool(warnings_), str(warnings_))
+
 # ---------------------------------------------------------------------------
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")

@@ -10,6 +10,12 @@ Equation solver for teaching and rapid calculation of thermodynamic state change
 
 - **Intuitive Syntax**: Equations in natural form (`h = enthalpy(water, T=100°C, p=1bar)`)
 - **Thermodynamic Properties**: Over 100 fluids via CoolProp
+- **Chemical Equilibrium**: statement `EQUILIBRIUM` - Gibbs minimisation as in NASA CEA, no
+  reactions to choose, amounts always >= 0, soot (C(gr)) and condensate (H2O(L)) appear when stable;
+  works with unknown temperature (adiabatic reformer) without start values
+- **Ideal Gases and Condensed Species**: about 2000 species from the NASA database (thermo.inp)
+  with prefix `IG:` for combustion and fuel cell calculations (`enthalpy(IG:N2, T=20 °C)`,
+  `gibbs(IG:H2O(L), T=25 °C, p=1 bar)`, `molarmass(IG:CH4)`)
 - **Humid Air**: Psychrometric calculations (`h = HumidAir(h, T=25°C, rh=0.5, p_tot=1bar)`)
 - **Blackbody Radiation**: Planck's radiation functions (`Eb`, `Blackbody`, `Wien`, `Stefan_Boltzmann`)
 - **Robust Solver**: Block decomposition with bracket search and Brent's method
@@ -76,6 +82,9 @@ HVAC-Equation-Solver/
 ├── solver.py            # Block decomposition + bracket search solver
 ├── optimizer.py         # MINIMIZE/MAXIMIZE (grid + bounded Brent/Powell, per point)
 ├── thermodynamics.py    # CoolProp wrapper with unit conversion
+├── ideal_gas.py         # Ideal gases / condensed species from NASA thermo.inp (prefix IG:)
+├── equilibrium.py       # Chemical equilibrium by Gibbs minimisation (statement EQUILIBRIUM)
+├── data/nasa/           # thermo.inp, LICENSE.txt, NOTICE.txt (NASA CEA, Apache 2.0)
 ├── humid_air.py         # CoolProp HumidAirProp wrapper
 ├── radiation.py         # Blackbody radiation functions
 ├── units.py             # Unit handling and conversion (v3.0)
@@ -93,7 +102,8 @@ HVAC-Equation-Solver/
 ├── test_optimierung.py  # Optimization vs. analytic/scipy references
 ├── test_gui.py          # Headless GUI tests
 ├── CLAUDE.md            # Technical documentation
-└── README.md            # This file
+├── README.md            # This file
+└── LICENSE              # MIT (data/nasa/* excluded: Apache 2.0)
 ```
 
 ## Quick Start
@@ -278,6 +288,166 @@ m_dot_a = 1000/3600 kg/s
 Q_dot_cool = m_dot_a*(h_1-h_2)
 ```
 
+## Combustion and Fuel Cell Example (ideal gases, `IG:`)
+
+```
+{Heating value of methane: CH4 + 2 O2 -> CO2 + 2 H2O}
+T_0 = 25 °C
+M_CH4 = molarmass(IG:CH4)                          {16.04 kg/kmol}
+h_CH4 = enthalpy(IG:CH4, T=T_0)*M_CH4              {molar: -74.6 kJ/mol}
+h_O2 = enthalpy(IG:O2, T=T_0)*molarmass(IG:O2)
+h_CO2 = enthalpy(IG:CO2, T=T_0)*molarmass(IG:CO2)
+h_H2O = enthalpy(IG:H2O, T=T_0)*molarmass(IG:H2O)
+H_u = -(h_CO2 + 2*h_H2O - h_CH4 - 2*h_O2)/M_CH4    {50.03 MJ/kg}
+
+{Adiabatic flame temperature with excess air ratio lambda (implicit)}
+lambda = 1.2
+n_O2 = 2*lambda
+n_N2 = 3.76*n_O2
+H_R = h_CH4 + n_O2*h_O2 + n_N2*enthalpy(IG:N2, T=T_0)*molarmass(IG:N2)
+H_R = (enthalpy(IG:CO2, T=T_ad)*molarmass(IG:CO2) + 2*enthalpy(IG:H2O, T=T_ad)*molarmass(IG:H2O)
+      + (n_O2 - 2)*enthalpy(IG:O2, T=T_ad)*molarmass(IG:O2) + n_N2*enthalpy(IG:N2, T=T_ad)*molarmass(IG:N2))
+
+{Fuel cell H2 + 1/2 O2 -> H2O(L): reversible cell voltage}
+p_0 = 1 bar
+F = 96485.33212 C/mol
+g_H2O = gibbs(IG:H2O(L), T=T_0, p=p_0)*molarmass(IG:H2O(L))
+g_H2 = gibbs(IG:H2, T=T_0, p=p_0)*molarmass(IG:H2)
+g_O2 = gibbs(IG:O2, T=T_0, p=p_0)*molarmass(IG:O2)
+E_0 = -(g_H2O - g_H2 - 0.5*g_O2)/(2*F)             {1.229 V}
+```
+
+Results: `H_u` = 50.03 MJ/kg, `T_ad` = 1796 °C, `E_0` = 1.229 V (gaseous product water at
+25 °C: 1.185 V, at 800 °C: 0.977 V). With the statement `EQUILIBRIUM` (see below) the equilibrium
+composition with dissociation (OH, H, O, NO, ...) follows without choosing reactions.
+
+## Simple Examples: Combustion, Chemical Equilibrium, Fuel Cells
+
+All examples use the NASA data (prefix `IG:`, molar values via `molarmass`) and solve without start
+values. `EQUILIBRIUM` minimises the Gibbs energy of the species listed under `OUT` - see
+[Chemical Equilibrium](#chemical-equilibrium-equilibrium).
+
+### Combustion: Adiabatic Flame Temperature with and without Dissociation
+
+```
+{Methane with air (lambda = 1.2), adiabatic: complete combustion vs. chemical equilibrium}
+T_1 = 25 °C
+p = 1 bar
+lambda = 1.2
+n_CH4 = 1 mol
+n_O2 = 2*lambda*n_CH4
+n_N2 = 3.76*n_O2
+H_1 = (n_CH4*enthalpy(IG:CH4, T=T_1)*molarmass(IG:CH4) + n_O2*enthalpy(IG:O2, T=T_1)*molarmass(IG:O2)
+       + n_N2*enthalpy(IG:N2, T=T_1)*molarmass(IG:N2))
+
+{a) complete combustion CH4 + 2 O2 -> CO2 + 2 H2O: adiabatic flame temperature T_a}
+H_1 = (n_CH4*enthalpy(IG:CO2, T=T_a)*molarmass(IG:CO2) + 2*n_CH4*enthalpy(IG:H2O, T=T_a)*molarmass(IG:H2O)
+       + (n_O2 - 2*n_CH4)*enthalpy(IG:O2, T=T_a)*molarmass(IG:O2) + n_N2*enthalpy(IG:N2, T=T_a)*molarmass(IG:N2))
+
+{b) chemical equilibrium with dissociation (CO, H2, OH, H, O, NO) - no reactions to choose}
+EQUILIBRIUM T=T_b, p=p
+  IN  IG:CH4 = n_CH4, IG:O2 = n_O2, IG:N2 = n_N2
+  OUT IG:CO2 = b_CO2, IG:H2O = b_H2O, IG:O2 = b_O2, IG:N2 = b_N2, IG:CO = b_CO,
+      IG:H2 = b_H2, IG:OH = b_OH, IG:H = b_H, IG:O = b_O, IG:NO = b_NO
+H_1 = (b_CO2*enthalpy(IG:CO2, T=T_b)*molarmass(IG:CO2) + b_H2O*enthalpy(IG:H2O, T=T_b)*molarmass(IG:H2O)
+       + b_O2*enthalpy(IG:O2, T=T_b)*molarmass(IG:O2) + b_N2*enthalpy(IG:N2, T=T_b)*molarmass(IG:N2)
+       + b_CO*enthalpy(IG:CO, T=T_b)*molarmass(IG:CO) + b_H2*enthalpy(IG:H2, T=T_b)*molarmass(IG:H2)
+       + b_OH*enthalpy(IG:OH, T=T_b)*molarmass(IG:OH) + b_H*enthalpy(IG:H, T=T_b)*molarmass(IG:H)
+       + b_O*enthalpy(IG:O, T=T_b)*molarmass(IG:O) + b_NO*enthalpy(IG:NO, T=T_b)*molarmass(IG:NO))
+x_NO = b_NO/(b_CO2 + b_H2O + b_O2 + b_N2 + b_CO + b_H2 + b_OH + b_H + b_O + b_NO)
+```
+
+Results: `T_a` = 1795.8 °C (complete combustion), `T_b` = 1770.4 °C (equilibrium: dissociation takes
+up energy), `b_CO` = 0.0107 mol, `b_OH` = 0.0276 mol, NO in equilibrium `x_NO` = 0.31 % (3150 ppm - the
+thermal NO limit; real flue gas stays far below because the reaction is slow).
+
+### Gibbs Minimisation with Solid Carbon (Soot)
+
+```
+{Steam reforming of methane at 800 °C: when does solid carbon form? Study over steam/carbon S/C}
+T = 800 °C
+p = 1 bar
+n_CH4 = 1 mol
+SC = [0.25 0.5 0.75 1 1.25 1.5]
+n_H2O = SC*n_CH4
+EQUILIBRIUM T=T, p=p
+  IN  IG:CH4 = n_CH4, IG:H2O = n_H2O
+  OUT IG:CH4 = a_CH4, IG:H2O = a_H2O, IG:CO = a_CO, IG:CO2 = a_CO2, IG:H2 = a_H2, IG:C(gr) = a_C
+```
+
+| S/C | 0.25 | 0.5 | 0.75 | 1.0 | 1.25 | 1.5 |
+|---|---|---|---|---|---|---|
+| `a_C` (graphite) in mol | 0.695 | 0.470 | 0.244 | 0.018 | 0 | 0 |
+| `a_H2` in mol | 2.061 | 2.286 | 2.512 | 2.737 | 2.960 | 3.065 |
+
+Graphite appears only where it is stable (active set): above S/C ≈ 1 the soot vanishes. A solid or
+liquid species is simply listed under `OUT` - no reaction such as 2 CO -> C + CO2 has to be written.
+
+### Condensate: Flue Gas of a Condensing Boiler
+
+```
+{Flue gas of methane (lambda = 1.2) cooled to 40 °C - how much water condenses?}
+p = 1 bar
+T_FG = 40 °C
+lambda = 1.2
+n_CH4 = 1 mol
+EQUILIBRIUM T=T_FG, p=p
+  IN  IG:CH4 = n_CH4, IG:O2 = 2*lambda*n_CH4, IG:N2 = 3.76*2*lambda*n_CH4
+  OUT IG:CO2 = n_CO2, IG:H2O = n_vap, IG:H2O(L) = n_cond, IG:O2 = n_O2, IG:N2 = n_N2
+share_cond = n_cond/(n_vap + n_cond)              {condensed share of the water}
+x_H2O = n_vap/(n_CO2 + n_vap + n_O2 + n_N2)       {vapour fraction = p_s(40 °C)/p}
+```
+
+Results: `n_cond` = 1.171 mol of 2 mol water condense (`share_cond` = 58.5 %), the remaining vapour
+fraction `x_H2O` = 0.0737 corresponds to the saturation pressure 7.37 kPa at 40 °C (IAPWS: 7.38 kPa).
+The liquid phase appears only below the dew point; it is pressure dependent because it follows from
+the Gibbs minimisation (vapour and liquid have the same chemical potential at saturation).
+
+### PEM Fuel Cell: Nernst Voltage
+
+```
+{PEM fuel cell at 80 °C: hydrogen and air at 1.5 bar, liquid product water}
+T = 80 °C
+F = 96485.33212 C/mol
+p_H2 = 1.5 bar                 {anode, partial pressure of H2}
+p_O2 = 0.21*1.5 bar            {cathode air at 1.5 bar}
+g_H2 = gibbs(IG:H2, T=T, p=p_H2)*molarmass(IG:H2)
+g_O2 = gibbs(IG:O2, T=T, p=p_O2)*molarmass(IG:O2)
+g_H2O = gibbs(IG:H2O(L), T=T)*molarmass(IG:H2O(L))
+U_N = -(g_H2O - g_H2 - 0.5*g_O2)/(2*F)
+```
+
+Result: `U_N` = 1.1805 V (molar Gibbs energies `g_H2` = -45.10, `g_O2` = -75.98, `g_H2O` =
+-310.89 kJ/mol; gases with their partial pressure, the liquid without pressure effect).
+
+### SOFC: Nernst Voltage - Two Ways
+
+```
+{SOFC at 800 °C: Nernst voltage (a) from the reaction H2 + 1/2 O2 -> H2O, (b) from the oxygen
+ partial pressures of cathode and anode - the anode p_O2 follows from the Gibbs minimisation}
+T = 800 °C
+p = 1 bar
+F = 96485.33212 C/mol
+R = 8.314462618 J/(mol*K)
+n_H2 = 0.9 mol                 {anode gas: 90 % H2, 10 % H2O}
+n_H2O = 0.1 mol
+x_O2_c = 0.21                  {cathode air}
+x_H2 = n_H2/(n_H2 + n_H2O)
+g_H2 = gibbs(IG:H2, T=T, p=x_H2*p)*molarmass(IG:H2)
+g_H2O = gibbs(IG:H2O, T=T, p=(1 - x_H2)*p)*molarmass(IG:H2O)
+g_O2 = gibbs(IG:O2, T=T, p=x_O2_c*p)*molarmass(IG:O2)
+U_a = -(g_H2O - g_H2 - 0.5*g_O2)/(2*F)
+EQUILIBRIUM T=T, p=p
+  IN  IG:H2 = n_H2, IG:H2O = n_H2O
+  OUT IG:H2 = a_H2, IG:H2O = a_H2O, IG:O2 = a_O2
+p_O2_a = a_O2/(a_H2 + a_H2O + a_O2)*p
+U_b = R*T/(4*F)*ln(x_O2_c*p/p_O2_a)
+```
+
+Results: `U_a` = `U_b` = 1.0425 V. The oxygen partial pressure in the anode gas is only
+`p_O2_a` = 5.5e-21 bar - the Gibbs minimisation resolves such traces, and the oxygen concentration
+cell (b) gives exactly the voltage of the reaction (a).
+
 ## Solver Strategy
 
 The solver uses robust block decomposition:
@@ -290,16 +460,23 @@ The solver uses robust block decomposition:
 
 ### Robust Root Finding
 
-- ~4000 test points (including negative values) across magnitudes up to ±5e9
+- Test points (including negative values) across magnitudes from 1e-30 to ±1e30
 - Adaptive refinement at singularities; poles and underflow plateaus are rejected
-- Residuals are evaluated relative to the magnitude of the equation terms
-  (divergence to an asymptote is never accepted as a solution)
+- Scale-independent: residuals are evaluated relative to the magnitude of the equation terms
+  (divergence to an asymptote is never accepted as a solution), steps and tolerances relative
+  to the value - small SI values such as a fibre cross-section of 3.14e-12 m² or a trace
+  fraction of 1e-16 are solved as accurately as large ones
+- An equation that is only approximately satisfied counts only if a small relative change of
+  the variables could satisfy it - a flat region of min/max is never reported as a solution
+- Coupled blocks are split exactly into their smallest independent cores (block triangular
+  form); solved cores stay in the partial solution if the time limit is reached
 - With multiple roots, the one closest to the initial value is chosen
   (`sin(alpha) = 0.5` yields 30, not 150); for a coupled block solved by tearing, the distance of
   all block variables to their initial values counts, so the solution does not depend on how the
   equations are written (`u = v^2` with `v = u - 6` or `u = v + 6` both give (4; -2))
 - Contradictory systems (e.g. `x+1=3` and `x+1=4`) are reported as errors; redundant but
   consistent equations (an extra balance) are allowed and checked, whichever way they are written
+  and wherever they stand in the sheet
 - Linearly dependent equations (`x + y = 1`, `2*x + 2*y = 2`, a balance written twice) are
   reported as "Lösung nicht eindeutig" instead of returning an arbitrary point
 - Errors of property functions (outside the valid range, supersaturated humid air) and 0/0
@@ -330,6 +507,10 @@ equations and are solved iteratively. Expression constants with units like
 | Entropy s | J/(kg·K) | |
 | Density rho | kg/m³ | |
 | Vapor quality x | - (0-1) | |
+| Molar mass M | kg/mol (display kg/kmol) | `28.97 kg/kmol` |
+| Molar enthalpy, Gibbs energy | J/mol (display kJ/mol) | `-241.8 kJ/mol` |
+| Molar entropy | J/(mol·K) | |
+| Cell voltage, current | V, A | `F = 96485.33212 C/mol` |
 
 **Angles:** a number without unit in `sin`/`cos`/`tan` is in degrees (`sin(30) = 0.5`), and
 `asin`/`acos`/`atan` return degrees (as in EES). Angles with a unit are SI internally (rad), like
@@ -380,7 +561,7 @@ unit has to be given (as a start value with unit) so that all others follow.
 ## Available Functions
 
 ### Thermodynamics
-`enthalpy`, `entropy`, `density`, `volume`, `intenergy`, `quality`, `temperature`, `pressure`, `viscosity`, `conductivity`, `prandtl`, `cp`, `cv`, `soundspeed`
+`enthalpy`, `entropy`, `density`, `volume`, `intenergy`, `quality`, `temperature`, `pressure`, `viscosity`, `conductivity`, `prandtl`, `cp`, `cv`, `soundspeed`, `gibbs` (g = h − T·s), `molarmass` (kg/mol, shown in kg/kmol; `molarmass(water)` also for CoolProp fluids)
 
 Reference state of h, u, s per fluid as in EES, as an own line in the sheet:
 `REFERENCE R717 IIR` (h = 200 kJ/kg, s = 1 kJ/(kg·K) for saturated liquid at 0 °C),
@@ -388,6 +569,73 @@ Reference state of h, u, s per fluid as in EES, as an own line in the sheet:
 to all names of the fluid (R717 = ammonia); differences, T, p, x, ρ are unchanged. CoolProp's
 standard is already IIR for R134a, R32, R410A, CO2, propane and most refrigerants, but not for
 ammonia (h' at 0 °C = 345.7 kJ/kg) and water (IAPWS).
+
+### Ideal Gases and Condensed Species (`IG:`)
+With the prefix `IG:` (also `IG::`, not case-sensitive) the property functions use the NASA
+database thermo.inp instead of CoolProp; without the prefix nothing changes. About 2000 species
+(1276 gases, 769 condensed): `IG:N2`, `IG:O2`, `IG:CO2`, `IG:H2O`, `IG:CH4`, `IG:H2`, `IG:CO`,
+`IG:NO`, `IG:Air`, `IG:H2O(L)` (liquid water), `IG:H2O(cr)` (ice), `IG:C(gr)` (graphite),
+`IG:C8H18,isooctane`, ... (Help > Fluid List, with the data range of every species).
+
+- Values per kg in SI like CoolProp (J/kg, J/(kg·K), m³/kg). `h` includes the enthalpy of
+  formation (h = Δh_f at 25 °C, elements in their reference state 0), `s` is the absolute
+  entropy - reaction, combustion and fuel cell balances need no reference point.
+  `REFERENCE` does not apply to `IG:` species.
+- Gases (ideal): `enthalpy`, `intenergy`, `cp`, `cv`, `soundspeed` need only `T` (`p` allowed,
+  without effect); `entropy`, `gibbs`, `volume`, `density` need `T` and `p` - there is no silent
+  1 bar: s = s°(T) − R·ln(p/p°), p° = 1 bar, v = R·T/p. `temperature` from `h`, `u` or `s` and
+  `p`; `pressure` from `T` and `s` or `rho`.
+- Condensed species (`(L)`, `(cr)`, ...): `enthalpy`, `entropy`, `gibbs`, `cp` from `T`, without
+  pressure effect; `volume`, `density`, `cv` are reported (thermo.inp has no density).
+- Molar values: multiply by `molarmass` (`h*M` in J/mol, shown in kJ/mol).
+- A temperature outside the data range of a species is an error with the range (most gases
+  200 or 300 ... 6000 K or 20000 K, `IG:Air` from 300 K). Names: exact, otherwise not
+  case-sensitive if unique; `IG:co` is ambiguous (CO or Co) and reported with suggestions.
+
+```
+h = enthalpy(IG:N2, T=20 °C)               {J/kg}
+s = entropy(IG:N2, T=20 °C, p=10 bar)      {J/(kg K)}
+T_2 = temperature(IG:N2, s=s, p=1 bar)     {isentropic expansion}
+g = gibbs(IG:H2O(L), T=25 °C, p=1 bar)
+```
+
+### Chemical Equilibrium (`EQUILIBRIUM`)
+An own statement in the sheet (like `MINIMIZE`); `IN` and `OUT` may stand in their own lines, a
+list continues after `,` in the next line (comments and blank lines in between are allowed):
+
+```
+EQUILIBRIUM T=T_2, p=p
+  IN  IG:CH4 = n_CH4_1, IG:O2 = n_O2_1, IG:N2 = n_N2_1
+  OUT IG:CH4 = n_CH4, IG:H2O = n_H2O, IG:CO = n_CO, IG:CO2 = n_CO2, IG:H2 = n_H2, IG:N2 = n_N2
+```
+
+- `OUT` receives the composition with minimum Gibbs energy at `T` and `p` under the element
+  balances of `IN` (NASA data, ideal gas mixture, p° = 1 bar): no reactions to choose, the minimum
+  is unique (convex problem), all amounts are >= 0 and traces down to 1e-30 are resolved.
+- Method as NASA CEA (Gordon/McBride, RP-1311): element potentials (Lagrange multipliers) with
+  logarithmic amounts, globally convergent; condensed species (`IG:C(gr)` soot, `IG:H2O(L)`
+  condensate) by an active set - they appear only when stable and only inside their data range
+  (`IG:H2O(cr)` up to 0 °C, `IG:H2O(L)` 0 ... 327 °C), as in NASA CEA. Checked against Cantera with
+  the same data (800 random cases) and by the optimality conditions (|mu_i/RT - a_i*lambda| < 1e-11).
+- Amounts in mol or mol/s (`OUT` in the unit of `IN`), also as numbers with unit
+  (`IG:N2 = 3.76 mol`); `T` and `p` as variables, expressions or numbers with unit. The same species
+  twice under `IN` (two inlet streams) is summed.
+- The gas phase may vanish (stoichiometric H2/O2 below the boiling temperature at the given pressure
+  gives only `IG:H2O(L)` - the result of the Gibbs minimisation);
+- Species outside their data range are left out (amount 0): condensed ones as in NASA CEA with a hint
+  ⓘ suggesting the phase of the same composition (`IG:H2O(L)` at -10 °C -> `IG:H2O(cr)`), gases (e.g.
+  `IG:NO2`, data from 300 K) with a warning - harmless for a trace, wrong for a main product;
+  an element balance that the `OUT` species cannot close is reported at once ("Überschuss an O ...
+  e.g. IG:O2").
+- Each `OUT` amount is an ordinary quantity of the sheet: `T` may be unknown, e.g. an adiabatic
+  reformer with an energy balance `H_in = sum n_i*h_i(T_2)` - solved without start values; parameter
+  studies over `T`, `p` or inlet amounts work as usual.
+- Elements of `IN` that occur in no `OUT` species, amounts in kg, a missing `p`, a decimal comma,
+  `;` instead of `,` etc. are reported with the line; a variable in kg/s as amount gives a unit
+  warning ("Stoffmenge erwartet"). Messages name the statement: `EQUILIBRIUM (Zeile 5): IG:H2O = n_D`.
+- Dew point: a condensate amount `n_L = 0` holds for every temperature above the dew point - the
+  solver reports "Lösung nicht eindeutig" instead of an arbitrary T; prescribe a small amount
+  (`n_L = 1e-6*n_W`) to find the dew point.
 
 ### Humid Air (HumidAir)
 Output: `T`, `h`, `rh`, `w`, `p_w`, `rho_tot`, `rho_a`, `rho_w`, `T_dp`, `T_wb`
@@ -441,7 +689,8 @@ mPa·s, mm²/s, µm). Exponents may be written without `^` (`20 cm2`, `500 m3/h`
 (`eta = 89.2 %` is 0.892, also `rh=50 %` in function arguments). Prefixed units in a
 denominator stay prefixes (`kg/kWh`, `1/kPa`, `kg/MJ`), °C in a compound unit is a kelvin-sized
 difference (`2 °C/h`, `1/°C`, `W/(m²·°C)`), and `rpm` / `U/min` mean revolutions per minute
-(1/min, as in u = π·D·n). Assigning the same quantity twice (`x = 5`, later `x = 3`) is reported
+(1/min, as in u = π·D·n). Resistances may be written `ohm`, `Ω`, `Ohm`, `kΩ` (e.g. an area
+specific resistance `ASR = 0.5 Ω*cm²`). Assigning the same quantity twice (`x = 5`, later `x = 3`) is reported
 as a contradiction instead of silently using the last value. Unknown units are
 reported as an error instead of being silently ignored, and units in function
 arguments are checked against the expected dimension (`T=` temperature, `p=`
@@ -497,7 +746,7 @@ In the Settings dialog you can configure:
 ```bash
 python3 test_regressions.py       # parser, solver, unit system
 python3 test_unit_constraints.py  # unit propagation and dimension checks
-python3 test_berechnungen.py      # 59 problems, with and without units
+python3 test_berechnungen.py      # 82 problems, with and without units
 python3 test_optimierung.py       # MINIMIZE/MAXIMIZE against analytic/scipy references
 python3 test_gui.py               # headless GUI (briefly takes focus - don't type)
 ```
@@ -507,12 +756,32 @@ keywords, comments), the solver (root selection, contradiction detection, parame
 studies, tearing, determinism) and the unit system (SI conversion, start values,
 delta_K, offset conversions, radiation). `test_berechnungen.py` solves thermodynamics
 and heat-transfer problems both with and without units and compares them with
-independently computed reference values (CoolProp, analytical solutions).
+independently computed reference values (CoolProp, analytical solutions, literature values
+for heating values and fuel cell voltages).
 Each module also has a self-test: `python3 <module>.py`.
 
 ## License
 
-MIT License
+MIT License (see [LICENSE](LICENSE)) - except the files in `data/nasa/`, see below.
+
+### Data source: NASA thermodynamic database (`data/nasa/`)
+
+The property data of ideal gases and condensed species (`IG:`) are taken from the file
+`thermo.inp` of NASA CEA (<https://github.com/nasa/cea>, commit `2f79a64`, copied on
+2026-10-12, **unchanged**). They are licensed under the Apache License 2.0, see
+`data/nasa/LICENSE.txt` and `data/nasa/NOTICE.txt` (Copyright 2025, United States Government
+as represented by the Administrator of the National Aeronautics and Space Administration).
+Source: B. J. McBride, M. J. Zehe, S. Gordon, *NASA Glenn Coefficients for Calculating
+Thermodynamic Properties of Individual Species*, NASA TP-2002-211556 (2002).
+
+- `data/nasa/*` is excluded from the MIT license of this project; the rest of the code,
+  including the reader `ideal_gas.py`, is MIT.
+- Keep `LICENSE.txt` and `NOTICE.txt` together with `thermo.inp` - also in packages and
+  installers built from this repository.
+- The data are provided by NASA without warranty; this project checks them with tests against
+  reference values. Naming the source does not imply endorsement by NASA.
+- `ideal_gas.py` reads the file as it is (it skips species without temperature range and empty
+  ranges with Tmax ≤ Tmin) - the file itself is not modified.
 
 ## Contributions
 

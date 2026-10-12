@@ -20,7 +20,7 @@ from typing import List, Set, Tuple, Dict, Union, Optional
 # Einheiten-Modul (optional, falls nicht vorhanden wird ohne Einheiten gearbeitet)
 try:
     from units import (parse_value_with_unit, UnitValue, unit_value_strict, UnknownUnitError,
-                       check_unit_dimension, unit_affine, unit_number, unit_quantity)
+                       check_unit_dimension, unit_affine, unit_number, unit_quantity, ureg, normalize_unit)
     UNITS_AVAILABLE = True
 except ImportError:
     UNITS_AVAILABLE = False
@@ -42,12 +42,12 @@ MATH_FUNCTIONS = {
 # quantity(z, Einheit) = Größe aus dem Zahlenwert z (units.unit_number/unit_quantity)
 UNIT_VALUE_FUNCTIONS = {'value', 'quantity'}
 
-# Thermodynamik-Funktionen (CoolProp)
+# Thermodynamik-Funktionen (CoolProp; mit Präfix IG: die NASA-Datenbank, ideal_gas.py)
 THERMO_FUNCTIONS = {
     'enthalpy', 'entropy', 'density', 'volume', 'intenergy',
     'quality', 'temperature', 'pressure',
     'viscosity', 'conductivity', 'prandtl',
-    'cp', 'cv', 'soundspeed'
+    'cp', 'cv', 'soundspeed', 'gibbs', 'molarmass'
 }
 
 # Strahlungs-Funktionen (Schwarzkörper)
@@ -59,6 +59,10 @@ RADIATION_FUNCTIONS = {
 HUMID_AIR_FUNCTIONS = {
     'humidair'
 }
+
+# Chemisches Gleichgewicht: die Anweisung EQUILIBRIUM erzeugt je Austrittsstoff einen Aufruf
+# equilibrium(Stoff, Eintrittsstoffe, Austrittsstoffe, T, p, Mengen...) (equilibrium.py)
+EQUILIBRIUM_FUNCTIONS = {'equilibrium'}
 
 # Mapping von EES-Syntax zu Python
 FUNCTION_MAP = {
@@ -95,6 +99,29 @@ def mangle_keywords(text: str) -> str:
 def unmangle(text: str) -> str:
     """Macht mangle_keywords() rückgängig (für Anzeige von Namen und Gleichungen)."""
     return _MANGLED_PATTERN.sub(lambda m: m.group(1), text)
+
+
+# Anzeige der aus EQUILIBRIUM erzeugten Gleichungen: interne Form -> "EQUILIBRIUM (Zeile n): IG:B = var"
+# (zuletzt eingelesene Blätter; die interne Form bleibt die Gleichung für Einheiten, Prüfungen, ...)
+_EQUILIBRIUM_LABELS: Dict[str, str] = {}
+
+
+def readable(text: str) -> str:
+    """
+    Text für die Anzeige (Meldungen, Residuen, Warnungen): Schlüsselwörter zurück (_kw_lambda ->
+    lambda), aus EQUILIBRIUM erzeugte Gleichungen als Anweisung mit Zeile statt der internen Form
+    var = equilibrium('IG:B', 'IG:A|...', 'IG:B|...', T, p, ...).
+    """
+    if text and 'equilibrium(' in text:
+        for internal in sorted(_EQUILIBRIUM_LABELS, key=len, reverse=True):
+            if internal in text:
+                text = text.replace(internal, _EQUILIBRIUM_LABELS[internal])
+        # aufeinanderfolgende Gleichungen derselben Anweisung zusammenfassen:
+        # 'EQUILIBRIUM (Zeile 6): IG:N2 = a', 'EQUILIBRIUM (Zeile 6): IG:O2 = b' -> '...: IG:N2 = a, IG:O2 = b'
+        pattern = re.compile(r"'(EQUILIBRIUM \(Zeile \d+\)): ([^']*)'(?:, |; )'\1: ")
+        while pattern.search(text):
+            text = pattern.sub(lambda m: f"'{m.group(1)}: {m.group(2)}, ", text)
+    return unmangle(text)
 
 
 def display_name(name: str) -> str:
@@ -362,13 +389,25 @@ def _convert_arg_units(arg: str) -> str:
 
 
 def _split_call_args(args_str: str) -> List[str]:
-    """Teilt einen Argument-String an Kommas auf Klammertiefe 0."""
+    """
+    Teilt einen Argument-String an Kommas auf Klammertiefe 0 - nicht in Texten
+    ('IG:C8H18,isooctane'). Ein Text beginnt nur am Anfang eines Arguments; ein Apostroph
+    im Namen (IG:Cr2O3(I')) ist Teil des Namens.
+    """
     args = []
     current_arg = ""
     paren_depth = 0
+    quote = None
 
     for char in args_str:
-        if char == '(':
+        if quote:
+            current_arg += char
+            if char == quote:
+                quote = None
+        elif char in "'\"" and not current_arg.strip():
+            quote = char
+            current_arg += char
+        elif char == '(':
             paren_depth += 1
             current_arg += char
         elif char == ')':
@@ -402,10 +441,21 @@ def _convert_call_parts(func_name: str, args_str: str, keep_case: bool = False) 
     if len(args) < 1:
         return f"{func_name}({args_str})"
 
-    # Erstes Argument (Stoffname/Output-Eigenschaft) in Anführungszeichen setzen
+    # IG:-Stoffnamen mit Komma (IG:C8H18,isooctane) bilden ein Argument
+    if func_name.lower() in THERMO_FUNCTIONS:
+        try:
+            from ideal_gas import species_argument_count
+        except ImportError:
+            species_argument_count = None
+        if species_argument_count is not None:
+            count = species_argument_count(args)
+            args = [','.join(args[:count])] + args[count:]
+
+    # Erstes Argument (Stoffname/Output-Eigenschaft) in Anführungszeichen setzen; ein Apostroph
+    # im Namen (IG:Cr2O3(I')) als \x27 - "..." ist im Blatt ein Kommentar, kein Text
     first = args[0]
     if not (first.startswith("'") or first.startswith('"')):
-        first = f"'{first}'"
+        first = "'" + first.replace("'", "\\x27") + "'"
 
     # Restliche Argumente (key=value Paare) - konvertiere Einheiten zu SI
     rest_args = [_convert_arg_units(arg) for arg in args[1:]]
@@ -617,7 +667,7 @@ def extract_variables(equation: str) -> Set[str]:
         # Entferne nur func(...) Aufrufe, nicht alleinstehende func
         temp_eq = re.sub(rf'\b{func}\s*\(', '(', temp_eq, flags=re.IGNORECASE)
 
-    for func in HUMID_AIR_FUNCTIONS:
+    for func in HUMID_AIR_FUNCTIONS | EQUILIBRIUM_FUNCTIONS:
         # Entferne nur func(...) Aufrufe, nicht alleinstehende func
         temp_eq = re.sub(rf'\b{func}\s*\(', '(', temp_eq, flags=re.IGNORECASE)
 
@@ -720,7 +770,7 @@ def _split_expression_with_unit(right: str) -> Optional[Tuple[float, str]]:
     expr_part = ' '.join(tokens[:-1]).strip()
 
     # Einheit muss mit Buchstabe/°/µ/% (oder 1/ für Kehrwerte) beginnen und darf kein Operator-Rest sein
-    if not re.match(r'^(?:[a-zA-Z°µ%‰]|1/)', unit_part):
+    if not re.match(r'^(?:[a-zA-Z°µ%‰Ω\u2126]|1/)', unit_part):
         return None
     # Ausdruck muss mindestens eine Ziffer enthalten
     if not re.search(r'\d', expr_part):
@@ -752,7 +802,7 @@ class EquationSyntaxError(Exception):
 # (wie im Auswertungskontext des Solvers; Strahlungsfunktionen in beiden Schreibweisen)
 CALLABLE_NAMES = (
     (MATH_FUNCTIONS - {'pi', 'ln'}) | {'log', 'log10'} | THERMO_FUNCTIONS
-    | {'HumidAir', 'humidair'}
+    | {'HumidAir', 'humidair'} | EQUILIBRIUM_FUNCTIONS
     | {'Eb', 'eb', 'Blackbody', 'blackbody', 'Blackbody_cumulative', 'blackbody_cumulative',
        'Wien', 'wien', 'Stefan_Boltzmann', 'stefan_boltzmann'}
 )
@@ -762,7 +812,8 @@ def _python_to_display(text: str) -> str:
     """Python-Form einer Gleichung zurück in Eingabe-Schreibweise (für Meldungen)."""
     text = text.replace('**', '^')
     text = re.sub(r'\blog\(', 'ln(', text)
-    text = re.sub(r"'([A-Za-z0-9_()]+)'", r'\1', text)  # 'water' -> water
+    # 'water' -> water, 'IG:N2' -> IG:N2, 'IG:Cr2O3(I\x27)' -> IG:Cr2O3(I'), 'IG:CH4|IG:O2' -> IG:CH4|IG:O2
+    text = re.sub(r"'((?:[A-Za-z0-9_():+,.|-]|\\x27)+)'", lambda m: m.group(1).replace('\\x27', "'"), text)
     return unmangle(text)
 
 
@@ -777,6 +828,12 @@ def _excerpt(equation: str, offset: int) -> str:
         end += 1
     if equation[end:end + 1] == '(':
         end += 1
+    # Texte (Stoffnamen 'IG:C8H18,isooctane') nicht zerschneiden
+    for literal in re.finditer(r"'[^']*'|\"[^\"]*\"", equation):
+        if literal.start() < start < literal.end():
+            start = literal.start()
+        if literal.start() < end < literal.end():
+            end = literal.end()
     before = _python_to_display(equation[start:offset])
     after = _python_to_display(equation[offset:end])
     prefix = '…' if start > 0 else ''
@@ -799,6 +856,21 @@ def _known_fluid(name: str) -> bool:
     if name.lower() in FLUID_ALIASES or any(c in name for c in ':&['):
         return True  # Kurzname bzw. CoolProp-Spezialsyntax (INCOMP::, Gemische)
     return name.lower() in {f.lower() for f in get_available_fluids()}
+
+
+def _ideal_gas_species(fluid: str, where: str = ''):
+    """Spezies zu 'IG:N2' (NASA-Datenbank), None ohne Präfix IG:; unbekannt/mehrdeutig -> Fehler."""
+    try:
+        from ideal_gas import species_part, find_species
+    except ImportError:
+        return None
+    name = species_part(fluid)
+    if name is None:
+        return None
+    try:
+        return find_species(name)
+    except ValueError as exc:
+        raise EquationSyntaxError(f"{exc}{', ' + where if where else ''}") from None
 
 
 def _check_call_signature(node, func_name: str, text: str, offset: int) -> None:
@@ -848,6 +920,19 @@ def _check_call_signature(node, func_name: str, text: str, offset: int) -> None:
         from thermodynamics import INPUT_MAP as THERMO_INPUTS
         if n_args != 1 or first_text is None:
             raise EquationSyntaxError(f"{lower}(fluid, ...) braucht als erstes Argument den Stoff, {where}")
+        species = _ideal_gas_species(first_text, where)
+        if species is not None:
+            from ideal_gas import call_error
+            error = call_error(lower, species, keywords)
+            if error:
+                raise EquationSyntaxError(f"{error}, {where}")
+            return
+        if lower == 'molarmass':
+            if not _known_fluid(first_text):
+                raise EquationSyntaxError(f"Unbekanntes Fluid '{first_text}' (siehe Help > Fluid List), {where}")
+            if keywords:
+                raise EquationSyntaxError(f"molarmass(fluid) hat keine Zustandsgrößen (nur den Stoff), {where}")
+            return
         if not _known_fluid(first_text):
             humid = (" - feuchte Luft: HumidAir(Eigenschaft, T=..., rh=..., p_tot=...)"
                      if first_text.lower() in ('airh2o', 'humidair', 'feuchteluft', 'moistair') else "")
@@ -860,6 +945,13 @@ def _check_call_signature(node, func_name: str, text: str, offset: int) -> None:
         if len(keywords) != 2:
             raise EquationSyntaxError(
                 f"{lower}() braucht genau 2 Zustandsgrößen (z.B. T=..., p=...), gegeben {len(keywords)}, {where}")
+        return
+
+    if lower == 'equilibrium':
+        texts = [a for a in node.args[:3] if isinstance(a, ast_module().Constant) and isinstance(a.value, str)]
+        if n_args < 6 or len(texts) != 3 or keywords:
+            raise EquationSyntaxError(
+                f"equilibrium() wird aus der Anweisung EQUILIBRIUM erzeugt ({_EQUILIBRIUM_SYNTAX}), {where}")
         return
 
     if lower == 'humidair':
@@ -924,6 +1016,9 @@ def _check_equation_syntax(left: str, right: str) -> None:
             offset = min(len(text), max(0, (exc.offset or 1) - 1))
             hint = (" - Dezimalkomma? Dezimalzahlen mit Punkt schreiben (0.71 statt 0,71)"
                     if re.search(r'\d,\d', text) else "")
+            if not hint and re.search(r'[-+*/^(,=]\s*$', text):
+                # Zeile endet mit einem Operator: Fortsetzung geht nur in einer offenen Klammer
+                hint = " - eine Gleichung geht nur in einer offenen Klammer in der nächsten Zeile weiter: x = (a + b ⏎ + c)"
             raise EquationSyntaxError(
                 f"Syntaxfehler ({exc.msg}) bei: {_excerpt(text, offset)}{hint}") from None
 
@@ -1069,10 +1164,28 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
     unbekannte/unpassende Einheit) werden mit der Zeilennummer ergänzt.
     """
     position = [0]
+    # EQUILIBRIUM: die Zeilen der Anweisung werden Leerzeilen (Nummern bleiben), die erzeugten
+    # Gleichungen (eine je Austrittsstoff) kommen ans Ende; ihre Fehler nennen die Anweisungszeile
+    statements = parse_equilibria(text)
+    statement_line: Dict[int, int] = {}
+    if statements:
+        lines = text.split('\n')
+        blank = {j for statement in statements for j in statement.lines}
+        generated = []
+        for statement in statements:
+            for equation, (name, var) in zip(statement.equations(), statement.outputs):
+                statement_line[len(lines) + len(generated) + 1] = statement.line
+                generated.append(equation)
+                if len(_EQUILIBRIUM_LABELS) > 5000:
+                    _EQUILIBRIUM_LABELS.clear()
+                for form in {equation.strip(), mangle_keywords(equation).strip()}:
+                    _EQUILIBRIUM_LABELS[form] = statement.display(name, var)
+        text = '\n'.join('' if j in blank else line for j, line in enumerate(lines)) + '\n' + '\n'.join(generated)
     try:
         result = _parse_equations(text, parse_units, position)
     except (EquationSyntaxError, UnknownUnitError) as exc:
-        raise type(exc)(f"Zeile {position[0]}: {exc}") from None
+        line = statement_line.get(position[0], position[0])
+        raise type(exc)(f"Zeile {line}: {exc}") from None
     return _angle_function_forms(text, *result)
 
 
@@ -1277,11 +1390,14 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
             continue
 
         # Jede Zeile außer Kommentaren und Anweisungen ist eine Gleichung - eine Zeile ohne '='
-        # (Tippfehler im Schlüsselwort: REFERENZ R717 IIR, Ausdruck ohne '=') fiele sonst still weg
-        if '=' not in line:
+        # (Tippfehler im Schlüsselwort: REFERENZ R717 IIR, Ausdruck ohne '=') fiele sonst still weg;
+        # ebenso ein '=' nur in einem Aufruf (Fortsetzung '+ enthalpy(water, T=T_1, p=p_1)' ohne Klammer)
+        if len(_split_at_equals(line)) != 2:
+            continuation = (" - eine Gleichung geht nur in einer offenen Klammer in der nächsten Zeile "
+                            "weiter: x = (a + b ⏎ + c)" if line.startswith(_CONTINUES_BEFORE) else "")
             raise EquationSyntaxError(
-                f"'{unmangle(line)[:60]}' ist keine Gleichung (kein '=') - Text als "
-                f"Kommentar in {{...}} oder \"...\" setzen; Anweisungen: REFERENCE, MINIMIZE, MAXIMIZE")
+                f"'{unmangle(line)[:60]}' ist keine Gleichung (kein '='){continuation} - Text als "
+                f"Kommentar in {{...}} oder \"...\" setzen; Anweisungen: REFERENCE, MINIMIZE, MAXIMIZE, EQUILIBRIUM")
 
         # Prüfe auf Vektor-Zuweisung (z.B. T = 0:10:100 oder T = 0:10:100 °C)
         is_vec, var_name, vec_str, vec_unit = is_vector_assignment(line, parse_units=parse_units)
@@ -1567,6 +1683,245 @@ def start_values_edit(text: str, lines: List[str]) -> Tuple[int, int, str]:
 # dass die Zielgröße minimal bzw. maximal wird.
 # ---------------------------------------------------------------------------
 # Anweisung: Schlüsselwort und Name der Zielgröße (minimize = 3 ist eine Variable)
+# Anweisung: EQUILIBRIUM allein oder mit folgendem Namen (eine Variable equilibrium = 3 bleibt
+# erlaubt, wie bei MINIMIZE); IN/OUT sind nur Schlüsselwörter, wenn ein Eintrag "Stoff = ..." bzw. ein
+# Stoff IG: folgt (Variablen in, out bleiben möglich: in = 3, IG:N2 = in, auch direkt vor OUT)
+_EQUILIBRIUM_PATTERN = re.compile(r'^\s*EQUILIBRIUM\s*(?:$|\s(?=\s*[A-Za-z]))', re.IGNORECASE)
+_EQUILIBRIUM_SECTION = re.compile(r'(?:^|\s)(IN|OUT)\s+(?=IG:|[^\s=]+\s*=)', re.IGNORECASE)
+_EQUILIBRIUM_PART_LINE = re.compile(r'(IN|OUT)\s+(?:IG:|[^\s=]+\s*=)', re.IGNORECASE)
+_EQUILIBRIUM_SYNTAX = ("EQUILIBRIUM T=..., p=...  IN IG:Stoff = Menge, ...  OUT IG:Stoff = Variable, ... "
+                       "(IN und OUT auch in eigenen Zeilen, nach ',' weiter in der nächsten Zeile)")
+
+
+@dataclass
+class EquilibriumStatement:
+    """Eine Anweisung EQUILIBRIUM (Gibbs-Minimierung, equilibrium.py)."""
+    line: int                          # Zeilennummer der Anweisung
+    lines: List[int]                   # alle Zeilen (Indizes ab 0)
+    T: str                             # Ausdruck bzw. SI-Zahl
+    p: str
+    inputs: List[Tuple[str, str]]      # (Stoff 'IG:CH4', Menge als Ausdruck bzw. SI-Zahl)
+    outputs: List[Tuple[str, str]]     # (Stoff, Name der Variable)
+
+    def display(self, name: str, var: str) -> str:
+        """Anzeige der erzeugten Gleichung in Meldungen und Residuen."""
+        return f"EQUILIBRIUM (Zeile {self.line}): {name} = {unmangle(var)}"
+
+    def equations(self) -> List[str]:
+        """Eine Gleichung je Austrittsstoff (Eingabe-Schreibweise, Stoffnamen als Text)."""
+        def text(value):
+            return "'" + value.replace("'", "\\x27") + "'"
+        in_list = text('|'.join(name for name, _ in self.inputs))
+        out_list = text('|'.join(name for name, _ in self.outputs))
+        amounts = ', '.join(amount for _, amount in self.inputs)
+        return [f"{var} = equilibrium({text(name)}, {in_list}, {out_list}, {self.T}, {self.p}, {amounts})"
+                for name, var in self.outputs]
+
+
+def _equilibrium_line_groups(lines: List[str]) -> List[Tuple[int, List[int]]]:
+    """
+    (erste Zeile, alle Zeilen) jeder Anweisung EQUILIBRIUM: dazu gehören Folgezeilen, die mit
+    IN oder OUT beginnen, und Zeilen nach einem ',' am Zeilenende.
+    """
+    groups = []
+    i = 0
+    while i < len(lines):
+        if _EQUILIBRIUM_PATTERN.match(lines[i]):
+            used = [i]
+            while True:
+                # Leer- und Kommentarzeilen innerhalb der Anweisung überspringen
+                j = used[-1] + 1
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                if j >= len(lines):
+                    break
+                last = next(lines[k] for k in reversed(used) if lines[k].strip())
+                if last.rstrip().endswith(',') or _EQUILIBRIUM_PART_LINE.match(lines[j].strip()):
+                    used.extend(range(used[-1] + 1, j + 1))
+                else:
+                    break
+            groups.append((i, used))
+            i = used[-1] + 1
+        else:
+            i += 1
+    return groups
+
+
+def _split_items(text: str) -> List[str]:
+    """
+    Teilt 'IG:CH4 = a, IG:C8H18,isooctane = x' an Kommas: ein Teil ohne '=' ist der Anfang des
+    Stoffnamens des nächsten Eintrags (Namen mit Komma).
+    """
+    items: List[str] = []
+    pending: List[str] = []
+    for piece in _split_call_args(text):
+        if (not pending and items and re.match(r'\d', piece)
+                and re.search(r'=\s*-?\d+\s*$', items[-1])):
+            raise EquationSyntaxError(
+                f"Dezimalkomma? Dezimalzahlen mit Punkt schreiben (bei: {items[-1].strip()},{piece.strip()})")
+        if '=' in piece:
+            items.append(','.join(pending + [piece]))
+            pending = []
+        else:
+            pending.append(piece)
+    if pending:
+        items.append(','.join(pending))
+    return items
+
+
+def _statement_value(value: str, expected: Optional[str], what: str, line_no: int) -> str:
+    """Wert einer Anweisung: Zahl mit Einheit -> SI-Zahl (Dimension geprüft), sonst der Ausdruck."""
+    value = value.strip()
+    if not value:
+        raise EquationSyntaxError(f"Zeile {line_no}: EQUILIBRIUM: {what} fehlt - {_EQUILIBRIUM_SYNTAX}")
+    if re.match(r'^-?[\d.]+\s*:\s*-?[\d.]+', value):
+        raise EquationSyntaxError(
+            f"Zeile {line_no}: EQUILIBRIUM: {what} = {value} - eine Parameterstudie als eigene Zeile "
+            f"vorgeben (z.B. T = 20:10:80 °C) und hier die Variable verwenden (T=T)")
+    if UNITS_AVAILABLE:
+        try:
+            magnitude, unit_str = parse_value_with_unit(value)
+        except ValueError:
+            magnitude, unit_str = None, ''
+        if unit_str:
+            try:
+                unit_value = unit_value_strict(magnitude, unit_str, value)
+                if expected == 'amount':
+                    dims = dict(ureg.Quantity(1.0, normalize_unit(unit_str)).dimensionality)
+                    if dims.get('[substance]') != 1:
+                        raise EquationSyntaxError(
+                            f"{what}: '{value}' ist keine Stoffmenge (mol, mol/s, kmol/h, ...)")
+                elif expected:
+                    check_unit_dimension(unit_value, expected, value)
+            except (EquationSyntaxError, UnknownUnitError) as exc:
+                raise type(exc)(f"Zeile {line_no}: EQUILIBRIUM: {exc}") from None
+            # als quantity(): die Einheiten-Ableitung sieht die Einheit (Ergebnis in mol, T in K)
+            return f"quantity({magnitude!r}, {unit_str!r})"
+    # Ausdruck: dieselbe Syntaxprüfung wie für jede Gleichung, die Meldung nennt aber die Angabe in
+    # der Anweisung (nicht den erzeugten Aufruf)
+    try:
+        _check_equation_syntax('x', tokenize_equation(mangle_keywords(value)))
+    except EquationSyntaxError as exc:
+        raise EquationSyntaxError(f"Zeile {line_no}: EQUILIBRIUM: {what} = {value}: {exc}") from None
+    return value
+
+
+def parse_equilibria(text: str) -> List[EquilibriumStatement]:
+    """
+    Liest alle Anweisungen EQUILIBRIUM T=..., p=... IN Stoff = Menge, ... OUT Stoff = Variable, ...
+    Stoffe mit Präfix IG: (NASA-Datenbank); Mengen als Variable, Ausdruck oder Zahl mit Einheit
+    (mol, mol/s, ...); T und p ebenso (Zahl mit Einheit -> SI). Fehler mit Zeilennummer.
+    """
+    lines = remove_comments(text).split('\n')
+    statements = []
+    for start, used in _equilibrium_line_groups(lines):
+        line_no = start + 1
+        joined = ' '.join(lines[j].strip() for j in used)
+        if ';' in joined:
+            raise EquationSyntaxError(
+                f"Zeile {line_no}: EQUILIBRIUM: Angaben mit ',' trennen (nicht ';') - {_EQUILIBRIUM_SYNTAX}")
+        # Zeilen, die nur wegen ',' am Ende der Zeile davor zur Anweisung gehören (für die Meldung)
+        attached = {}
+        for k, j in enumerate(used[1:], 1):
+            before = [lines[i] for i in used[:k] if lines[i].strip()]
+            if (lines[j].strip() and before and before[-1].rstrip().endswith(',')
+                    and not _EQUILIBRIUM_PART_LINE.match(lines[j].strip())):
+                attached[lines[j].strip().partition('=')[0].strip()] = j + 1
+        body = _EQUILIBRIUM_PATTERN.sub('', joined, count=1)
+        marks = list(_EQUILIBRIUM_SECTION.finditer(' ' + body + ' '))
+        names = [m.group(1).upper() for m in marks]
+        if names != ['IN', 'OUT']:
+            raise EquationSyntaxError(
+                f"Zeile {line_no}: EQUILIBRIUM braucht genau einen Teil IN und danach einen Teil OUT - "
+                f"{_EQUILIBRIUM_SYNTAX}")
+        padded = ' ' + body + ' '
+        header = padded[:marks[0].start()]
+        in_text = padded[marks[0].end():marks[1].start()]
+        out_text = padded[marks[1].end():]
+        state = {}
+        for item in _split_call_args(header.strip()):
+            key, _, value = item.partition('=')
+            key = key.strip().lower()
+            if key not in ('t', 'p') or not value.strip() or key in state:
+                raise EquationSyntaxError(
+                    f"Zeile {line_no}: EQUILIBRIUM: '{item.strip()}' - erwartet T=... und p=... ({_EQUILIBRIUM_SYNTAX})")
+            state[key] = _statement_value(value, 'K' if key == 't' else 'Pa',
+                                          'T' if key == 't' else 'p', line_no)
+        if set(state) != {'t', 'p'}:
+            raise EquationSyntaxError(
+                f"Zeile {line_no}: EQUILIBRIUM: T=... und p=... angeben (Druck ohne stilles 1 bar) - "
+                f"{_EQUILIBRIUM_SYNTAX}")
+
+        def species_list(part, kind):
+            result, seen = [], set()
+            try:
+                items = _split_items(part.strip())
+            except EquationSyntaxError as exc:
+                raise EquationSyntaxError(f"Zeile {line_no}: EQUILIBRIUM {kind}: {exc}") from None
+            if not items:
+                raise EquationSyntaxError(f"Zeile {line_no}: EQUILIBRIUM: Teil {kind} ist leer - {_EQUILIBRIUM_SYNTAX}")
+            for item in items:
+                name, sep, value = item.partition('=')
+                name = name.strip()
+                if not sep or re.search(r'\s', name):
+                    raise EquationSyntaxError(
+                        f"Zeile {line_no}: EQUILIBRIUM {kind}: '{item.strip()}' - erwartet Stoff = "
+                        f"{'Menge' if kind == 'IN' else 'Variable'}")
+                try:
+                    species = _ideal_gas_species(name)
+                except EquationSyntaxError as exc:
+                    raise EquationSyntaxError(f"Zeile {line_no}: EQUILIBRIUM {kind}: {exc}") from None
+                if species is None:
+                    hint = (f" - oder: Zeile {attached[name]} gehört wegen ',' am Ende der Zeile davor zur "
+                            f"Anweisung (Komma entfernen)" if name in attached else "")
+                    raise EquationSyntaxError(
+                        f"Zeile {line_no}: EQUILIBRIUM {kind}: '{name}' - Stoffe mit Präfix IG: angeben "
+                        f"(NASA-Datenbank, z.B. IG:CH4){hint}")
+                label = f"IG:{species.name}"
+                if label in seen and kind == 'IN':
+                    # derselbe Stoff in zwei Eintrittsströmen (Reformat + Zusatzdampf): Mengen addieren
+                    position = [n for n, _ in result].index(label)
+                    amount = _statement_value(value, 'amount', f"Menge von {label}", line_no)
+                    result[position] = (label, f"({result[position][1]}) + ({amount})")
+                    continue
+                if label in seen:
+                    raise EquationSyntaxError(f"Zeile {line_no}: EQUILIBRIUM {kind}: {label} steht doppelt")
+                seen.add(label)
+                if kind == 'OUT':
+                    var = mangle_keywords(value.strip())
+                    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', var):
+                        raise EquationSyntaxError(
+                            f"Zeile {line_no}: EQUILIBRIUM OUT: '{value.strip()}' - rechts steht der Name der "
+                            f"Variable für die Menge im Gleichgewicht")
+                    result.append((label, var))
+                else:
+                    result.append((label, _statement_value(value, 'amount', f"Menge von {label}", line_no)))
+            return result
+
+        inputs = species_list(in_text, 'IN')
+        outputs = species_list(out_text, 'OUT')
+        out_vars = [v for _, v in outputs]
+        twice = sorted({v for v in out_vars if out_vars.count(v) > 1})
+        if twice:
+            raise EquationSyntaxError(
+                f"Zeile {line_no}: EQUILIBRIUM OUT: {', '.join(unmangle(v) for v in twice)} steht mehrfach")
+        try:
+            from ideal_gas import find_species
+            if all(find_species(n[3:]).condensed for n, _ in outputs):
+                raise EquationSyntaxError(
+                    f"Zeile {line_no}: EQUILIBRIUM OUT: mindestens einen gasförmigen Stoff angeben")
+            out_elements = {e for n, _ in outputs for e, _ in find_species(n[3:]).elements}
+            missing = sorted({e for n, _ in inputs for e, _ in find_species(n[3:]).elements} - out_elements)
+            if missing:
+                raise EquationSyntaxError(
+                    f"Zeile {line_no}: EQUILIBRIUM: Element {', '.join(missing)} der Eintrittsstoffe kommt "
+                    f"in keinem Stoff unter OUT vor - einen Stoff mit {', '.join(missing)} angeben")
+        except ImportError:
+            pass
+        statements.append(EquilibriumStatement(line_no, used, state['t'], state['p'], inputs, outputs))
+    return statements
+
+
 _OPTIMIZE_PATTERN = re.compile(r'^\s*(MINIMIZE|MAXIMIZE)\s+[A-Za-z_]', re.IGNORECASE)
 _OPTIMIZE_SYNTAX = "MAXIMIZE ziel VARY x = a .. b Einheit (mehrere Größen durch Komma getrennt)"
 
@@ -1692,6 +2047,10 @@ def parse_reference_states(text: str) -> Dict[str, str]:
         if len(parts) != 3:
             raise EquationSyntaxError(f"Zeile {line_no}: Bezugszustand so angeben: {_REFERENCE_SYNTAX}")
         fluid, reference = parts[1].strip("'\""), parts[2]
+        if _ideal_gas_species(fluid) is not None:
+            raise EquationSyntaxError(
+                f"Zeile {line_no}: REFERENCE gilt nicht für IG:-Stoffe - h enthält die "
+                f"Bildungsenthalpie (h = Δh_f bei 25 °C), s ist die absolute Entropie (NASA-Daten)")
         if not _known_fluid(fluid):
             raise EquationSyntaxError(f"Zeile {line_no}: Unbekanntes Fluid '{fluid}' (Help > Fluid List)")
         try:

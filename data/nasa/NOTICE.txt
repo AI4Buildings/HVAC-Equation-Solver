@@ -1,0 +1,14 @@
+CEA – Chemical Equilibrium with Applications
+
+Copyright (c) 2025, United States Government as represented by the Administrator of the National Aeronautics and Space Administration
+Licensed under the Apache License, Version 2.0.
+
+## Data
+
+### NASA CEA thermodynamic and transport databases
+- Paths: data/thermo.inp, data/trans.inp, data/thermo.lib, data/trans.lib
+- Source/References: NASA TP-2002-211556: https://ntrs.nasa.gov/api/citations/20020085330/downloads/20020085330.pdf
+
+### NASA RP-1311 example inputs/outputs
+- Paths: samples/*.inp, samples/*.out, source/bind/python/cea/samples/*.out
+- Source/References: NASA RP-1311 Part 2: https://ntrs.nasa.gov/api/citations/19960044559/downloads/19960044559.pdf

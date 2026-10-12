@@ -2,3 +2,5 @@
 *.bat text eol=crlf
 *.sh text eol=lf
 *.command text eol=lf
+# NASA-Stoffdaten byte-genau wie im Original (thermo.inp mit CRLF) - keine Zeilenende-Umwandlung
+data/nasa/** -text

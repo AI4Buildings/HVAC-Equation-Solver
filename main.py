@@ -20,7 +20,7 @@ from typing import List, Optional
 
 import customtkinter as ctk
 
-from parser import (parse_equations, validate_system, display_name, unmangle,
+from parser import (parse_equations, validate_system, display_name, unmangle, readable,
                     parse_start_values, parse_start_value, start_value_entries, start_values_edit,
                     parse_optimization, start_value_units, parse_reference_states, remove_comments,
                     wavelength_literals, declared_angle_exponents)
@@ -306,6 +306,8 @@ Properties (results in SI):
   conductivity(...)  Thermal conductivity [W/(m K)]
   prandtl(...)       Prandtl number [-]
   soundspeed(...)    Speed of sound [m/s]
+  gibbs(...)         Gibbs free energy g = h - T*s [J/kg]
+  molarmass(fluid)   Molar mass [kg/mol], shown in kg/kmol
 
 State properties (2 required; SI or with unit):
   T = Temperature [K]        e.g. T=373.15 K or T=100 °C
@@ -331,6 +333,67 @@ Applies to the whole sheet and all names of the fluid (R717 =
 ammonia). Differences (q_0, w_t, EER), T, p, x, rho stay the same.
 Standard is already IIR for R134a, R32, R410A, CO2, propane, ...;
 not for ammonia (h' at 0 °C = 345.7 kJ/kg) and water (IAPWS).
+
+IDEAL GASES AND CONDENSED SPECIES (NASA data, prefix IG:):
+----------------------------------------------------------
+Same functions with the species name after IG: (or IG::), e.g.
+IG:N2, IG:O2, IG:CO2, IG:H2O, IG:CH4, IG:H2, IG:Air, IG:H2O(L)
+(liquid), IG:H2O(cr) (ice), IG:C(gr) (graphite), IG:C8H18,isooctane
+- about 2000 species, see Help > Fluid List. Data: NASA CEA
+thermo.inp (McBride, Zehe, Gordon, NASA TP-2002-211556).
+Per kg in SI as with CoolProp; h includes the enthalpy of
+formation (h = h_f at 25 °C), s is the absolute entropy - so
+combustion and fuel cell balances need no reference point.
+Gases (ideal): T alone gives h, u, cp, cv, soundspeed (p allowed,
+no effect); entropy, gibbs, volume, density need T and p (no
+silent 1 bar): s = s°(T) - R*ln(p/1 bar). temperature from h, u
+or (s, p); pressure from (T, s) or (T, rho).
+Condensed (L), (cr): enthalpy, entropy, gibbs, cp from T, without
+pressure effect; no density (use CoolProp without IG:).
+Examples:
+  h = enthalpy(IG:N2, T=20 °C)
+  s = entropy(IG:N2, T=20 °C, p=10 bar)
+  g = gibbs(IG:H2O(L), T=25 °C, p=1 bar)
+  M = molarmass(IG:CH4)
+  M_w = molarmass(water)                     {CoolProp fluid}
+Molar values: times molarmass, e.g. h_m = h*M in kJ/mol;
+cell voltage E_0 = -Delta_G/(2*F) with F = 96485.33212 C/mol.
+Electrical units: V, A, A/cm^2, C/mol, ohm (also Ω, Ohm, kΩ),
+e.g. ASR = 0.5 ohm*cm^2 (area specific resistance).
+T outside the data range is an error (most gases from 200 K or
+300 K, IG:Air 300 ... 6000 K). Names: exact, otherwise not
+case-sensitive if unique (IG:co is ambiguous: CO or Co).
+REFERENCE does not apply to IG: species.
+
+CHEMICAL EQUILIBRIUM - EQUILIBRIUM (Gibbs minimisation):
+--------------------------------------------------------
+Own statement; IN and OUT may stand in their own lines, after ','
+a list goes on in the next line:
+  EQUILIBRIUM T=T_3, p=p_3
+    IN  IG:CH4 = n_CH4_2, IG:O2 = n_O2_2, IG:N2 = n_N2_2
+    OUT IG:CH4 = n_CH4_3, IG:H2O = n_H2O_3, IG:CO = n_CO_3,
+        IG:CO2 = n_CO2_3, IG:H2 = n_H2_3, IG:N2 = n_N2_3
+OUT gets the composition with minimum Gibbs energy at T and p
+under the element balances of IN - no reactions to choose, all
+amounts >= 0 (unique minimum), traces down to 1e-30 resolved.
+Amounts in mol or mol/s (OUT in the unit of IN), also as number
+with unit (IG:N2 = 3.76 mol). T and p as variable or with unit.
+T may be unknown, e.g. an adiabatic reformer: write the energy
+balance with enthalpy(IG:..., T=T_3) - no start values needed.
+Condensed species (IG:C(gr) soot, IG:H2O(L) water) appear only
+if stable and only inside their data range (H2O(cr) up to 0 °C,
+H2O(L) 0...327 °C), as in NASA CEA. Gases outside their range
+(IG:NO2 from 300 K) are left out with a warning - fine for a
+trace, wrong for a main product. Ideal gases from the NASA
+data (p° = 1 bar). Method: element potentials as NASA CEA
+(Gordon/McBride, RP-1311). Comments and blank lines may stand
+inside the statement; separate entries with ','. Messages name
+the statement: EQUILIBRIUM (Zeile 5): IG:H2O = n_D. The same
+species twice under IN (two streams) is summed. The gas phase
+may vanish (H2 + O2 below the boiling temperature at p: only
+H2O(L)).
+Dew point: amount of condensate n_L = 0 holds for every T above
+it (not unique) - give a small amount (n_L = 1e-6*n_W) instead.
 
 HUMID AIR FUNCTIONS:
 --------------------
@@ -532,7 +595,31 @@ def fluid_help_text() -> str:
     columns = 3
     for i in range(0, len(fluids), columns):
         lines.append("  " + "".join(f"{f:<{width}}" for f in fluids[i:i + columns]).rstrip())
+    lines += _ideal_gas_help_lines()
     return "\n".join(lines) + "\n"
+
+
+def _ideal_gas_help_lines() -> list:
+    """Spezies der NASA-Datenbank (Präfix IG:) mit Datenbereich, Quelle und Lizenz."""
+    try:
+        import ideal_gas
+        species = list(ideal_gas.database().values())
+    except (ImportError, ValueError):
+        return []
+    lines = ["", "", "=== IDEAL GASES AND CONDENSED SPECIES (prefix IG:) ===", "",
+             "Usage: enthalpy(IG:N2, T=20 °C), entropy(IG:N2, T=20 °C, p=10 bar)",
+             "Names as listed (not case-sensitive if unique). Data range in K;",
+             "(L) liquid, (cr) crystalline, (a), (b), (I) ... solid phases.",
+             "Source: NASA CEA, thermo.inp (github.com/nasa/cea, commit 2f79a64),",
+             "Apache License 2.0 - see data/nasa/LICENSE.txt and NOTICE.txt.",
+             "McBride, Zehe, Gordon: NASA TP-2002-211556 (2002)."]
+    for title, group in (("GASES", [sp for sp in species if not sp.condensed]),
+                         ("CONDENSED SPECIES", [sp for sp in species if sp.condensed])):
+        lines += ["", f"{title} ({len(group)}):"]
+        cells = [f"{sp.name:<17}{sp.range_text().replace(' ... ', '-')}" for sp in group]
+        for i in range(0, len(cells), 2):
+            lines.append("  " + "".join(f"{c:<36}" for c in cells[i:i + 2]).rstrip())
+    return lines
 
 
 def export_to_system_clipboard(text: str) -> bool:
@@ -1140,7 +1227,7 @@ class EquationSolverApp(ctk.CTk):
         res_color = self._residual_color(self._relative_residual(parsed, residual))
 
         # Equation (truncated if too long; _kw_lambda -> lambda)
-        equation = unmangle(equation)
+        equation = readable(equation)
         eq_display = equation if len(equation) < 50 else equation[:47] + "..."
         eq_label = ctk.CTkLabel(
             row_frame, text=eq_display,
@@ -1202,7 +1289,7 @@ class EquationSolverApp(ctk.CTk):
         # Gleichungen mit Einheiten-Info (je Gleichung zwei Zeilen, umbrechend)
         for eq, unit in warning.units.items():
             ctk.CTkLabel(
-                warning_frame, text=f"• {unmangle(eq)}",
+                warning_frame, text=f"• {readable(eq)}",
                 font=ctk.CTkFont(size=11),
                 text_color=COLORS["text"],
                 anchor="w", justify="left", wraplength=520
@@ -1265,7 +1352,7 @@ class EquationSolverApp(ctk.CTk):
             self.residuals_sections.append(content.master)
             for i, hint in enumerate(analysis.hints):
                 ctk.CTkLabel(
-                    content, text=f"• {hint}",
+                    content, text=f"• {readable(hint)}",
                     font=ctk.CTkFont(size=11),
                     text_color=COLORS["text"],
                     anchor="w", justify="left", wraplength=560
@@ -1438,7 +1525,7 @@ class EquationSolverApp(ctk.CTk):
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="Function Reference", command=self.show_function_help)
         if THERMO_AVAILABLE:
-            help_menu.add_command(label="Fluid List (CoolProp)", command=self.show_fluid_help)
+            help_menu.add_command(label="Fluid List (CoolProp, IG:)", command=self.show_fluid_help)
 
     def _setup_bindings(self):
         """Richtet Keyboard-Shortcuts ein."""
@@ -1671,6 +1758,9 @@ class EquationSolverApp(ctk.CTk):
                 set_reference_states(parse_reference_states(equations_text))
             # Parse Gleichungen mit Einheiten
             equations, variables, initial_values, sweep_vars, original_equations, unit_values = parse_equations(equations_text, parse_units=True)
+            # Verwendet das Blatt Einheiten? (vor der Anzeige - die trägt berechnete Größen mit
+            # Einheit in unit_values ein)
+            sheet_has_units = any(uv.original_unit for uv in unit_values.values())
 
             # Startwerte stehen im Blatt (Block {$Startwerte ... $}, von
             # Solve > Initial Values geschrieben) - der Text ist die einzige Quelle
@@ -1876,18 +1966,24 @@ class EquationSolverApp(ctk.CTk):
                     # WICHTIG: Auch leere Einheiten ('') bedeuten "dimensionslos" und müssen enthalten sein!
                     known_units = {var: uv.calc_unit for var, uv in self.current_unit_values.items()
                                    if uv.calc_unit is not None}
-                    # Füge Konstanten ohne Einheit als dimensionslos hinzu
-                    for var in self._dimensionless_constants(constants, sweep_vars):
-                        if var not in known_units:
-                            known_units[var] = ''
+                    # Konstanten ohne Einheit gelten als dimensionslos - nur in Blättern mit
+                    # Einheiten (in einem reinen Zahlen-Blatt kann m = 2 auch kg bedeuten)
+                    if sheet_has_units:
+                        for var in self._dimensionless_constants(constants, sweep_vars):
+                            if var not in known_units:
+                                known_units[var] = ''
                     unit_warnings = check_all_unit_consistency(solution, original_equations, known_units)
+                    if not sheet_has_units:
+                        # ohne Einheiten im Blatt ist "Einheit unbekannt" kein Befund
+                        unit_warnings = [w for w in unit_warnings if w.variable != 'Unbekannte Einheiten']
                     if unit_warnings:
                         analysis.unit_warnings = unit_warnings
 
             # Generische Diagnose: Struktur/Numerik (bei Fehler) + Namens-Hinweise
             diagnosis_errors = []
             if sweep_vars and analysis is not None:
-                analysis.hints = temperature_hints + self._single_phase_quality_hints(original_equations, solution)
+                analysis.hints = (temperature_hints + self._single_phase_quality_hints(original_equations, solution)
+                                  + self._equilibrium_range_hints(original_equations, solution))
             if DIAGNOSTICS_AVAILABLE and not sweep_vars:
                 try:
                     diagnosis_errors, hints = diagnose(
@@ -1895,7 +1991,8 @@ class EquationSolverApp(ctk.CTk):
                         equations_text, solution if not success else None)
                     if analysis is not None:
                         analysis.hints = (temperature_hints + hints
-                                          + self._single_phase_quality_hints(original_equations, solution))
+                                          + self._single_phase_quality_hints(original_equations, solution)
+                                          + self._equilibrium_range_hints(original_equations, solution))
                 except Exception:
                     diagnosis_errors = []
 
@@ -1920,7 +2017,7 @@ class EquationSolverApp(ctk.CTk):
                     self.status_label.configure(text="Optimum found" if goals else "Solution found")
                     if goals:
                         # Ergebnis der Optimierung (Minimum/Maximum, Grenzen) statt der Zählung
-                        self.info_label.configure(text=solve_msg, text_color=COLORS["text"])
+                        self.info_label.configure(text=readable(solve_msg), text_color=COLORS["text"])
                     # Residuals Tab aktualisieren
                     if analysis:
                         self._update_residuals_tab(analysis)
@@ -1938,9 +2035,11 @@ class EquationSolverApp(ctk.CTk):
                 # _show_results überschreibt Status- und Info-Zeile, sonst wäre
                 # z.B. "Widersprüchliches System: ..." nie sichtbar
                 is_contradiction = "widersprüch" in (solve_msg or "").lower()
-                # Nicht-Widerspruch: generische Diagnose (unterbestimmter Teil bzw.
+                # Abhängige Gleichungen (auch bei Teillösung) nennt die Solver-Meldung selbst
+                is_non_unique = (solve_msg or "").startswith("Lösung nicht eindeutig")
+                # Sonst: generische Diagnose (unterbestimmter Teil bzw.
                 # numerisch ungelöste Unbekannte) statt "Unvollständig: n Gleichungen ..."
-                if not is_contradiction and diagnosis_errors and not goals:
+                if not is_contradiction and not is_non_unique and diagnosis_errors and not goals:
                     timed_out = (solve_msg or "").startswith("Zeitlimit")
                     solve_msg = " ".join(diagnosis_errors)
                     # Die konkrete Ursache zuerst: Fehlermeldung der Auswertung (Stoffwert-
@@ -2025,6 +2124,62 @@ class EquationSolverApp(ctk.CTk):
                     hints.append(f"'{unmangle(original or parsed)}': quality(...) = -1 - der Zustand liegt "
                                  f"nicht im Nassdampfgebiet (unterkühlt, überhitzt oder überkritisch)")
                     break
+        return hints
+
+    @staticmethod
+    def _equilibrium_range_hints(original_equations, solution) -> List[str]:
+        """
+        EQUILIBRIUM: Austrittsstoffe außerhalb ihres Datenbereichs werden ausgelassen (Menge 0) - mit der
+        Lösung (alle Punkte einer Parameterstudie) geprüft. Kondensierte Stoffe (wie NASA CEA): Hinweis mit
+        Stoffen derselben Zusammensetzung für diese Temperatur (H2O(L) bei -10 °C -> IG:H2O(cr)), sonst
+        bliebe z.B. übersättigter Dampf still stehen. Gase (NO2 erst ab 300 K): Warnhinweis - das Gas
+        existiert dort, nur die Daten fehlen; als Spur unbedenklich, als Hauptprodukt falsch.
+        """
+        if not solution:
+            return []
+        try:
+            import ast
+            from parser import _iter_call_spans, readable
+            from solver import _get_eval_context
+            from equilibrium import excluded_species, SEPARATOR
+            context = _get_eval_context()
+        except Exception:
+            return []
+        hints, seen = [], set()
+        for parsed, original in original_equations.items():
+            for start, _, close, _ in _iter_call_spans(parsed, {'equilibrium'}):
+                try:
+                    # nur gerechnete Anweisungen (Ergebnis vorhanden; bei einem Fehler nennt die Meldung
+                    # die Ursache)
+                    target = re.match(r'\((\w+)\) - \(', parsed)
+                    if target is None or not np.all(np.isfinite(np.asarray(solution.get(target.group(1), np.nan),
+                                                                            dtype=float))):
+                        continue
+                    call = ast.parse(parsed[start:close + 1], mode='eval').body
+                    in_list, out_list = call.args[1].value, call.args[2].value
+                    T = eval(ast.unparse(call.args[3]), {"__builtins__": {}}, {**context, **solution})
+                    excluded = excluded_species(out_list.split(SEPARATOR), T, in_list.split(SEPARATOR))
+                except Exception:
+                    continue
+                outs = set(out_list.split(SEPARATOR))
+                for name, condensed, lo, hi, t_lo, t_hi, alternatives in excluded:
+                    key = (out_list, name)
+                    if key in seen or outs & set(alternatives):
+                        continue        # die andere Phase (Eis/Wasser) steht schon unter OUT
+                    seen.add(key)
+                    at = (f"T = {t_lo:.6g} K ({t_lo - 273.15:.6g} °C)" if t_lo == t_hi else
+                          f"T = {t_lo:.6g} ... {t_hi:.6g} K ({t_lo - 273.15:.6g} ... {t_hi - 273.15:.6g} °C)")
+                    other = (f" - für diese Temperatur {', '.join(alternatives)} unter OUT angeben"
+                             if alternatives else "")
+                    statement = readable(f"'{original or parsed}'").split(':')[0].strip("'")
+                    if condensed:
+                        hints.append(f"{statement}: {name} bei {at} nicht berücksichtigt - außerhalb seines "
+                                     f"Datenbereichs {lo:.6g} ... {hi:.6g} K (Menge 0, wie NASA CEA){other}")
+                    else:
+                        hints.append(f"Achtung - {statement}: Gas {name} bei {at} nicht berücksichtigt "
+                                     f"(Menge 0) - Daten nur für {lo:.6g} ... {hi:.6g} K. Nur für eine Spur "
+                                     f"unbedenklich; ist {name} ein Hauptprodukt, ist das Ergebnis falsch "
+                                     f"(T im Datenbereich wählen)")
         return hints
 
     @staticmethod
@@ -2499,7 +2654,7 @@ class EquationSolverApp(ctk.CTk):
     def _show_error(self, message: str, status_text: str = "● ERROR",
                     status_color: Optional[str] = None):
         """Zeigt eine Fehlermeldung im Results Tab an (Info-Zeile, umbrechend)."""
-        message = unmangle(message or "")  # _kw_lambda -> lambda
+        message = readable(message or "")  # _kw_lambda -> lambda, EQUILIBRIUM-Gleichungen als Anweisung
         self.result_status_label.configure(text=status_text,
                                            text_color=status_color or COLORS["error"])
         if len(message) > 1000:
@@ -3113,6 +3268,30 @@ h_r2s = enthalpy(R717, p=p_c, s=s_r1)
 h_r3 = enthalpy(R717, T=T_c, x=0)
 EER = (h_r1 - h_r3)/(h_r2s - h_r1)
 EER_C*(T_c - T_0) = T_0     {Carnot in kelvin, also implicit}
+
+{--- Example 8: Ideal gases (NASA data, prefix IG:) ---}
+{Heating value of methane: CH4 + 2 O2 -> CO2 + 2 H2O (vapour)}
+T_ref = 25 °C
+p_ref = 1 bar
+M_CH4 = molarmass(IG:CH4)
+h_CH4 = enthalpy(IG:CH4, T=T_ref)*M_CH4      {molar: J/mol}
+h_O2 = enthalpy(IG:O2, T=T_ref)*molarmass(IG:O2)
+h_CO2 = enthalpy(IG:CO2, T=T_ref)*molarmass(IG:CO2)
+h_H2O = enthalpy(IG:H2O, T=T_ref)*molarmass(IG:H2O)
+H_u = -(h_CO2 + 2*h_H2O - h_CH4 - 2*h_O2)/M_CH4
+{Fuel cell H2 + 1/2 O2 -> H2O (liquid): reversible cell voltage}
+F = 96485.33212 C/mol       {Faraday constant}
+g_H2O = gibbs(IG:H2O(L), T=T_ref, p=p_ref)*molarmass(IG:H2O(L))
+g_H2 = gibbs(IG:H2, T=T_ref, p=p_ref)*molarmass(IG:H2)
+g_O2 = gibbs(IG:O2, T=T_ref, p=p_ref)*molarmass(IG:O2)
+E_0 = -(g_H2O - g_H2 - 0.5*g_O2)/(2*F)
+{Steam reformer: chemical equilibrium at 750 °C (Gibbs minimisation)}
+n_CH4_R = 1 mol
+n_H2O_R = 3 mol              {steam to carbon ratio 3}
+EQUILIBRIUM T=750 °C, p=p_ref
+  IN  IG:CH4 = n_CH4_R, IG:H2O = n_H2O_R
+  OUT IG:CH4 = n_CH4_eq, IG:H2O = n_H2O_eq, IG:CO = n_CO_eq, IG:CO2 = n_CO2_eq, IG:H2 = n_H2_eq
+X_CH4 = 1 - n_CH4_eq/n_CH4_R   {methane conversion}
 
 "Press F5 to solve. Help > Function Reference describes all functions."
 '''

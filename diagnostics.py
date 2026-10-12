@@ -271,9 +271,23 @@ def describe_unsolved(equations: List[str], unknowns: Set[str], solution: Dict[s
     line_numbers = _source_line_numbers(original_equations, source_text)
     involved = [eq for eq in equations if _get_equation_unknowns(eq, set(), unsolved)]
     where = _format_lines(involved, line_numbers, original_equations)
+    if involved and all(_direct_from_known(eq, unsolved) for eq in involved):
+        # nur direkte Auswertungen aus festen Werten: Startwerte spielen keine Rolle
+        return (f"Keine numerische Lösung für {_names(unsolved)} ({where}): die Auswertung mit den "
+                f"vorgegebenen Werten ist nicht möglich - Eingaben prüfen.")
     return (f"Keine numerische Lösung für {_names(unsolved)} ({where}). Mögliche Ursachen: "
             f"keine reelle Lösung, Definitionsbereich verlassen (z.B. ln, sqrt, Stoffwerte) "
             f"oder ungünstige Startwerte (Solve → Initial Values).")
+
+
+def _direct_from_known(equation: str, unsolved: Set[str]) -> bool:
+    """Gleichung 'var = Ausdruck' (intern '(var) - (...)'), deren Ausdruck keine ungelöste Größe
+    enthält: sie wird direkt ausgewertet, ohne Iteration und ohne Startwert."""
+    found = _get_equation_unknowns(equation, set(), unsolved)
+    if len(found) != 1:
+        return False
+    prefix = f"({next(iter(found))}) - ("
+    return equation.startswith(prefix) and not _get_equation_unknowns(equation[len(prefix):], set(), unsolved)
 
 
 def diagnose(equations: List[str], unknowns: Set[str], constants: Dict[str, float],

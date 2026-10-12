@@ -45,6 +45,9 @@ equation_solver/
 ├── solver.py            # Block-Dekomposition + Bracket-Suche Solver
 ├── optimizer.py         # MINIMIZE/MAXIMIZE ... VARY ... (Raster + Brent/Powell, je Punkt)
 ├── thermodynamics.py    # CoolProp Wrapper mit Einheitenumrechnung
+├── ideal_gas.py         # Ideale Gase/kondensierte Stoffe aus NASA thermo.inp (Präfix IG:)
+├── equilibrium.py       # Chemisches Gleichgewicht (Gibbs-Minimierung, Anweisung EQUILIBRIUM)
+├── data/nasa/           # thermo.inp, LICENSE.txt, NOTICE.txt (NASA CEA, Apache 2.0, unverändert)
 ├── humid_air.py         # CoolProp HumidAirProp Wrapper für feuchte Luft
 ├── radiation.py         # Schwarzkörper-Strahlungsfunktionen (Planck, vektorisiert)
 ├── units.py             # Einheitenhandling und Konvertierung (v3.0)
@@ -66,7 +69,7 @@ equation_solver/
 ```bash
 python3 test_regressions.py       # Parser, Solver, Einheiten (~15 s)
 python3 test_unit_constraints.py  # Einheiten-Propagation, Dimensionsprüfung
-python3 test_berechnungen.py      # 63 Aufgaben mit/ohne Einheiten gegen Referenzwerte
+python3 test_berechnungen.py      # 82 Aufgaben mit/ohne Einheiten gegen Referenzwerte
 python3 test_optimierung.py       # Optimierung (MINIMIZE/MAXIMIZE), unabhängige Referenzen
 python3 test_gui.py               # GUI headless (holt kurz den Fokus - nicht tippen)
 ```
@@ -76,7 +79,8 @@ Schlüsselwörter, Kommentare), Solver (Wurzelwahl, Widerspruchserkennung, Param
 Tearing, Determinismus) und Einheiten-System (SI-Umrechnung, Startwerte, delta_K,
 Offset-Konvertierungen, Strahlung) ab. `test_berechnungen.py` rechnet Aufgaben aus
 Thermodynamik und Wärmeübertragung jeweils MIT und OHNE Einheiten und vergleicht mit
-unabhängig berechneten Referenzwerten (CoolProp direkt, analytisch).
+unabhängig berechneten Referenzwerten (CoolProp direkt, analytisch; IG: gegen Literaturwerte
+für Heizwert, Zellspannung, JANAF).
 Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 
 ### Entwicklung: Arbeitsweise und Prüfablauf
@@ -130,7 +134,7 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - **Fortsetzungszeilen**: eine Gleichung geht in einer offenen Klammer weiter, wenn die Zeile mit
   `(`, `,` oder einem Operator endet bzw. die nächste damit beginnt (`parser._join_bracket_lines`,
   Original für Meldungen ebenso zusammengefügt); eine vergessene `)` ohne Fortsetzung bleibt ein
-  Fehler ihrer Zeile
+  Fehler ihrer Zeile; endet die fehlerhafte Zeile mit einem Operator, nennt die Meldung die Klammerregel
 - **Bezugszustand** `REFERENCE R717 IIR` (eigene Zeile, wie EES; `parser.parse_reference_states`,
   `thermodynamics.set_reference_states` je Lösungslauf): IIR (h = 200 kJ/kg, s = 1 kJ/(kg K) für
   siedende Flüssigkeit bei 0 °C), ASHRAE (0 bei -40 °C), NBP (0 beim Normalsiedepunkt), DEFAULT
@@ -163,6 +167,9 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - **Doppelte Vorgabe** derselben Größe (`x = 5` ... `x = 3`): die zweite Zeile ist eine Prüfgleichung
   - gleiche Werte zulässig, verschiedene -> "Widersprüchliches System" mit der Zeile (früher gewann
   still die letzte); bei Parameterstudien/Wertelisten ein Fehler
+- Eine Zeile ohne `=` auf oberster Ebene ist ein Fehler, auch wenn `=` nur in einem Aufruf steht
+  (`+ enthalpy(water, T=T_1, p=p_1)` als Fortsetzung ohne Klammer fiel früher still weg; Meldung
+  nennt die Fortsetzung in einer offenen Klammer)
 - Eine Zeile wird am `=` auf oberster Ebene geteilt (`enthalpy(water, T=T_1, p=p_1) = h_1` geht);
   `e` ist überall eine Variable (Eulersche Zahl: `exp(1)`), auch in "Ausdruck + Einheit";
   `MINIMIZE`/`MAXIMIZE` nur mit folgendem Namen (eine Variable `minimize = 3` ist erlaubt)
@@ -194,10 +201,21 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
    - gescheiterte Blöcke werden nicht erneut versucht; unabhängig gelöste Teilblöcke bleiben
      in der (Teil-)Lösung
    - **Zerlegung vor dem Lösen** (auch Blöcke ab 3 Größen): minimaler gekoppelter Kern zuerst,
-     nachgelagerte Gleichungen danach. Scheitert ein Kern, werden seine Größen gesperrt und der
+     nachgelagerte Gleichungen danach. Der Kern ist exakt (Block-Dreiecksform,
+     `_smallest_independent_component`: Zuordnung Gleichung <-> Unbekannte, starke
+     Zusammenhangskomponenten nach Tarjan; die kleinste, die von keiner anderen abhängt,
+     Gleichstand Blattreihenfolge) - die frühere gierige Erweiterung zog nachgelagerte Gleichungen
+     in den Kern (SOFC-Anode 15 statt 11 Größen); gierig nur noch ohne vollständige Zuordnung.
+     Gelöste Kerne bleiben bei Zeitlimit in der Teillösung (`_partial_solution`). Scheitert ein Kern, werden seine Größen gesperrt und der
      nächste Kern unter den übrigen Gleichungen gesucht (`_solve_block_iteratively`) - eine nicht
      auswertbare Folgegleichung (`z = ln(-y)`, übersättigte Mischung) reißt den lösbaren Kern nicht
-     mit; die Meldung nennt die Ursache
+     mit; die Meldung nennt die Ursache (auch Auswertungsfehler der 1-D-Suchen eines gescheiterten
+     Blocks, z.B. Stoffwert außerhalb des Datenbereichs in der Energiebilanz). Jeder gelöste Kern wird
+     auf Eindeutigkeit geprüft (`_non_unique_solution` bzw. `_plateau_solution`): eine abhängige
+     Schleife (für jeden Wert erfüllt) legt ihre Größen nicht fest - ihr beliebiger Wert machte alle
+     nachgelagerten Kerne widersprüchlich (Bsp05 als Umkehraufgabe: Zeitlimit). Der Block bricht ab
+     (`_DEPENDENT_CORES`, Meldung "nicht eindeutig"); ein überbestimmter Block versucht dann zuerst
+     Teilsysteme ohne eine der abhängigen Gleichungen (sie wird Prüfgleichung) - Bsp05-Umkehr 17 s
    - Zeitbudget eines simultanen Versuchs (~20 s) gilt auch INNERHALB eines least_squares-Laufs
      (Residuenfunktion bricht ab) - ein unlösbarer Punkt einer Parameterstudie verliert so nicht
      alle Werte durch das Gesamtlimit
@@ -207,7 +225,9 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
      nur der überbestimmte Kern nach Dulmage-Mendelsohn (`_overdetermined_part`: von überzähligen
      Gleichungen über alternierende Pfade erreichbar; Folgegleichungen danach) - darin ein
      strukturell lösbares quadratisches Teilsystem lösen (`_square_subsets`: perfekte
-     Zuordnung, Blatt-Reihenfolge; bei singulärer Auswahl Varianten), die übrigen Gleichungen
+     Zuordnung, Blatt-Reihenfolge; bei singulärer Auswahl Varianten - zuerst ohne eine der
+     Gleichungen, die `_non_unique_solution` als abhängig erkennt; sonst erreichten die
+     Varianten bei einer langen Kette nach der redundanten Bilanz nie eine davon), die übrigen Gleichungen
      bleiben als Constraints offen und werden geprüft -> Lösung oder "Widersprüchliches System"
      mit der verletzten Gleichung. Unabhängig von der Schreibweise (`a = x + y` / `x + y = a`);
      `parser.validate_system` lehnt mehr Gleichungen als Unbekannte nicht mehr ab; ein Blatt nur
@@ -217,11 +237,25 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
      die Lösung entlang der Nullraum-Richtung fortsetzen (Größe verschoben, Rest neu gelöst),
      ist die Lösung nicht eindeutig -> Meldung "Lösung nicht eindeutig: Gleichungen ... sind
      voneinander abhängig" statt eines beliebigen Punkts (`x + y = 1`, `2*x + 2*y = 2`;
-     vertauschte Bilanz). Doppelwurzeln (isoliert) bestehen den Fortsetzungstest nicht
+     vertauschte Bilanz). Doppelwurzeln (isoliert) bestehen den Fortsetzungstest nicht.
+     **Plateau** (`_plateau_solution`, auch Blöcke mit 1 Größe und Größen ohne Wirkung auf die
+     Jacobi-Matrix): bleiben alle Gleichungen bei relativ verschobener Größe (1e-3) erfüllt, ist sie
+     nicht bestimmt -> "Lösung nicht eindeutig: ... für einen ganzen Bereich von x erfüllt"
+     (`y = max(0, x - 5) + 3` mit y = 3; Kondensatmenge 0 oberhalb des Taupunkts). Skalenfrei
+     (`_all_satisfied`): Residuum <= 1e-12 der Termgröße ohne Untergrenze, mindestens eine Gleichung
+     mit Termen ungleich null - verschwinden alle Terme, ist es Underflow (`exp(-x^2) = 0`,
+     `1e-300*sin(y)`), kein Plateau; bei x = 0 keine Aussage (kein Maßstab). Ebenso in der 1-D-Suche
+     (f und Nachbarpunkt exakt 0, Terme ungleich 0)
 5. **Iteration**: Schritte 2-4 werden wiederholt bis alle Gleichungen gelöst sind
 
 #### Robuste Wurzelfindung für einzelne Gleichungen
-- **Bracket-Suche**: ~4000 Testpunkte (auch negative) über Größenordnungen von 1e-12 bis ±5e9
+- **Skalenunabhängig**: eine Wurzel gilt nur, wenn das Residuum RELATIV zur Termgröße klein
+  ist; Umgebung (`is_credible_root`), Ableitungsschritt und Konvergenz relativ zu x, brentq-
+  Toleranz relativ zum Intervall, keine Ober-/Untergrenzen in SI. Früher absolut `|f| < 1e-10`
+  und Umgebung ±0.05: bei kleinen SI-Werten war jeder Punkt eine "Lösung" (`A = pi*d^2/4` mit
+  A = 3.14e-12 m² -> d = 7.8 µm statt 2 µm, `x^3 = 0` -> 3.4e-4); Werte > 1e15 bzw. |f| > 1e20
+  wurden verworfen (`K = 1/y` mit K = 1e30)
+- **Bracket-Suche**: Testpunkte (auch negative) über Größenordnungen von 1e-30 bis ±1e30
 - **Adaptive Verfeinerung**: Bei großen relativen Funktionsänderungen wird das Intervall verfeinert
 - **Brent's Methode**: Robuste Wurzelfindung bei Vorzeichenwechsel (Polstellen werden
   über einen Plausibilitätscheck verworfen, ebenso Underflow-Plateaus abklingender Funktionen)
@@ -232,11 +266,39 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   **Blöcke per Tearing**: Abstand ALLER Blockgrößen zu ihren Startwerten (je relativ zum
   Startwert, `block_anchors`; Gleichstand: größere Werte in Blattreihenfolge) - nicht nur der
   Tearing-Größe, sonst hinge die Lösung von der Schreibweise ab (`u = v^2` mit `v = u - 6` bzw.
-  `u = v + 6`: früher (4; -2) bzw. (9; 3), jetzt beide (4; -2)). Simultan gelöste Blöcke
-  (least_squares) konvergieren vom Startpunkt aus - dort entscheidet ein Startwert
+  `u = v + 6`: früher (4; -2) bzw. (9; 3), jetzt beide (4; -2)). Ebenso simultan gelöste Blöcke
+  (least_squares) und Mehrfach-Tearing: alle Startvarianten werden gerechnet, verschiedene
+  Lösungen gesammelt und die nach derselben Regel nächste genommen (`_nearest_block_solution`;
+  nach der ersten Lösung kürzere Suchen: kleineres Auswertungsbudget, kleine Startverschiebungen
+  bzw. zweite Gewichtung eines schon konvergierten Starts entfallen; im Mehrfach-Tearing und im
+  simultanen Löser sucht es höchstens zehnmal so lange wie bis zur ersten Lösung, mindestens 2 s, auch
+  mitten in einem Lauf -
+  billige Blöcke durchsuchen so alle Varianten (K-Form-Gleichgewicht 0.5 s), teure (Gleichgewicht
+  je Auswertung ~50 ms) brauchten sonst je Variante bis 20 s: Rückführungs-Studie 31 -> 9 s.
+  Zeitabhängig wie die 20-s-Grenze je Block; die gefundene Lösung bleibt immer) -
+  früher die erste konvergierte Variante, damit hing ein Gleichgewicht von der Reihenfolge der
+  Gleichungen ab (negative Stoffmengen statt der physikalischen, näheren Wurzel). Grenze: konvergiert
+  nur eine Variante, bzw. liegen die Wurzeln vom Startwert gleich weit entfernt (mol/s ohne
+  typischen Startwert: Anker 1), entscheidet ein Startwert
+- **Näherungslösungen eines Blocks** (least_squares, Mehrfach-Tearing): nur näherungsweise
+  erfüllte Gleichungen zählen nur, wenn ein kleiner relativer Schritt aller Blockgrößen sie
+  beseitigen könnte (`_stuck_equations`: linearisierter Block, Zeilen relativ zur Termgröße,
+  Spalten relativ zur Größe, J*dx = -r nach kleinsten Quadraten, Rest <= 10 %, |dx| <= 1e-4).
+  Auf einem min/max-Plateau bzw. bei davonlaufender Lösung mit sich aufhebenden Termen
+  (`W = a - min(a, b)`, a -> 1e3) ist das Residuum relativ zur Termgröße beliebig klein, die
+  Gleichung aber verletzt - früher "Lösung gefunden" mit lambda = 371792; ebenso, wenn sich der
+  Widerspruch auf zwei Gleichungen verteilt (`n_D = min(n_a, n_s)`, `W = n_a - n_D`)
+- **Genauigkeit**: akzeptierte Wurzeln (Newton, bei 1e-9 relativ) und Blocklösungen
+  (least_squares/fsolve/Mehrfach-Tearing, bei 1e-8) werden mit höchstens zwei bzw. drei
+  Newton-Schritten nachiteriert, nur wenn das Residuum sinkt (`polish_root`,
+  `_polish_block_solution`) - sonst erbte eine kleine Folgegröße den Rest sich aufhebender großer
+  Terme (C*T_1 - C*T_2 in K: Wärmestrom ~1e-7 relativ) und eine Optimierung "fand" Rechenfehler
+  als besseres Optimum (mit/ohne Einheiten verschieden)
 - **Standard-Startwert**: 1.0 für alle Variablen bzw. einheitenbasiert (kein Mittel aller bekannten
   Werte - eine unbeteiligte Konstante darf die gewählte Lösung nicht bestimmen)
-  (`units.initial_values_from_units`): typischer Wert je Dimension; unbekannte ABSOLUTE
+  (`units.initial_values_from_units`): typischer Wert je Dimension (`typical_value_from_unit`;
+  ohne typischen Wert - mol/s, A, V, J/mol - KEIN Einheiten-Startwert, sonst verdrängte der
+  Ersatzwert 1.0 den Startwert aus der Struktur: Molenströme ~1e-4 mol/s); unbekannte ABSOLUTE
   Temperaturen starten beim Mittel der vorgegebenen Temperaturen (statt pauschal 350 K,
   sonst falsches Vorzeichen von Differenzen wie T_Raum - T_Scheibe -> Ra^(1/6) nicht reell).
   Mehrfach-Tearing startet gleichartige Größen mit gleichem Startwert zusätzlich gestaffelt
@@ -255,15 +317,28 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   alle Lehrbeispiele mit neutral umbenannten Variablen liefern dieselben Ergebnisse.
   Auch Temperaturdifferenzen: keine Namenskonvention (Differenzen in K, Charakter aus der Struktur)
 - **Residuen-Bewertung**: relativ zur Größenordnung der Gleichungsterme - Divergenz
-  zur Asymptote (z.B. `1/(x-2) = 0`) wird NICHT als Lösung akzeptiert
+  zur Asymptote (z.B. `1/(x-2) = 0`) wird NICHT als Lösung akzeptiert. Ausnahme Rauschen der
+  Auswertung (`continuous_sign_change`): ein auf Maschinengenauigkeit eingegrenzter Vorzeichenwechsel
+  einer STETIGEN Funktion ist eine Wurzel, auch wenn das Residuum relativ zu den Termen groß ist
+  (kleine Kondensatmenge = Differenz großer Mengen aus NASA-Polynomen, ~1e-10 relativ): daneben
+  (1e-6 relativ) entgegengesetzte Vorzeichen, |f| an der Wurzel und ganz nahe daneben (1e-11
+  relativ) <= 1e-4 * |f| daneben - Pol und Sprung (IF, floor) bestehen das nicht.
+  brentq mit voller Auflösung (rtol 4 eps, Wurzel nahe einem Knick)
 - **Meldung bei erfolgloser 1-D-Suche**: die Fehlermeldung des ungültigen Testpunkts, der dem besten
   gültigen am nächsten liegt (Rand des Definitionsbereichs), wird als Auswertungsfehler gemeldet -
-  implizit `h = HumidAir(h, T=T_P, w=…)` im Nebelgebiet -> "Zustand übersättigt" (`_LAST_SEARCH_ERROR`)
+  implizit `h = HumidAir(h, T=T_P, w=…)` im Nebelgebiet -> "Zustand übersättigt" (`_LAST_SEARCH_ERROR`,
+  je Lösungslauf geleert). Die gemerkten Punkte sind Kopien (fsolve verändert sein Array weiter -
+  früher nannte die Meldung die falsche Grenze: T = 20000 K statt 199 K). Dieselbe Ursache in mehreren
+  Gleichungen steht einmal in der Meldung (`_grouped_errors`). Sind alle betroffenen Gleichungen direkte
+  Auswertungen aus festen Werten (`var = Ausdruck` ohne ungelöste Größe, `diagnostics._direct_from_known`),
+  heißt es "die Auswertung mit den vorgegebenen Werten ist nicht möglich - Eingaben prüfen" statt
+  "ungünstige Startwerte"
 - Statuszeile: "Lösung gefunden (14 direkt, 4 iterativ, 2 Blöcke (3+5 Größen))" - intern zerlegte
   Komponenten zählen mit ihren echten gekoppelten Kernen
 - **Zeitbudget**: max. ~10 s pro Einzelgleichung und `solver.SOLVE_TIME_LIMIT` = 60 s pro
   Lösungslauf (bzw. pro Punkt einer Parameterstudie). Bei Überschreitung: Teillösung +
-  Meldung "Abbruch nach Zeitlimit" mit den offenen Unbekannten (`SolveTimeout` ist
+  Meldung "Abbruch nach Zeitlimit" mit den offenen Unbekannten; bei einer Teillösung nennt die
+  Meldung auch erkannte Widersprüche und abhängige Gleichungen gelöster Teile (`SolveTimeout` ist
   BaseException, damit die `except Exception`-Fallbacks das Limit nicht verschlucken)
 - **Komplexe Zwischenwerte** (z.B. `Ra^(1/6)` mit negativem `Ra`) gelten als ungültige
   Auswertung, nicht als Absturz
@@ -335,8 +410,100 @@ zusätzlichen Gleichungen); bei Widerspruch nennt die Meldung beide Seiten.
 
 ### Thermodynamik (thermodynamics.py)
 - CoolProp wrapper with intuitive syntax
-- Functions: `enthalpy`, `entropy`, `density`, `volume`, `intenergy`, `quality`, `temperature`, `pressure`, `viscosity`, `conductivity`, `prandtl`, `cp`, `cv`, `soundspeed`
+- Functions: `enthalpy`, `entropy`, `density`, `volume`, `intenergy`, `quality`, `temperature`, `pressure`, `viscosity`, `conductivity`, `prandtl`, `cp`, `cv`, `soundspeed`, `gibbs` (g = h - T·s; mit
+  REFERENCE um dh - T·ds verschoben), `molarmass(fluid)` (kg/mol SI, Anzeige kg/kmol; auch CoolProp)
 - Input parameters: `T`, `p`, `h`, `s`, `x`, `rho`, `d`, `u`, `v`
+- Stoffname mit Präfix `IG:` -> `ideal_gas.py` (vor CoolProp, ohne REFERENCE)
+
+### Ideale Gase und kondensierte Stoffe (ideal_gas.py, Präfix IG:)
+- Daten: `data/nasa/thermo.inp` aus NASA CEA (github.com/nasa/cea, Commit 2f79a64, Kopie
+  12.10.2026, **unverändert**, byte-gleich - `.gitattributes`: `data/nasa/** -text`, thermo.inp hat
+  CRLF), Apache 2.0: `LICENSE.txt` und `NOTICE.txt` daneben (`.gitignore`-Ausnahme für *.txt),
+  Quelle McBride/Zehe/Gordon NASA TP-2002-211556. `data/nasa/*` ist von der MIT-Lizenz
+  ausgenommen (README "License", `LICENSE`: MIT, Copyright Christian Heschl, mit Vermerk zu data/nasa); keine NASA-Marken, Herkunft nennen ist erlaubt. Datei nie ändern
+  (sonst Änderung kennzeichnen, Apache §4b) - Sonderfälle der Daten behandelt der Leser
+- Leser `parse_thermo_inp` (feste Spalten, NASA-9-Polynome, Exponenten geprüft): Produkte bis
+  END PRODUCTS und Reaktanten bis END REACTANTS; Spezies ohne T-Bereich (JP-4, CH4(L)) und leere
+  Bereiche (Tmax <= Tmin, Rest der NASA-Überarbeitung 2021) übersprungen; gleicher Name mehrfach
+  (Fe(a) unter/über Curie-Punkt) -> eine Spezies. 2045 Spezies (1276 Gase, 769 kondensiert)
+- Namen: `IG:`/`IG::` ohne Groß-/Kleinschreibung; Spezies exakt, sonst ohne Groß-/Kleinschreibung
+  wenn eindeutig (`IG:co` -> Fehler "CO, Co"); unbekannt -> Vorschläge (Teilstring, difflib).
+  Namen mit Klammern/Komma (`IG:H2O(L)`, `IG:C8H18,isooctane`): `species_argument_count`
+  fasst Argumente ohne `=` zum längsten bekannten Namen zusammen; `_split_call_args` beachtet Texte
+  (ein Text beginnt nur am Argumentanfang). Apostroph im Namen (`IG:ZnSO4(a')`, 4 Spezies) wird im
+  Python-Text als `\x27` geschrieben - `"..."` ist im Blatt ein Kommentar und wäre in der
+  Einheiten-Ableitung verschwunden. Lokale Menüprüfung ruft alle 2045 Spezies der Fluidliste auf
+- Massebezogen in SI wie CoolProp; h mit Bildungsenthalpie, s absolut (dritter Hauptsatz);
+  R = 8.314462618 J/(mol K), p° = 1 bar. Gase: h, u, cp, cv, soundspeed nur aus T (p erlaubt,
+  ohne Wirkung); entropy, gibbs, volume, density brauchen p (kein stilles 1 bar), s = s° - R ln(p/p°);
+  Zustand aus T/h/u und p/s/v/rho (`call_error`, beim Einlesen und Rechnen dieselbe Regel: T und h
+  zusammen legen nichts fest). Umkehrung (temperature aus h, u, s+p) mit brentq über den ganzen
+  Datenbereich. Kondensiert: h, s, g, cp aus T, h oder s, ohne Druckeinfluss; volume/density/cv/
+  intenergy -> Fehler mit Hinweis. T außerhalb des Datenbereichs -> Fehler mit Bereich (viele Gase
+  erst ab 300 K, IG:Air 300 ... 6000 K) - keine Extrapolation. Vektorisiert (Parameterstudien)
+- Signaturprüfung `parser._ideal_gas_species` + `ideal_gas.call_error`; `REFERENCE IG:...` ist ein
+  Fehler; REFERENCE water verschiebt IG:H2O nicht
+- Einheiten: `_THERMO_OUT` gibbs J/kg, molarmass kg/kmol (Label; Wert SI kg/mol); Labels für
+  molare Größen und Elektrochemie (`_LABEL_ENTRIES`: J/mol -> kJ/mol, J/(mol*K), kg/mol -> kg/kmol,
+  mol/s, V, A, A/m^2, C/mol; Auswahl in `COMPATIBLE_UNITS`, dazu MJ/kg für Heizwerte)
+- Hilfe: Abschnitt in `FUNCTION_HELP_TEXT` (Beispiele werden in test_gui gelöst), Help > Fluid List
+  (CoolProp, IG:) mit allen Spezies, Datenbereich, Quelle und Lizenz
+
+### Chemisches Gleichgewicht (equilibrium.py, Anweisung EQUILIBRIUM)
+- Anweisung im Blatt (`parser.parse_equilibria`, eigene Zeile wie MINIMIZE; IN/OUT auch in eigenen
+  Zeilen, nach ',' Fortsetzung, Leer- und Kommentarzeilen dazwischen erlaubt):
+  `EQUILIBRIUM T=..., p=...  IN IG:A = Menge, ...  OUT IG:B = Variable, ...`. Schlüsselwörter nur
+  vor einem Namen (`EQUILIBRIUM` allein oder mit Text, IN/OUT vor dem Stoff): Variablen `equilibrium`,
+  `in`, `out` bleiben möglich. `parse_equations` macht die Zeilen zu Leerzeilen und hängt je OUT-Stoff
+  eine Gleichung `var = equilibrium('IG:B', 'IG:A|...', 'IG:B|...', T, p, Mengen...)` an (Fehler darin
+  nennen die Anweisungszeile; Zahl mit Einheit als `quantity(...)`, die Einheit bleibt für die
+  Ableitung); damit gelten Zerlegung, Tearing über T (adiabat), Parameterstudien, Einheiten
+  (`unit_constraints`: Ergebnis wie die Eintrittsmengen, T absolut, p Druck) wie für jede Funktion.
+  Die interne Gleichung bleibt das Original (Einheiten, Prüfungen, Prüfskripte lesen sie); Anzeige
+  über `parser.readable()` (GUI: Meldungen, Residuen, Warnungen, Hinweise) als
+  `EQUILIBRIUM (Zeile 6): IG:B = var`.
+  Ausdrücke als Menge, T oder p: dieselbe Syntaxprüfung wie jede Gleichung, die Meldung nennt die
+  Angabe (`Menge von IG:H2O = 0.5*n + 0.2 mol: Syntaxfehler ...`). IN/OUT sind Schlüsselwörter nur,
+  wenn ein Eintrag `Stoff = ...` bzw. ein Stoff IG: folgt.
+  Prüfungen beim Einlesen: Präfix IG:, Stoff bekannt, OUT doppelt, Element von IN in keinem OUT-Stoff,
+  mindestens ein Gas unter OUT, Menge mit Einheit muss Stoffmenge sein (mol, mol/s), T/p-Dimension,
+  OUT-Variable mehrfach (mit Namen), Dezimalkomma, ';' statt ',', Parameterstudie im Kopf (eigene
+  Zeile), ',' am Ende (die nächste Zeile gehört dann zur Anweisung - Hinweis in der Meldung).
+  Eine Variable mit falscher Dimension als Menge (Masse) bzw. T/p: Einheitenwarnung mit Ursache
+  (`unit_constraints._argument_dimension_warnings`, auch T=/p= der Stoffwert-, HumidAir- und
+  Strahlungsfunktionen; ersetzt die Folgewarnung "Inkompatible Terme" derselben Gleichung)
+- Gibbs-Minimierung (konvex -> eindeutig, n >= 0) über Elementpotentiale wie NASA CEA: schnelles
+  gemeinsames Newton-Verfahren (lambda, ln N); Rückfall global konvergent: innen für feste Gasmenge N
+  die streng konvexe Funktion Phi(lambda) = sum N*exp(a_i*lambda - c_i) - b*lambda (gedämpftes Newton,
+  Schritt <= 2, minimale Regularisierung bei Kondition 1e17), außen Brent für sum n(N) = N (Klammer
+  aus den Atomzahlen); letzter Rückfall trust-constr (wie fmincon). Kondensierte Stoffe über aktive
+  Mengen (Phase dazu, wenn g°/RT < a*lambda; weg, wenn Menge < 0); kondensierte Stoffe außerhalb
+  ihres Datenbereichs werden ausgelassen (Menge 0, wie CEA: H2O(cr) bis 273.15 K, H2O(L) 273.15 bis
+  600 K) - mit Hinweis ⓘ (`main._equilibrium_range_hints`, alle Punkte einer Studie, Vorschlag: kondensierte
+  Stoffe gleicher Zusammensetzung für diese T, `equilibrium.excluded_condensed`; entfällt, wenn ein solcher
+  schon unter OUT steht). Gase außerhalb ihres Datenbereichs (NO2, N2O, HO2 erst ab 300 K) werden ebenso
+  ausgelassen (Festlegung des Nutzers 12.10.2026), mit Warnhinweis "Achtung ... Gas nicht berücksichtigt -
+  nur für eine Spur unbedenklich" (keine Extrapolation; das Gas existiert dort, nur die Daten fehlen).
+  Fallen alle Träger eines Elements bzw. alle Gase weg: Meldung mit den Datenbereichen. Stoffwertfunktionen
+  (enthalpy(IG:NO2, T=...)) bleiben außerhalb des Bereichs ein Fehler. Nach Konvergenz bis zwei weitere Newton-
+  Schritte (Maschinengenauigkeit: kleine Kondensatmenge = Differenz großer Mengen). Ergebnis je
+  (Stoffe, T, p, Mengen) zwischengespeichert. Geprüft: 800 Zufallsfälle gegen Cantera mit denselben
+  NASA-9-Daten (Abweichung <= 4e-5, Cantera selbst 1e-8 genau), KKT-Bedingungen inkl. Kondensat auf
+  2e-13 (600 Fälle)
+- Vor dem Lösen: Elementbilanz mit den OUT-Stoffen erfüllbar? (NNLS, `_feasibility_error`; sonst sofort
+  "Überschuss an O ... z.B. IG:O2" mit den Eintrittsstoffen, die das Element enthalten und noch nicht
+  unter OUT stehen - früher
+  "keine Konvergenz" nach 30 s). Verschwindet die Gasphase (H2 + O2 stöchiometrisch unter der
+  Siedetemperatur beim gegebenen Druck - aus der Gibbs-Minimierung, p > p_s(T): 81.6 °C bei 0.5 bar,
+  100.0 °C bei 1 bar, 153.6 °C bei 5 bar mit NASA-Daten, Dampf als ideales Gas): lineares Programm über die kondensierten Stoffe und Optimalitätsbedingung
+  sum_g exp(a_g*lambda - c_g) <= 1 (`_condensed_only`) -> Gase 0 (vorher künstliche Restgasphase;
+  ln N erreicht 0 nie). Elementmengen mit einer Zweierpotenz normiert (exakt). Fehler werden wie
+  Ergebnisse zwischengespeichert (`_equilibrium_or_error`; die 1-D-Suche rief einen unzulässigen Punkt
+  hundertfach). Derselbe Stoff mehrfach unter IN: Mengen addiert (zwei Eintrittsströme); IN-Mengen
+  in verschiedenen Einheiten (mol neben mol/s) -> Einheitenwarnung
+- Taupunkt: n_L = 0 gilt für jedes T oberhalb -> "Lösung nicht eindeutig" (Plateau, siehe Solver);
+  Umkehraufgabe mit kleiner Menge (n_L = 1e-9*n_W) wird gelöst (Annahme stetiger Vorzeichenwechsel)
+- Elementzusammensetzung aus thermo.inp (Spalten 11-50, `Species.elements`), `standard_gibbs_RT`
 
 ### Humid Air (humid_air.py)
 - CoolProp HumidAirProp wrapper for psychrometric calculations
@@ -432,6 +599,10 @@ Eingaben mit anderen Einheiten (°C, bar, kJ) werden automatisch konvertiert.
 | Spektrale Emission Eb | W/m³ (Anzeige W/(m²·µm)) | |
 | Gesamtemission E | W/m² | |
 | Winkel | rad (wie SI) | `30 deg` (-> 0.5236), `10 rad/s`, `15 deg/h` |
+| Molmasse | kg/mol (Anzeige kg/kmol) | `28.97 kg/kmol`, `molarmass(IG:N2)` |
+| Molare Enthalpie, freie Enthalpie | J/mol (Anzeige kJ/mol) | `h*molarmass(IG:H2O)` |
+| Molare Entropie | J/(mol·K) | |
+| Spannung, Strom, Faraday | V, A, C/mol | `F = 96485.33212 C/mol` |
 
 ### Humid Air Units
 
@@ -522,7 +693,8 @@ zusammengesetzte (rad/s) aber rad: `sin(omega*t)` und `s = alpha*r` waren still 
   `_complete_inference`); `analyze_equation()`, `propagate_all_units()` und
   `compute_expression_dimension()` sind dünne Hüllen darum (Test-Schnittstelle)
 - `check_all_unit_consistency()`: Einheitenwarnungen (Einheiten in value()/quantity() sind Text,
-  keine Namensliste)
+  keine Namensliste); gleicher Warnungstext in mehreren Gleichungen einmal mit allen Gleichungen
+  (`_merge_same_warnings`)
 - Schlüsselwort-Argumente je Funktionsfamilie (`function_argument_unit`): `x=` ist bei Stoffwerten
   der Dampfgehalt, bei HumidAir die Feuchtebeladung (= `w`, kg/kg)
 - ln-Regel: nur Paare `c*ln(a) - c*ln(b)` mit gleichem Faktor machen a und b gleichartig
@@ -556,6 +728,7 @@ U = 0.3 W/(m²·K)         {Malpunkt erlaubt}
 - °C/°F in zusammengesetzten Einheiten sind Kelvin-Differenzen (`2 °C/h`, `1/°C`, `W/(m²·°C)`)
 - Drehzahl: `rpm`, `U/min` = 1/min, `rps`, `U/s` = 1/s (Umdrehungen je Zeit, u = π·D·n; pint
   rechnete rpm als 2π/min und U als Enzym-Einheit)
+- Ohm: `ohm`, `Ω`, `Ω` (U+2126), `Ohm` (auch kΩ, mΩ, `Ω*cm²`) - früher Syntaxfehler bzw. unbekannt
 - Einheiten in Funktionsargumenten werden auf die Dimension geprüft: `T=` Temperatur,
   `p=`/`p_tot=` Druck, `h=` J/kg, `s=` J/(kg·K), `x=`/`rh=`/`w=` dimensionslos, Strahlung
   `(T, λ, ...)` - `enthalpy(water, T=20 Grad, p=1 bar)` ergibt eine Fehlermeldung.
@@ -734,12 +907,18 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
 - File: New, Open, Save, Save As (.hes, .txt)
 - Beispielblatt ("☰ Examples" / Edit > Insert Example): Wasser/Dampf, feuchte Luft, Strahlung,
   Heizkurve (value/quantity, Spreizung in K), Rohrströmung (IF), wirtschaftliche Dämmdicke
-  (MINIMIZE); `test_gui.py` prüft die Werte (Dämmdicke gegen die analytische Lösung)
+  (MINIMIZE), NH3 mit REFERENCE, ideale Gase (IG: Heizwert CH4, Zellspannung H2/O2, Dampfreformer
+  mit EQUILIBRIUM);
+  `test_gui.py` prüft die Werte (Dämmdicke gegen die analytische Lösung)
 - View: Schriftgröße 6-36pt (Standard: 16pt)
 - Solve: F5 oder Button, Initial Values Dialog (Werte auch mit Einheit; schreibt den Block `{$Startwerte ... $}` ins Blatt)
 - Zwischenablage: Kopieren/Ausschneiden im Editor schreibt zusätzlich fest in die
   System-Zwischenablage (macOS `pbcopy`, Linux `wl-copy`/`xclip`/`xsel`) - Tk stellt
   Inhalte sonst nur bereit, solange das Programm läuft (nach Neustart wäre er weg)
+- Einheiten-Warnungen nur, wo Einheiten etwas bedeuten: Konstanten ohne Einheit gelten nur in
+  Blättern MIT Einheiten als dimensionslos (`sheet_has_units` direkt nach dem Einlesen - die
+  Anzeige trägt berechnete Größen samt Einheit in `unit_values` ein); "Einheit unbekannt" in
+  Blättern ohne Einheiten entfällt, echte Widersprüche zwischen Funktionsausgaben (h + T) bleiben
 - Einheiten-Warnungen: Klick auf "⚠ UNIT WARNINGS (n)" im Results-Tab springt zu den
   Warnungen im Residuals-Tab (Variable, Gleichung, links/rechts in SI-Einheiten) - auch in
   Parameterstudien (Warnungen und Hinweise wie ohne Studie). Farbe der Residuen nach dem Residuum
@@ -769,7 +948,8 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
   - Quick Plot X-Y: Schneller einfacher Plot
   - **Interaktive Toolbar**: Zoom, Pan, Home, Save (oben im Plot-Fenster)
 - Help: Function Reference (Syntax, Einheiten, Funktionen inkl. IF, Startwerte, Meldungen), Fluid List
-  (aus `thermodynamics.FLUID_ALIASES` und der CoolProp-Fluidliste erzeugt - alle 124 Fluide)
+  (aus `thermodynamics.FLUID_ALIASES` und der CoolProp-Fluidliste erzeugt - alle 124 Fluide; dazu
+  alle IG:-Spezies aus thermo.inp mit Datenbereich, Quelle und Lizenz)
 - Settings: Anzeige-Einheiten (°C/K, bar/Pa, kJ/J, kW/W) wirken sofort auf die Ergebnisse
 - Einheiten werden als °C, °F, µm angezeigt (intern pint-Namen degC, degF, um)
 

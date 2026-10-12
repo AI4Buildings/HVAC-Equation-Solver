@@ -11,6 +11,7 @@ from typing import List, Set, Dict, Tuple, Optional, Any, Union
 from dataclasses import dataclass, field
 from numpy import exp, log, log10, sqrt, pi
 from numpy import sinh, cosh, tanh
+import re
 import time as _time
 
 from parser import if_function, display_name
@@ -44,12 +45,15 @@ def _check_deadline() -> None:
 
 # Versuche Einheiten-Modul zu laden für unit-basierte Startwerte
 try:
-    from units import get_initial_from_unit
+    from units import get_initial_from_unit, typical_value_from_unit
     UNITS_AVAILABLE = True
 except ImportError:
     UNITS_AVAILABLE = False
     def get_initial_from_unit(unit_str):
         return 1.0
+
+    def typical_value_from_unit(unit_str):
+        return None
 
 # Versuche Unit-Constraints zu laden für generische Einheiten-Inferenz aus Funktionsargumenten
 try:
@@ -90,6 +94,8 @@ def _inferred_units(original_equations: Dict[str, str]) -> Dict[str, str]:
 # Zahlenliterale zählen nicht (1 in (1 - eps) ist keine Größenordnung von eps).
 # Nur Iterationsstart - NICHT für die Auswahl unter mehreren Wurzeln.
 _start_hints = None
+# Im laufenden Lösungslauf bereits gelöste Kerne (bleiben bei Zeitlimit als Teillösung erhalten)
+_partial_solution: Optional[Dict[str, float]] = None
 _START_HINT_CACHE: Dict[tuple, tuple] = {}
 
 
@@ -405,6 +411,13 @@ except ImportError:
     THERMO_FUNCTIONS = {}
     THERMO_AVAILABLE = False
 
+# Chemisches Gleichgewicht (Anweisung EQUILIBRIUM, Gibbs-Minimierung)
+try:
+    from equilibrium import equilibrium as _equilibrium_function
+    EQUILIBRIUM_AVAILABLE = True
+except ImportError:
+    EQUILIBRIUM_AVAILABLE = False
+
 # Importiere Strahlungs-Funktionen
 try:
     from radiation import RADIATION_FUNCTIONS
@@ -455,8 +468,10 @@ def solve_system(
     Returns:
         success, solution, message[, analysis] wie _solve_system_impl
     """
-    global _deadline, _start_hints
+    global _deadline, _start_hints, _partial_solution
     own_deadline = _deadline is None
+    previous_partial = _partial_solution
+    _partial_solution = {}
     if own_deadline:
         _deadline = _time.monotonic() + SOLVE_TIME_LIMIT
     state = {}
@@ -471,17 +486,20 @@ def solve_system(
     except SolveTimeout:
         if not own_deadline or not state:
             raise
-        remaining = sorted(state['vars'])
+        # gelöste Kerne eines noch laufenden Blocks gehören zur Teillösung
+        result = {**_partial_solution, **dict(state['known'])}
+        remaining = sorted(v for v in state['vars'] if v not in result)
+        open_eqs = [eq for eq in state['eqs'] if _get_equation_unknowns(eq, set(result), set(remaining))]
         names = ', '.join(display_name(v) for v in remaining[:8]) + (', ...' if len(remaining) > 8 else '')
-        msg = (f"Zeitlimit von {SOLVE_TIME_LIMIT:.0f} s überschritten: {len(state['eqs'])} Gleichungen "
+        msg = (f"Zeitlimit von {SOLVE_TIME_LIMIT:.0f} s überschritten: {len(open_eqs)} Gleichungen "
                f"mit {len(remaining)} Unbekannten ungelöst ({names}). Startwerte vorgeben "
                f"(Solve > Initial Values) oder das System vereinfachen")
-        result = dict(state['known'])
         if return_analysis:
             return False, result, msg, state['analysis']
         return False, result, msg
     finally:
         _start_hints = previous_hints
+        _partial_solution = previous_partial
         if own_deadline:
             _deadline = None
 
@@ -565,6 +583,8 @@ def _solve_system_impl(
     violated_constraints = []  # Widersprüchliche Constraint-Gleichungen
     non_unique = []            # (abhängige Gleichungen, unbestimmte Größen) gelöster Blöcke
     evaluation_errors = {}     # Gleichung -> Fehlermeldung der direkten Auswertung
+    _LAST_SEARCH_ERROR.clear()  # nur Fehler dieses Lösungslaufs melden
+    _DEPENDENT_CORES.clear()
     # Gescheiterte Blöcke merken: Blöcke sind Zusammenhangskomponenten der
     # Unbekannten, neue Werte aus anderen Blöcken ändern sie nicht - ein
     # erneuter (teurer) Versuch nach jedem anderen gelösten Block wäre sinnlos.
@@ -686,6 +706,16 @@ def _solve_system_impl(
                             block_vars = set(block_solution)
                     if not success:
                         failed_blocks.add(block_key)
+                        # Block scheiterte an einem Kern mit abhängigen Gleichungen: "nicht eindeutig"
+                        for dependency in _DEPENDENT_CORES:
+                            if dependency not in non_unique:
+                                non_unique.append(dependency)
+                        _DEPENDENT_CORES.clear()
+                        # Auswertungsfehler der 1-D-Suchen im Block (Tearing) wie bei Einzelgleichungen
+                        # melden: ein Stoffwert außerhalb seines Bereichs ist die Ursache, nicht der Block
+                        for eq in block_eqs:
+                            if eq in _LAST_SEARCH_ERROR and eq not in evaluation_errors:
+                                evaluation_errors[eq] = _LAST_SEARCH_ERROR[eq]
                         if block_solution:
                             # Unabhängig gelöste Kerne übernehmen; der Rest bildet einen
                             # neuen, kleineren Block (Meldung nennt dann nur ihn)
@@ -711,15 +741,17 @@ def _solve_system_impl(
                         # Aktualisiere bekannte Werte
                         known_values.update(block_solution)
                         remaining_vars -= block_vars
-                        # Eindeutig? (linear abhängige Gleichungen -> beliebiger Punkt)
-                        if len(block_vars) > 1:
-                            try:
-                                dependency = _non_unique_solution(
-                                    list(block_eqs), set(block_vars), known_values, context)
-                            except Exception:
-                                dependency = None
-                            if dependency is not None:
-                                non_unique.append(dependency)
+                        # Eindeutig? (linear abhängige Gleichungen bzw. Plateau -> beliebiger Punkt)
+                        try:
+                            dependency = (_non_unique_solution(list(block_eqs), set(block_vars),
+                                                               known_values, context)
+                                          if len(block_vars) > 1 else
+                                          _plateau_solution(list(block_eqs), next(iter(block_vars)),
+                                                            known_values, context))
+                        except Exception:
+                            dependency = None
+                        if dependency is not None:
+                            non_unique.append(dependency)
 
                         # Entferne gelöste Gleichungen
                         for eq in block_eqs:
@@ -780,13 +812,7 @@ def _solve_system_impl(
     if not remaining_equations:
         # Linear abhängige Gleichungen: der Solver hat einen beliebigen Punkt gefunden
         if non_unique:
-            dependent, free = non_unique[0]
-            lines = ", ".join(f"'{original_equations.get(eq, eq)}'" for eq in dependent)
-            msg = (f"Lösung nicht eindeutig: Die Gleichungen {lines} sind voneinander abhängig "
-                   f"(eine folgt aus den anderen) - {', '.join(free)} "
-                   f"{'ist' if len(free) == 1 else 'sind'} damit nicht bestimmt. Es fehlt eine "
-                   f"unabhängige Gleichung bzw. Vorgabe (z.B. eine Energie- statt einer zweiten "
-                   f"Massenbilanz).")
+            msg = _non_unique_message(non_unique[0], original_equations)
             if return_analysis:
                 return False, result, msg, analysis
             return False, result, msg
@@ -823,14 +849,59 @@ def _solve_system_impl(
         # Nicht alle Gleichungen gelöst
         msg = f"Unvollständig: {len(remaining_equations)} Gleichungen, {len(remaining_vars)} Unbekannte verbleibend"
         # Fehler bei der Auswertung noch offener Gleichungen (z.B. 0/0, CoolProp-Fehler)
-        open_errors = [f"'{original_equations.get(eq, eq)}': {text}"
-                       for eq, text in evaluation_errors.items() if eq in remaining_equations]
+        open_errors = _grouped_errors({eq: text for eq, text in evaluation_errors.items()
+                                       if eq in remaining_equations}, original_equations)
         analysis.evaluation_errors = open_errors
         if open_errors:
             msg += ". Auswertungsfehler: " + "; ".join(open_errors[:3])
+        # Erkannte Widersprüche bzw. abhängige Gleichungen gelöster Teile gehören auch bei einer
+        # Teillösung in die Meldung (sonst nur die Folge, z.B. ein Auswertungsfehler danach)
+        if non_unique:
+            msg = _non_unique_message(non_unique[0], original_equations) + " " + msg
+        if violated_constraints:
+            msg = (f"Widersprüchliches System (überbestimmt): {'; '.join(violated_constraints[:3])}. "
+                   + msg)
         if return_analysis:
             return False, result, msg, analysis
         return False, result, msg
+
+
+def _grouped_errors(errors: Dict[str, str], original_equations: Dict[str, str]) -> List[str]:
+    """
+    Auswertungsfehler je Gleichung für die Meldung; dieselbe Ursache in mehreren Gleichungen (z.B.
+    T außerhalb des Datenbereichs in allen Gleichungen einer Anweisung) einmal, mit allen Gleichungen.
+    Der Text beginnt mit der gesuchten Größe ("x: ..."), die bei mehreren Gleichungen entfällt.
+    """
+    groups: Dict[str, List[Tuple[str, str]]] = {}
+    for eq, text in errors.items():
+        name, sep, cause = text.partition(': ')
+        key = cause if sep and re.fullmatch(r'[A-Za-z_]\w*', name) else text
+        groups.setdefault(key, []).append((eq, text))
+    result = []
+    for cause, members in groups.items():
+        if len(members) == 1:
+            eq, text = members[0]
+            result.append(f"'{original_equations.get(eq, eq)}': {text}")
+        else:
+            shown = ", ".join(f"'{original_equations.get(eq, eq)}'" for eq, _ in members)
+            result.append(f"{shown}: {cause}")
+    return result
+
+
+def _non_unique_message(dependency, original_equations: Dict[str, str]) -> str:
+    """Meldung "Lösung nicht eindeutig" mit den abhängigen Gleichungen und den freien Größen."""
+    dependent, free = dependency[0], dependency[1]
+    lines = ", ".join(f"'{original_equations.get(eq, eq)}'" for eq in dependent)
+    if len(dependency) > 2:     # Plateau: für einen ganzen Bereich einer Größe erfüllt
+        return (f"Lösung nicht eindeutig: {lines} {'ist' if len(dependent) == 1 else 'sind'} für einen "
+                f"ganzen Bereich von {free[0]} erfüllt "
+                f"(flacher Verlauf, z.B. max/min oder eine Menge, die dort null bleibt) - {free[0]} ist "
+                f"damit nicht bestimmt. Eine Vorgabe wählen, die {free[0]} festlegt.")
+    return (f"Lösung nicht eindeutig: Die Gleichungen {lines} sind voneinander abhängig "
+            f"(eine folgt aus den anderen) - {', '.join(free)} "
+            f"{'ist' if len(free) == 1 else 'sind'} damit nicht bestimmt. Es fehlt eine "
+            f"unabhängige Gleichung bzw. Vorgabe (z.B. eine Energie- statt einer zweiten "
+            f"Massenbilanz).")
 
 
 def _describe_violation(equation: str, original: str, values: Dict[str, float],
@@ -956,6 +1027,151 @@ def _residual_and_scale(equation: str, values: Dict[str, float], context: dict) 
     return abs(float(res)), scale
 
 
+def _stuck_equations(equations: List[str], values: Dict[str, float], variables, context: dict,
+                     magnitudes: Optional[Dict[str, float]] = None) -> List[str]:
+    """
+    Nur näherungsweise erfüllte Gleichungen eines Blocks, die sich durch einen kleinen relativen
+    Schritt der Blockgrößen NICHT erfüllen ließen (leer: die Näherung ist glaubwürdig).
+    Das Residuum relativ zur Termgröße reicht dafür nicht: wachsen Terme mit der Lösung und heben
+    sich auf (W = a - min(a, b) auf dem Plateau b > a, a -> 1e3), wird W/Termgröße beliebig klein,
+    obwohl die Gleichung verletzt ist und sich lokal nicht ändert - ebenso, wenn sich der
+    Widerspruch auf zwei Gleichungen verteilt (n_D = min(n_a, n_s), W = n_a - n_D je zur Hälfte).
+    Prüfung am linearisierten Block (skalenunabhängig, Zeilen relativ zur Termgröße, Spalten
+    relativ zur Größe): der Schritt J*dx = -r (kleinste Quadrate) muss das Residuum beseitigen
+    (Rest <= 10 %) und klein sein (|dx| <= 1e-4 relativ).
+    """
+    variables = list(variables)
+    pairs = [_residual_and_scale(eq, values, context) for eq in equations]
+    if not any(np.isfinite(res) and res > 1e-10 * max(scale, 1e-300) for res, scale in pairs):
+        return []
+
+    def signed(eq, local_values):
+        local_ctx = context.copy()
+        local_ctx.update(local_values)
+        return float(_as_real(eval(eq, {"__builtins__": {}}, local_ctx)))
+
+    scales = [max(scale, 1e-300) for _, scale in pairs]
+    try:
+        r = np.array([signed(eq, values) / sc for eq, sc in zip(equations, scales)])
+    except Exception:
+        return list(equations)
+    jacobian = np.zeros((len(equations), len(variables)))
+    for j, var in enumerate(variables):
+        x = float(values[var])
+        magnitude = abs(x) or abs((magnitudes or {}).get(var, 0.0)) or 1.0
+        step = 1e-7 * magnitude
+        plus, minus = dict(values), dict(values)
+        plus[var], minus[var] = x + step, x - step
+        for i, (eq, sc) in enumerate(zip(equations, scales)):
+            try:
+                derivative = (signed(eq, plus) - signed(eq, minus)) / (2 * step)
+            except Exception:
+                continue
+            if np.isfinite(derivative):
+                jacobian[i, j] = derivative * magnitude / sc
+    if not np.all(np.isfinite(r)):
+        return list(equations)
+    dx = np.linalg.lstsq(jacobian, -r, rcond=None)[0]
+    rest = np.abs(jacobian @ dx + r)
+    if np.linalg.norm(rest) <= 0.1 * np.linalg.norm(r) and np.max(np.abs(dx), initial=0.0) <= 1e-4:
+        return []
+    return [eq for eq, value in zip(equations, rest) if value > 1e-10] or list(equations)
+
+
+def _nearest_block_solution(solutions: List[Dict[str, float]], equations: List[str], variables,
+                            known_values: Dict[str, float], manual_initial=None, inferred_units=None
+                            ) -> Dict[str, float]:
+    """
+    Unter verschiedenen gefundenen Lösungen eines Blocks die nächstgelegene - dieselbe Regel wie
+    beim Tearing (Festlegung 11.10.2026): Abstand ALLER Blockgrößen zu ihren Startwerten, je relativ
+    zum Startwert (ohne Strukturhinweis, wie dort); Gleichstand: größere Werte in Blattreihenfolge.
+    Sonst entschiede die erste konvergierte Startvariante und damit die Reihenfolge der Gleichungen
+    (Gleichgewichte mit negativen Stoffmengen statt der physikalischen, näheren Wurzel).
+    """
+    if len(solutions) == 1:
+        return solutions[0]
+    appearance = _appearance_order(equations, set(variables))
+    names = sorted(variables, key=lambda v: appearance[v])
+    anchors = {v: _get_initial_value(v, manual_initial, known_values, inferred_units, use_structure=False)
+               for v in names}
+    ranked = []
+    for solution in solutions:
+        vector = tuple(float(solution[v]) for v in names)
+        distance = float(np.sqrt(sum(((x - anchors[v]) / (abs(anchors[v]) or 1.0)) ** 2
+                                     for v, x in zip(names, vector))))
+        ranked.append((distance, vector, solution))
+    nearest = min(d for d, _, _ in ranked)
+    tie = 1e-9 * max(nearest, 1.0)
+    return max((item for item in ranked if item[0] <= nearest + tie), key=lambda item: item[1])[2]
+
+
+def _distinct(solutions: List[Dict[str, float]], solution: Dict[str, float]) -> bool:
+    """Ist die Lösung von allen bisherigen verschieden (relativ 1e-6 in mindestens einer Größe)?"""
+    return all(any(abs(solution[v] - other[v]) > 1e-6 * max(abs(other[v]), abs(solution[v]), 1e-300)
+                   for v in solution) for other in solutions)
+
+
+def _polish_block_solution(equations: List[str], values: Dict[str, float], variables, context: dict,
+                           magnitudes: Optional[Dict[str, float]] = None, steps: int = 3) -> Dict[str, float]:
+    """
+    Newton-Nachiteration einer akzeptierten Blocklösung am normierten System (Zeilen relativ zur
+    Termgröße, Spalten relativ zur Größe). least_squares bzw. fsolve enden bei einem relativen
+    Residuum um 1e-8 - Folgegrößen (Zielgröße einer Optimierung) erben diesen Fehler, und der
+    Optimierer "findet" scheinbar bessere Werte, die Rechenfehler sind. Ein Schritt zählt nur,
+    wenn das größte relative Residuum sinkt. Gibt die (verbesserten) Werte der Blockgrößen zurück.
+    """
+    variables = list(variables)
+    current = dict(values)
+
+    def normalized(local_values):
+        pairs = [_residual_and_scale(eq, local_values, context) for eq in equations]
+        if any(not np.isfinite(res) for res, _ in pairs):
+            return None, None
+        scales = [max(scale, 1e-300) for _, scale in pairs]
+        signed = []
+        for eq, sc in zip(equations, scales):
+            local_ctx = context.copy()
+            local_ctx.update(local_values)
+            signed.append(float(_as_real(eval(eq, {"__builtins__": {}}, local_ctx))) / sc)
+        return np.array(signed), scales
+
+    try:
+        r, scales = normalized(current)
+        if r is None:
+            return {var: current[var] for var in variables}
+        for _ in range(steps):
+            worst = float(np.max(np.abs(r), initial=0.0))
+            if worst <= 1e-13:
+                break
+            jacobian = np.zeros((len(equations), len(variables)))
+            magnitude = []
+            for j, var in enumerate(variables):
+                x = float(current[var])
+                mag = abs(x) or abs((magnitudes or {}).get(var, 0.0)) or 1.0
+                magnitude.append(mag)
+                step = 1e-7 * mag
+                plus, minus = dict(current), dict(current)
+                plus[var], minus[var] = x + step, x - step
+                for i, (eq, sc) in enumerate(zip(equations, scales)):
+                    ctx_p, ctx_m = context.copy(), context.copy()
+                    ctx_p.update(plus)
+                    ctx_m.update(minus)
+                    derivative = (float(_as_real(eval(eq, {"__builtins__": {}}, ctx_p)))
+                                  - float(_as_real(eval(eq, {"__builtins__": {}}, ctx_m)))) / (2 * step)
+                    jacobian[i, j] = derivative * mag / sc if np.isfinite(derivative) else 0.0
+            dx = np.linalg.lstsq(jacobian, -r, rcond=None)[0]
+            trial = dict(current)
+            for j, var in enumerate(variables):
+                trial[var] = float(current[var]) + dx[j] * magnitude[j]
+            r_trial, _ = normalized(trial)
+            if r_trial is None or not float(np.max(np.abs(r_trial), initial=0.0)) < worst:
+                break
+            current, r = trial, r_trial
+    except Exception:
+        pass
+    return {var: current[var] for var in variables}
+
+
 def _relative_residual(equation: str, values: Dict[str, float], context: dict,
                        scale_floor: float = 0.0) -> float:
     """
@@ -1000,6 +1216,8 @@ def _get_eval_context():
     }
     if THERMO_AVAILABLE:
         context.update(THERMO_FUNCTIONS)
+    if EQUILIBRIUM_AVAILABLE:
+        context['equilibrium'] = _equilibrium_function
     if RADIATION_AVAILABLE:
         context.update(RADIATION_FUNCTIONS)
     if HUMID_AIR_AVAILABLE:
@@ -1018,6 +1236,89 @@ def _get_equation_unknowns(equation: str, known_vars: Set[str], all_vars: Set[st
     found_vars = set(re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', cleaned))
     # Filtere auf die tatsächlichen Variablen
     return (found_vars & all_vars) - known_vars
+
+
+def _smallest_independent_component(equations: List[str], eq_to_unknowns: Dict[str, Set[str]],
+                                    appearance: Dict[str, int]) -> Optional[List[str]]:
+    """
+    Kleinste starke Zusammenhangskomponente des Abhängigkeitsgraphen, die von keiner anderen
+    abhängt (Block-Dreiecksform: Zuordnung Gleichung <-> Unbekannte, Tarjan). None, wenn die
+    Gleichungen keine vollständige Zuordnung zu ihren Unbekannten erlauben. Gleichstand der
+    Größe: die im Blatt zuerst stehende Komponente.
+    """
+    unknowns = set()
+    for eq in equations:
+        unknowns.update(eq_to_unknowns[eq])
+    if len(unknowns) != len(equations):
+        return None
+    owner: Dict[str, str] = {}
+
+    def augment(eq, seen):
+        for var in sorted(eq_to_unknowns[eq], key=lambda v: appearance.get(v, 0)):
+            if var in seen:
+                continue
+            seen.add(var)
+            if var not in owner or augment(owner[var], seen):
+                owner[var] = eq
+                return True
+        return False
+
+    for eq in equations:
+        if not augment(eq, set()):
+            return None
+    depends = {eq: [owner[var] for var in eq_to_unknowns[eq] if owner[var] != eq] for eq in equations}
+
+    # Tarjan (iterativ): Komponenten in umgekehrter topologischer Reihenfolge
+    index: Dict[str, int] = {}
+    low: Dict[str, int] = {}
+    on_stack: Set[str] = set()
+    stack: List[str] = []
+    components: List[List[str]] = []
+    counter = 0
+    for root in equations:
+        if root in index:
+            continue
+        work = [(root, iter(depends[root]))]
+        index[root] = low[root] = counter
+        counter += 1
+        stack.append(root)
+        on_stack.add(root)
+        while work:
+            node, successors = work[-1]
+            advanced = False
+            for succ in successors:
+                if succ not in index:
+                    index[succ] = low[succ] = counter
+                    counter += 1
+                    stack.append(succ)
+                    on_stack.add(succ)
+                    work.append((succ, iter(depends[succ])))
+                    advanced = True
+                    break
+                if succ in on_stack:
+                    low[node] = min(low[node], index[succ])
+            if advanced:
+                continue
+            work.pop()
+            if work:
+                low[work[-1][0]] = min(low[work[-1][0]], low[node])
+            if low[node] == index[node]:
+                component = []
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    component.append(member)
+                    if member == node:
+                        break
+                components.append(component)
+    component_of = {eq: i for i, component in enumerate(components) for eq in component}
+    position = {eq: i for i, eq in enumerate(equations)}
+    independent = [component for i, component in enumerate(components)
+                   if all(component_of[dep] == i for eq in component for dep in depends[eq])]
+    if not independent:
+        return None
+    best = min(independent, key=lambda c: (len(c), min(position[eq] for eq in c)))
+    return [eq for eq in equations if eq in set(best)]
 
 
 def _find_minimal_coupled_core(
@@ -1123,7 +1424,20 @@ def _find_minimal_coupled_core(
 
         return block_eqs, block_vars
 
-    # Strategie: Suche nach dem kleinsten unabhängig lösbaren Block
+    # Exakt: Block-Dreiecksform. Jede Gleichung bekommt eine Unbekannte zugeordnet; Gleichung i
+    # hängt von Gleichung j ab, wenn i die Unbekannte von j enthält. Die starken
+    # Zusammenhangskomponenten dieses Graphen sind die gekoppelten Kerne (für quadratische
+    # Systeme eindeutig, unabhängig von Namen und Reihenfolge); ein Kern ohne Abhängigkeit von
+    # anderen hängt nur von bekannten Größen ab. Die gierige Erweiterung unten konnte
+    # nachgelagerte Gleichungen in den Kern ziehen (Anode + Nachbrenner: 15 statt 11 Größen).
+    core = _smallest_independent_component(equations, eq_to_unknowns, appearance)
+    if core is not None:
+        core_vars = set()
+        for eq in core:
+            core_vars.update(eq_to_unknowns[eq])
+        return core, core_vars
+
+    # Sonst (keine vollständige Zuordnung): kleinster unabhängig lösbarer Block, gierig
     # Sortiere Gleichungen nach Anzahl der Unbekannten (weniger = einfacher)
     sorted_eqs = sorted(equations, key=lambda eq: len(eq_to_unknowns[eq]))
 
@@ -1537,8 +1851,15 @@ def _solve_block_by_multi_tearing(
             local_ctx[var] = value
         return values
 
+    extra_deadline = [None]   # Zeitgrenze der Suche nach weiteren Lösungen (nach der ersten)
+
+    class _ExtraSearchOver(BaseException):
+        """Suche nach weiteren Lösungen zu lang (auch mitten in einem least_squares-Lauf)."""
+
     def raw_residuals(x):
         _check_deadline()
+        if extra_deadline[0] is not None and time.monotonic() > extra_deadline[0]:
+            raise _ExtraSearchOver()
         values = chain(x)
         local_ctx = context.copy()
         local_ctx.update(values)
@@ -1597,12 +1918,19 @@ def _solve_block_by_multi_tearing(
     starts += [np.ones(len(tears)) / scales, 0.5 * np.ones(len(tears)) / scales,
                1.5 * x0 / scales, 0.5 * x0 / scales, 2.0 * x0 / scales]
     attempts = []
+    solutions: List[Dict[str, float]] = []
     for start in starts:
         attempts.append((start, None))      # absolute Residuen
         attempts.append((start, 'start'))   # fest gewichtet mit Termgrößen am Start
+    converged_starts = set()
+    began = time.monotonic()
     for start, weighting in attempts:
         if time.monotonic() > deadline:
             break
+        if extra_deadline[0] is not None and time.monotonic() > extra_deadline[0]:
+            break
+        if id(start) in converged_starts:
+            continue   # dieser Start hat schon eine Lösung - die andere Gewichtung findet dieselbe
         weights = np.ones(len(residual_eqs))
         if weighting == 'start':
             weights = start_weights(start * scales)
@@ -1611,10 +1939,13 @@ def _solve_block_by_multi_tearing(
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
+                # nach der ersten Lösung nur kurze Suchen nach weiteren
                 result = least_squares(make_residuals(weights), start, method='lm', xtol=1e-14, ftol=1e-14,
-                                       max_nfev=300 * len(tears))
+                                       max_nfev=(60 if solutions else 300) * len(tears))
             values = chain(result.x * scales)
             solution = {var: float(values[var]) for var in variables}
+        except _ExtraSearchOver:
+            break
         except Exception:
             continue
         if not all(np.isfinite(v) for v in solution.values()):
@@ -1623,8 +1954,21 @@ def _solve_block_by_multi_tearing(
         check_values.update(solution)
         pairs = [_residual_and_scale(eq, check_values, context) for eq in equations]
         worst = max(res / max(sc, 1e-300) for res, sc in pairs)
-        if worst < 1e-8:
-            return True, solution, f"Block per Tearing gelöst ({len(tears)} von {len(variables)} Variablen)"
+        if worst < 1e-8 and not _stuck_equations(equations, check_values, variables, context):
+            solution = _polish_block_solution(equations, check_values, sorted(variables), context)
+            converged_starts.add(id(start))
+            if _distinct(solutions, solution):
+                solutions.append(solution)
+            if extra_deadline[0] is None:
+                # weitere Lösungen (für die Wahl der nächstgelegenen) höchstens zehnmal so lange suchen
+                # wie bis zur ersten (mindestens 2 s): billige Blöcke durchsuchen alle Startvarianten,
+                # teure (Gleichgewicht je Auswertung ~50 ms) liefen sonst je Variante 20 s
+                extra_deadline[0] = time.monotonic() + max(10.0 * (time.monotonic() - began), 2.0)
+    if solutions:
+        # mehrere Lösungen: die den Startwerten nächste (nicht die erste konvergierte Variante)
+        solution = _nearest_block_solution(solutions, equations, variables, known_values,
+                                           manual_initial, inferred_units)
+        return True, solution, f"Block per Tearing gelöst ({len(tears)} von {len(variables)} Variablen)"
     return False, {}, "Tearing-Iteration nicht konvergiert"
 
 
@@ -1658,6 +2002,40 @@ def _solve_core(
     return _solve_block_simultaneously(
         equations, variables, known_values, context, manual_initial, inferred_units
     )
+
+
+def _plateau_solution(equations: List[str], var: str, values: Dict[str, float],
+                      context: dict) -> Optional[Tuple[List[str], List[str]]]:
+    """
+    Größe auf einem Plateau: die Gleichungen sind am Lösungspunkt UND bei relativ verschobener Größe
+    (1e-3) erfüllt (y = max(0, x - 5) + 3 mit y = 3; Kondensat n_L = 0 oberhalb des Taupunkts) - jeder
+    Wert dort ist eine Lösung. Skalenfrei: erfüllt heißt Residuum <= 1e-12 der Termgröße ohne
+    Untergrenze, und mindestens eine Gleichung hat Terme ungleich null - verschwinden alle Terme
+    (Underflow: 1e-300*sin(y), exp(-x^2)), ist das kein Plateau. Bei x = 0 fehlt ein Maßstab für die
+    Verschiebung: keine Aussage. Rückgabe wie _non_unique_solution.
+    """
+    x = float(values[var])
+    if not np.isfinite(x) or x == 0:
+        return None
+    step = 1e-3 * abs(x)
+    for shifted in (x + step, x - step):
+        trial = dict(values)
+        trial[var] = shifted
+        if _all_satisfied(equations, trial, context) and _all_satisfied(equations, values, context):
+            return list(equations), [var], 'plateau'
+    return None
+
+
+def _all_satisfied(equations: List[str], values: Dict[str, float], context: dict) -> bool:
+    """Alle Gleichungen bis auf Rundung erfüllt (<= 1e-12 der Termgröße, ohne Untergrenze) und
+    mindestens eine mit Termen ungleich null (sonst nur Underflow)."""
+    nonzero = False
+    for eq in equations:
+        residual, scale = _residual_and_scale(eq, values, context)
+        if not np.isfinite(residual) or residual > 1e-12 * scale:
+            return False
+        nonzero = nonzero or scale > 0
+    return nonzero
 
 
 def _non_unique_solution(equations: List[str], variables: Set[str], values: Dict[str, float],
@@ -1711,7 +2089,9 @@ def _non_unique_solution(equations: List[str], variables: Set[str], values: Dict
                 break
             step *= 100.0
         else:
-            return None
+            # die Größe wirkt auf keine Gleichung: liegt sie auf einem Plateau (alle Gleichungen
+            # bleiben exakt erfüllt), ist sie nicht bestimmt
+            return _plateau_solution(equations, var_list[j], values, context)
         jac[:, j] = column
     # Nur die Richtungen zählen: Spalten und Zeilen auf Länge 1 (Beträge der Größen egal)
     col_norm = np.linalg.norm(jac, axis=0)
@@ -1833,6 +2213,13 @@ def _square_subsets(equations: List[str], variables: Set[str], known: Set[str], 
         yield [eq for eq in equations if eq in alternative]
 
 
+def _square_subset_without(equations: List[str], variables: Set[str], known: Set[str],
+                           left_out: str) -> Optional[List[str]]:
+    """Strukturell lösbares quadratisches Teilsystem ohne die Gleichung left_out (Blattreihenfolge)."""
+    others = [eq for eq in equations if eq != left_out]
+    return next(_square_subsets(others, variables, known, limit=1), None)
+
+
 def _solve_overdetermined_block(equations, variables, known_values, context, manual_initial,
                                 original_equations, inferred_units):
     """
@@ -1851,11 +2238,29 @@ def _solve_overdetermined_block(equations, variables, known_values, context, man
     if core_eqs and len(core_eqs) < len(equations):
         equations, variables = core_eqs, core_vars
     fallback = None
-    for subset in _square_subsets(equations, variables, set(known_values)):
+    subsets = _square_subsets(equations, variables, set(known_values))
+    preferred: List[List[str]] = []   # Teilsysteme ohne eine der abhängigen Gleichungen
+    tried = set()
+    while True:
+        subset = preferred.pop(0) if preferred else next(subsets, None)
+        if subset is None:
+            break
+        if frozenset(subset) in tried:
+            continue
+        tried.add(frozenset(subset))
+        known_dependencies = len(_DEPENDENT_CORES)
         success, solution, msg, analysis = _solve_equation_block(
             subset, variables, known_values, context, manual_initial, original_equations,
             inferred_units)
         if not success:
+            # singulärer Kern im Teilsystem: zuerst Varianten ohne eine seiner Gleichungen
+            for dependency in _DEPENDENT_CORES[known_dependencies:]:
+                for left_out in reversed([eq for eq in subset if eq in dependency[0]]):
+                    alternative = _square_subset_without(equations, variables, set(known_values),
+                                                         left_out)
+                    if alternative is not None and frozenset(alternative) not in tried:
+                        preferred.append(alternative)
+            del _DEPENDENT_CORES[known_dependencies:]
             continue
         values = {**known_values, **solution}
         checks = [eq for eq in equations if eq not in subset]
@@ -1863,6 +2268,15 @@ def _solve_overdetermined_block(equations, variables, known_values, context, man
             return True, solution, msg, analysis, subset
         if fallback is None:
             fallback = (True, solution, msg, analysis, subset)
+        # Numerisch singuläres Teilsystem (eine Bilanz folgt aus den anderen): zuerst eine der
+        # abhängigen Gleichungen weglassen - sie wird zur Prüfgleichung. Die Reihenfolge der
+        # strukturellen Varianten erreicht sie sonst evtl. nie (lange Kette nach den Bilanzen)
+        dependency = _non_unique_solution(subset, variables, values, context)
+        if dependency:
+            for left_out in reversed([eq for eq in subset if eq in dependency[0]]):
+                alternative = _square_subset_without(equations, variables, set(known_values), left_out)
+                if alternative is not None and frozenset(alternative) not in tried:
+                    preferred.append(alternative)
     if fallback is not None:
         return fallback
     return False, {}, "Überbestimmter Block ohne lösbares Teilsystem", None, equations
@@ -1913,6 +2327,8 @@ def _solve_equation_block(
             return success, solution, msg, block_analysis
         # Teilergebnis (unabhängig lösbare Kerne) behalten - nicht verwerfen
         partial, partial_analysis = solution, block_analysis
+        if msg == _DEPENDENT_MSG:
+            return False, partial, msg, partial_analysis   # singulär: simultan ebenso nicht eindeutig
         if frozenset(equations) in attempted:
             return False, partial, msg, partial_analysis  # Gesamtblock bereits als Kern versucht
     else:
@@ -2061,8 +2477,24 @@ def _solve_block_iteratively(
             if not success:
                 blocked |= set(core_vars)
                 continue
+            # Ein Kern, dessen Lösung nicht eindeutig ist (Gleichungen voneinander abhängig: die
+            # Schleife ist für jeden Wert erfüllt), legt seine Größen nicht fest - sein beliebiger
+            # Wert machte alle nachgelagerten Kerne widersprüchlich. Abbrechen und melden; ein
+            # überbestimmter Block lässt dann eine der abhängigen Gleichungen weg (Prüfgleichung)
+            try:
+                trial = {**local_known, **sub_solution}
+                dependency = (_non_unique_solution(list(core_eqs), set(core_vars), trial, context)
+                              if len(core_vars) > 1 else
+                              _plateau_solution(list(core_eqs), next(iter(core_vars)), trial, context))
+            except Exception:
+                dependency = None
+            if dependency is not None:
+                _DEPENDENT_CORES.append(dependency)
+                return False, solved_values, _DEPENDENT_MSG, block_analysis
             solved_values.update(sub_solution)
             local_known.update(sub_solution)
+            if _partial_solution is not None:
+                _partial_solution.update(sub_solution)
             remaining_vars -= core_vars
 
             # Residuen für Sub-Block berechnen
@@ -2155,9 +2587,11 @@ def _solve_block_simultaneously(
     scales = np.maximum(np.abs(x0), 1e-10)
 
     # Residuen-Funktion (nicht normalisiert, für Auswertung)
+    extra_deadline = [None]   # Suche nach weiteren Lösungen (nach der ersten), wie im Mehrfach-Tearing
+
     def block_func(x):
         _check_deadline()
-        if time.monotonic() > deadline:
+        if time.monotonic() > deadline or (extra_deadline[0] is not None and time.monotonic() > extra_deadline[0]):
             # Zeitbudget des Blocks auch INNERHALB eines least_squares-/fsolve-Laufs: der
             # Versuch bricht ab (Exception), die Teillösung des Lösungslaufs bleibt erhalten
             raise RuntimeError("Zeitbudget des Blocks überschritten")
@@ -2232,12 +2666,30 @@ def _solve_block_simultaneously(
         # Termgröße auch innerhalb von Produkten (_additive_term_scale): echte
         # Null-Gleichungen (Q = 0 = 2*(J_3 - J_1 + ...)) haben große innere Terme,
         # eine Asymptote (alle Terme -> 0) bleibt dagegen erkennbar
-        return max(res / max(scale, 1e-300) for res, scale in pairs)
+        relative = max(res / max(scale, 1e-300) for res, scale in pairs)
+        # nur näherungsweise erfüllt: auf einem Plateau bzw. bei davonlaufender Lösung keine Lösung
+        if relative < 1e-4 and _stuck_equations(equations, values, var_list, context,
+                                                dict(zip(var_list, scales))):
+            return float('inf')
+        return relative
+
+    def polished(x):
+        """Newton-Nachiteration der akzeptierten Lösung (siehe _polish_block_solution)."""
+        values = dict(known_values)
+        values.update(zip(var_list, x))
+        better = _polish_block_solution(equations, values, var_list, context, dict(zip(var_list, scales)))
+        return np.array([better[var] for var in var_list])
 
     import warnings
-    for x_start in start_variations[:15]:  # Maximal 15 Versuche
+    found_solutions: List[Dict[str, float]] = []
+    began = time.monotonic()
+    for index, x_start in enumerate(start_variations[:15]):  # Maximal 15 Versuche
         if time.monotonic() > deadline:
             break
+        if extra_deadline[0] is not None and time.monotonic() > extra_deadline[0]:
+            break
+        if found_solutions and 1 <= index <= 3:
+            continue   # kleine Verschiebungen nur, wenn der Start selbst nicht konvergiert (0/0 am Start)
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -2247,7 +2699,8 @@ def _solve_block_simultaneously(
                     method='lm',  # Levenberg-Marquardt
                     ftol=1e-12,   # Relative Toleranz für Residuen
                     xtol=1e-12,   # Relative Toleranz für Variablen
-                    max_nfev=500 * n_vars
+                    # nach der ersten Lösung nur kurze Suchen nach weiteren (deterministisch)
+                    max_nfev=(100 if found_solutions else 500) * n_vars
                 )
 
             if result.success or result.status in [1, 2, 3, 4]:
@@ -2260,8 +2713,13 @@ def _solve_block_simultaneously(
                 relative_residual = block_relative_residual(solution)
 
                 if relative_residual < 1e-8:
-                    result_dict = {var: val for var, val in zip(var_list, solution)}
-                    return True, result_dict, f"Block gelöst ({n_vars} Variablen)"
+                    result_dict = {var: val for var, val in zip(var_list, polished(solution))}
+                    if _distinct(found_solutions, result_dict):
+                        found_solutions.append(result_dict)
+                    if extra_deadline[0] is None:
+                        # weitere Lösungen höchstens zehnmal so lange suchen wie bis zur ersten (>= 2 s)
+                        extra_deadline[0] = time.monotonic() + max(10.0 * (time.monotonic() - began), 2.0)
+                    continue
 
                 if relative_residual < best_residual:
                     best_solution = solution
@@ -2269,6 +2727,12 @@ def _solve_block_simultaneously(
 
         except Exception:
             pass
+
+    if found_solutions:
+        # mehrere Lösungen: die den Startwerten nächste (nicht die erste konvergierte Variante)
+        result_dict = _nearest_block_solution(found_solutions, equations, var_list, known_values,
+                                              manual_initial, inferred_units)
+        return True, result_dict, f"Block gelöst ({n_vars} Variablen)"
 
     # Fallback: Versuche fsolve mit verschiedenen Startwerten
     for x_start_norm in start_variations[:5]:
@@ -2286,7 +2750,7 @@ def _solve_block_simultaneously(
             relative_residual = block_relative_residual(solution)
 
             if ier == 1 and relative_residual < 1e-8:
-                result_dict = {var: val for var, val in zip(var_list, solution)}
+                result_dict = {var: val for var, val in zip(var_list, polished(solution))}
                 return True, result_dict, f"Block gelöst ({n_vars} Variablen)"
 
             if relative_residual < best_residual:
@@ -2297,7 +2761,7 @@ def _solve_block_simultaneously(
 
     # Akzeptiere gute Näherung mit relativer Toleranz (relativ zur Termgröße)
     if best_solution is not None and best_residual < 1e-4:
-        result_dict = {var: val for var, val in zip(var_list, best_solution)}
+        result_dict = {var: val for var, val in zip(var_list, polished(best_solution))}
         return True, result_dict, f"Block gelöst (rel. Residuum: {best_residual:.2e})"
 
     return False, {}, f"Block-Konvergenz fehlgeschlagen (rel. Residuum: {best_residual:.2e})"
@@ -2328,8 +2792,9 @@ def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = No
     # PRIORITÄT 1: Unit-basierte Startwerte (generisch, NICHT von Variablennamen abhängig)
     if inferred_units and var in inferred_units and UNITS_AVAILABLE:
         unit = inferred_units[var]
-        if unit is not None:
-            return get_initial_from_unit(unit)
+        typical = typical_value_from_unit(unit) if unit is not None else None
+        if typical is not None:
+            return typical
 
     # PRIORITÄT 2: Über Summen verbundene bekannte Größen (Struktur, siehe _start_hints) -
     # nur als Iterationsstart, nicht als Anker für die Wahl unter mehreren Wurzeln.
@@ -2355,8 +2820,11 @@ def _get_initial_value(var: str, manual_initial: Optional[Dict[str, float]] = No
 
 
 # Auswertungsfehler der letzten erfolglosen 1-D-Suche je Gleichung (für die Meldung)
-_SEARCH_LOG: Dict[str, list] = {'ok': [], 'err': []}
+_SEARCH_LOG: Dict[str, list] = {'ok': [], 'err': [], 'plateau': []}
 _LAST_SEARCH_ERROR: Dict[str, str] = {}
+# Kerne eines Blocks, deren Lösung nicht eindeutig ist (abhängige Gleichungen), je Lösungslauf
+_DEPENDENT_CORES: List[Tuple] = []
+_DEPENDENT_MSG = "Kern nicht eindeutig (abhängige Gleichungen)"
 
 
 def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, float],
@@ -2368,11 +2836,19 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
     des ungültigen Testpunkts gemerkt, der dem besten gültigen Punkt am nächsten liegt - dort
     endet der Definitionsbereich (z.B. "Zustand übersättigt" bei impliziter HumidAir-Gleichung).
     """
-    _SEARCH_LOG['ok'], _SEARCH_LOG['err'] = [], []
+    _SEARCH_LOG['ok'], _SEARCH_LOG['err'], _SEARCH_LOG['plateau'] = [], [], []
     result = _solve_single_unknown_search(equation, unknown, known_values, context, manual_initial,
                                           inferred_units, chain, block_anchors)
     if result[0]:
         _LAST_SEARCH_ERROR.pop(equation, None)
+    elif _SEARCH_LOG['plateau']:
+        # Die Gleichung ist auf einem ganzen Bereich erfüllt (min/max-Plateau, n_L = 0 oberhalb des
+        # Taupunkts): jeder Wert dort wäre eine Lösung - keine willkürlich gewählte melden
+        x = _SEARCH_LOG['plateau'][0]
+        _LAST_SEARCH_ERROR[equation] = (
+            f"Lösung nicht eindeutig: die Gleichung ist für einen ganzen Bereich von {display_name(unknown)} "
+            f"erfüllt (z.B. {display_name(unknown)} = {x:.6g}) - eine Vorgabe wählen, die "
+            f"{display_name(unknown)} festlegt")
     elif _SEARCH_LOG['err']:
         if _SEARCH_LOG['ok']:
             best = min(_SEARCH_LOG['ok'], key=lambda item: item[1])[0]
@@ -2381,7 +2857,7 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
         _LAST_SEARCH_ERROR[equation] = min(_SEARCH_LOG['err'], key=lambda item: abs(item[0] - best))[1]
         if len(_LAST_SEARCH_ERROR) > 1000:
             _LAST_SEARCH_ERROR.clear()
-    _SEARCH_LOG['ok'], _SEARCH_LOG['err'] = [], []
+    _SEARCH_LOG['ok'], _SEARCH_LOG['err'], _SEARCH_LOG['plateau'] = [], [], []
     return result
 
 
@@ -2433,10 +2909,12 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
             value = _as_real(eval(equation, {"__builtins__": {}}, local_ctx))
         except Exception as exc:
             if len(_SEARCH_LOG['err']) < 20000:
-                _SEARCH_LOG['err'].append((x, str(exc)))
+                # Wert kopieren: fsolve übergibt ein Array und verändert es danach weiter - mit dem
+                # Verweis stimmte der gemerkte Punkt nicht mehr (Meldung nannte die falsche Grenze)
+                _SEARCH_LOG['err'].append((float(np.ravel(x)[0]), str(exc)))
             return float('inf')
-        if np.isfinite(value) and len(_SEARCH_LOG['ok']) < 20000:
-            _SEARCH_LOG['ok'].append((x, abs(value)))
+        if np.all(np.isfinite(value)) and len(_SEARCH_LOG['ok']) < 20000:
+            _SEARCH_LOG['ok'].append((float(np.ravel(x)[0]), float(np.max(np.abs(value)))))
         return value
 
     def rel_residual_at(x):
@@ -2446,6 +2924,29 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
         except Exception:
             return float('inf')
         return _relative_residual(equation, values, context)
+
+    def continuous_sign_change(x):
+        """
+        Vorzeichenwechsel einer STETIGEN Funktion, auf Maschinengenauigkeit eingegrenzt: das
+        Residuum ist dann Rauschen der Auswertung (Auslöschung in der Funktion, z.B. eine kleine
+        Kondensatmenge = Wasser - Dampf aus NASA-Polynomen, ~1e-10 relativ), keine Polstelle und
+        kein Sprung. Kriterium: daneben (relativ 1e-6) entgegengesetzte Vorzeichen; |f| an der
+        Wurzel UND ganz nahe daneben (relativ 1e-11) winzig gegen den Verlauf (|f| relativ 1e-6
+        daneben) - bei 1/(x-2) ist |f| an der "Wurzel" riesig, bei einem Sprung (IF, floor) ist
+        eine Seite ganz nahe daneben so groß wie der Sprung.
+        """
+        span = abs(x) or abs(initial_guess)
+        if not span:
+            return False                  # kein Maßstab für die Umgebung
+        h, near = 1e-6 * span, 1e-11 * span
+        try:
+            f_m, f_p = func(x - h), func(x + h)
+            local = [abs(func(x)), abs(func(x - near)), abs(func(x + near))]
+        except Exception:
+            return False
+        if not all(np.isfinite(v) for v in [f_m, f_p] + local) or f_m * f_p >= 0:
+            return False
+        return max(local) <= 1e-4 * max(abs(f_m), abs(f_p))
 
     def is_acceptable_root(x, tol=1e-9):
         return np.isfinite(x) and rel_residual_at(x) < tol
@@ -2463,12 +2964,24 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
         """
         if not np.isfinite(x):
             return False
-        h0 = 0.05 * max(1.0, abs(x))
+        # Umgebung relativ zu x (bei x = 0 relativ zum Startwert): mit absolutem Mindestabstand
+        # wäre bei x ~ 1e-6 jeder Punkt "isoliert" (y^2 = 4e-12 -> 7.8e-6 statt 2e-6)
+        h0 = 0.05 * (abs(x) or abs(initial_guess) or 1.0)
         try:
             f_x = abs(func(x))
             f_p = abs(func(x + h0))
             f_m = abs(func(x - h0))
         except Exception:
+            return False
+        # Plateau: f ist im Punkt UND daneben exakt null, die Terme aber nicht (sonst Underflow wie
+        # exp(-x^2)) - jeder Wert dort erfüllt die Gleichung, die Lösung ist nicht eindeutig
+        if f_x == 0 and (f_p == 0 or f_m == 0):
+            try:
+                genuine = _residual_and_scale(equation, values_at(x), context)[1] > 0
+            except Exception:
+                genuine = False
+            if genuine and len(_SEARCH_LOG['plateau']) < 10:
+                _SEARCH_LOG['plateau'].append(x)
             return False
         # Polstellen/Eval-Fehler in der Umgebung als "sehr groß" behandeln
         f_p = min(f_p, 1e300) if np.isfinite(f_p) else 1e300
@@ -2537,6 +3050,28 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
                 return True
         return False
 
+    def polish_root(x, fx):
+        """
+        Akzeptierte Newton-Wurzel bis zur Maschinengenauigkeit nachiterieren (höchstens zwei
+        Schritte, nur wenn |f| sinkt): akzeptiert wird schon bei 1e-9 relativ zur Termgröße -
+        bei sich aufhebenden großen Termen (C*T_1 - C*T_2 mit T in K) wäre der Rest in einer
+        kleinen Folgegröße (Wärmestrom) sonst ~1e-7 relativ.
+        """
+        for _ in range(2):
+            try:
+                h = max(1e-8 * (abs(x) or abs(initial_guess) or 1.0), 1e-300)
+                dfx = (func(x + h) - func(x - h)) / (2 * h)
+                if not np.isfinite(dfx) or dfx == 0:
+                    break
+                x_new = x - fx / dfx
+                fx_new = func(x_new)
+            except Exception:
+                break
+            if not (np.isfinite(fx_new) and abs(fx_new) < abs(fx)):
+                break
+            x, fx = x_new, fx_new
+        return x
+
     try:
         x = initial_guess
 
@@ -2544,33 +3079,34 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
             fx = func(x)
 
             # Prüfe ob bereits Lösung gefunden (mit Schutz gegen
-            # Underflow/Asymptote - siehe is_credible_root)
-            if abs(fx) < 1e-10 or is_acceptable_root(x):
+            # Underflow/Asymptote - siehe is_credible_root). Nur relativ zur Termgröße:
+            # ein absolutes |f| < 1e-10 wäre bei kleinen SI-Werten immer erfüllt
+            if is_acceptable_root(x):
+                x = polish_root(x, fx)
                 if is_credible_root(x) and not nearer_root_possible(x):
                     return True, x
                 break  # Verdächtig flach bzw. nähere Wurzel möglich -> Bracket-Suche
 
-            # Skalierte Schrittweite für numerische Ableitung
-            # Bei großen x-Werten (z.B. 1e6) brauchen wir größere h
-            h = max(1e-12, 1e-8 * max(1.0, abs(x)))
+            # Schrittweite der numerischen Ableitung relativ zu x (bei x = 0 zum Startwert)
+            h = max(1e-8 * (abs(x) or abs(initial_guess) or 1.0), 1e-300)
 
             # Numerische Ableitung
             fx_plus = func(x + h)
             fx_minus = func(x - h)
             dfx = (fx_plus - fx_minus) / (2 * h)
 
-            # Prüfe ob Ableitung gültig
-            if not np.isfinite(dfx) or abs(dfx) < 1e-15:
+            # Prüfe ob Ableitung gültig (keine absolute Schwelle: x/1e20 = 5 hat f' = 1e-20;
+            # große Schritte dämpft der Schritt unten)
+            if not np.isfinite(dfx) or dfx == 0:
                 break  # Newton funktioniert nicht, verwende Bracket-Suche
 
             # Newton-Schritt
             x_new = x - fx / dfx
 
             # Prüfe Konvergenz (relative Änderung)
-            if abs(x_new - x) < 1e-10 * max(1, abs(x)):
-                # Verifiziere Lösung (Underflow-/Polstellen-sicher)
-                fx_new = func(x_new)
-                if ((abs(fx_new) < 1e-8 or is_acceptable_root(x_new)) and is_credible_root(x_new)
+            if abs(x_new - x) < 1e-10 * max(abs(x), abs(x_new)):
+                # Verifiziere Lösung (relativ zur Termgröße, Underflow-/Polstellen-sicher)
+                if (is_acceptable_root(x_new) and is_credible_root(x_new)
                         and not nearer_root_possible(x_new)):
                     return True, x_new
                 break
@@ -2581,8 +3117,8 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
             else:
                 x = x_new
 
-            # Prüfe ob Wert noch vernünftig
-            if not np.isfinite(x) or abs(x) > 1e15:
+            # Prüfe ob Wert noch endlich (keine feste Obergrenze: x/1e20 = 5 hat die Lösung 5e20)
+            if not np.isfinite(x):
                 break
 
     except Exception:
@@ -2597,10 +3133,11 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
     # Erzeuge Testpunkte mit dichter Abdeckung
     test_points = set()
 
-    # Logarithmische Skalierung für extreme Bereiche (1e-12 bis 1e9): intern ist
-    # alles SI - Wellenlängen (~1e-6 m), Viskositäten (~1e-5 m²/s) sind üblich
-    for exp in range(-12, 10):
-        base = 10**exp
+    # Logarithmische Skalierung über alle Größenordnungen (1e-30 bis 1e30): intern ist alles
+    # SI - Wellenlängen (~1e-6 m), Diffusionskoeffizienten (~1e-9 m²/s), Teilchenzahlen (~1e23);
+    # weit vom Startwert kann Newton die Steigung nicht auflösen (2*x = 1e21 ab x = 1)
+    for exp in range(-30, 31):
+        base = 10.0 ** exp
         test_points.update([base, -base, 0.5*base, 2*base, 5*base, -0.5*base, -2*base, -5*base])
 
     # Feine Abdeckung im Bereich 0-100
@@ -2634,7 +3171,9 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
                 break  # Zeitbudget erschöpft
             try:
                 v = func(x)
-                if np.isfinite(v) and abs(v) < 1e20:
+                # keine absolute Obergrenze (K = 1/y mit K = 1e30: |f| ~ 1e30 überall); Pole
+                # scheiden über das relative Residuum der Wurzel aus
+                if np.isfinite(v):
                     results.append((x, v))
             except Exception:
                 pass
@@ -2679,7 +3218,7 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
             for i in range(len(evaluated) - 1):
                 px1, pv1 = evaluated[i]
                 px2, pv2 = evaluated[i + 1]
-                local_scale = max(abs(pv1), abs(pv2), 1e-12)
+                local_scale = max(abs(pv1), abs(pv2), 1e-300)
                 if abs(pv2 - pv1) > 0.5 * local_scale:  # Großer Sprung deutet auf Singularität
                     sub_brackets = refine_interval(px1, px2, depth + 1)
                     if sub_brackets:
@@ -2722,11 +3261,14 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
         if time.monotonic() > deadline and candidates:
             break
         try:
-            root = brentq(func, a, b, xtol=1e-12, rtol=1e-12)
+            # Toleranz relativ zum Intervall (absolut 1e-12 wäre bei Wurzeln ~1e-15 zu grob)
+            # Maschinengenauigkeit: eine Wurzel nahe einem Knick (Taupunkt) braucht die volle Auflösung
+            root = brentq(func, a, b, xtol=max(1e-14 * max(abs(a), abs(b)), 1e-300),
+                          rtol=4 * np.finfo(float).eps)
             if not np.isfinite(root):
                 continue
             rel = rel_residual_at(root)
-            if rel < 1e-8:
+            if rel < 1e-8 or continuous_sign_change(float(root)):
                 candidates.append((rel, float(root)))
             elif rel < fallback_residual:
                 fallback_root = float(root)

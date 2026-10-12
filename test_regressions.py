@@ -1342,12 +1342,459 @@ eqs, variables, consts, _, orig, _ = parse_equations(
     "q_1 = 500.0000000000001\nq_2 = 500\nq_x = q_1 - q_2\neps = 0\ny = 20\nq_x = eps*y")
 ok, _, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
 check("Rundungsrest gegenüber gleichartigen Größen ist null (kein Widerspruch)", ok, msg)
+# Wurzelsuche skalenunabhängig: Akzeptanz nur relativ zur Termgröße, Umgebung/Ableitung relativ
+# zu x, Testpunkte 1e-30 ... 1e30 (früher |f| < 1e-10 absolut: y^2 = 4e-12 -> 7.8e-6 statt 2e-6)
+_scale_cases = (("A = 3.14159e-12 m^2\nA = pi*d^2/4", 'd', (4 * 3.14159e-12 / np.pi) ** 0.5),
+                ("y^2 = 4e-12", 'y', 2e-6), ("y^2 = 1e-30", 'y', 1e-15),
+                ("V = 4.18879e-15 m^3\nV = pi/6*d^3", 'd', (6 * 4.18879e-15 / np.pi) ** (1 / 3)),
+                ("D = 1e-9 m^2/s\nt = 1 s\nx^2 = D*t", 'x', 1e-9 ** 0.5),
+                ("n = 4e-19 mol\nV = 1 m^3\nT = 300 K\nR = 8.314 J/(mol*K)\np*V = n*R*T", 'p', 4e-19 * 8.314 * 300),
+                ("x^3 = 0", 'x', 0.0), ("tanh(x) = 1e-14", 'x', 1e-14), ("2*x = 1e21", 'x', 5e20),
+                ("y^2 = 4e12", 'y', 2e6), ("K = 1e30\nK = 1/y", 'y', 1e-30))
+_bad = []
+for _text, _var, _ref in _scale_cases:
+    eqs, variables, consts, _, orig, _ = parse_equations(_text)
+    ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    if not ok or abs(sol.get(_var, np.nan) - _ref) > 1e-9 * abs(_ref) + (1e-300 if _ref else 0):
+        _bad.append((_text.splitlines()[-1], sol.get(_var), _ref))
+check("Wurzelsuche über alle Größenordnungen (1e-30 ... 5e20, Wurzel 0)", not _bad, str(_bad))
+# Spurenanteil im Gleichgewicht (Knallgas, K = 1e8 -> n_O2 = 1e-16; früher keine Lösung unter 1e-12)
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "K = 1e8\nn_H2_1 = 1\nn_O2_1 = 0.25\n2*n_H2_1 = 2*n_H2 + 2*n_H2O\n2*n_O2_1 = n_H2O + 2*n_O2\n"
+    "n = n_H2 + n_H2O + n_O2\nK = (n_H2O/n)/((n_H2/n)*(n_O2/n)^0.5)")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Gleichgewicht mit Spurenanteil n_O2 = 1e-16", ok and abs(sol.get('n_O2', 0) - 1e-16) < 1e-20, f"{msg} {sol}")
+# Ohm in allen Schreibweisen: ohm, Ω (griechisch), Ω (U+2126), Ohm (deutsch)
+_, _, consts, _, _, _ = parse_equations("R_1 = 2 ohm\nR_2 = 3 Ω\nR_3 = 4 \u2126\nR_4 = 5 Ohm\nASR = 0.55 Ω*cm^2")
+check("Ohm: ohm, Ω, U+2126, Ohm; ASR in Ω*cm^2 -> SI",
+      [consts.get(k) for k in ('R_1', 'R_2', 'R_3', 'R_4')] == [2.0, 3.0, 4.0, 5.0]
+      and abs(consts.get('ASR', 0) - 0.55e-4) < 1e-18, str(consts))
+# Plateau von min/max: Terme wachsen mit der Lösung und heben sich auf -> keine Scheinlösung
+# (früher "Lösung gefunden" mit n_w = 1049, letzte Gleichung um 100 % verletzt)
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "W = 0.0017\n0.1 = n_w/(n_d + n_w)\n0.2 = n_s/(n_d + n_s)\nW = n_w + 0.0126 - min(n_w + 0.0126, n_s)")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig,
+                            initial_values={'n_d': 0.5, 'n_w': 0.5, 'n_s': 0.5})
+eqs2, variables2, consts2, _, orig2, _ = parse_equations(
+    "W = 0.0017\n0.1 = n_w/(n_d + n_w)\n0.2 = n_s/(n_d + n_s)\nn_a = n_w + 0.0126\nn_D = min(n_a, n_s)\n"
+    "W = n_a - n_D")
+ok2, sol2, msg2 = solve_system(eqs2, variables2, constants=consts2, original_equations=orig2,
+                               initial_values={v: 1.0 for v in ('n_w', 'n_d', 'n_s', 'n_a', 'n_D')})
+check("min()-Plateau, Widerspruch auf zwei Gleichungen verteilt: keine Scheinlösung",
+      not ok2 or abs(sol2['n_a'] - min(sol2['n_a'], sol2['n_s']) - 0.0017) < 1e-9, f"{ok2} {sol2}")
+# Simultan gelöster Block mit mehreren Lösungen (Gleichgewicht): die den Startwerten nächste, unabhängig
+# von der Reihenfolge der Gleichungen (früher erste konvergierte Variante: n_CH4 = -0.46 mol)
+_eq_lines = ["n_CH4_1 = n_CH4 + n_CO + n_CO2", "4*n_CH4_1 = 4*n_CH4 + 2*n_H2O + 2*n_H2",
+             "2*n_O2_1 = n_H2O + n_CO + 2*n_CO2", "n_ges = n_CH4 + n_H2O + n_CO + n_CO2 + n_H2",
+             "K_SR = (n_CO/n_ges)*(n_H2/n_ges)^3/((n_CH4/n_ges)*(n_H2O/n_ges))",
+             "K_WGS = n_CO2*n_H2/(n_CO*n_H2O)"]
+_results = set()
+for _order in (_eq_lines, _eq_lines[::-1], _eq_lines[4:] + _eq_lines[:4]):
+    _eqs, _vars, _consts, _, _orig, _ = parse_equations(
+        "n_CH4_1 = 1 mol\nn_O2_1 = 0.68*n_CH4_1\nK_SR = 90.03\nK_WGS = 1.1876\n" + "\n".join(_order))
+    _ok, _sol, _msg = solve_system(_eqs, _vars, constants=_consts, original_equations=_orig)
+    _results.add(tuple(round(_sol.get(v, float('nan')), 6) for v in ('n_CH4', 'n_CO', 'n_CO2', 'n_H2', 'n_H2O')))
+check("Gleichgewichtsblock: nächstgelegene (physikalische) Lösung, unabhängig von der Reihenfolge",
+      len(_results) == 1 and all(x > 0 for x in next(iter(_results))), str(_results))
+check("min()-Plateau: keine Scheinlösung (verletzte Gleichung ohne Empfindlichkeit)",
+      not ok or abs(sol['n_w'] + 0.0126 - min(sol['n_w'] + 0.0126, sol['n_s']) - 0.0017) < 1e-9, f"{ok} {sol}")
+
 # HumidAir: Reihenfolge der Feuchte-Eingaben aus dem Aufruf (nicht aus einer Menge)
 import subprocess as _sp
 code = "from humid_air import HumidAir; print(repr(HumidAir('h', rh=0.5, w=0.01, p_tot=1e5)))"
 outputs = {_sp.run([sys.executable, '-c', code], cwd=os.path.dirname(os.path.abspath(__file__)), capture_output=True, text=True,
                    env={**os.environ, 'PYTHONHASHSEED': str(seed)}).stdout for seed in (0, 1, 3)}
 check("HumidAir unabhängig vom Hash-Seed", len(outputs) == 1, str(outputs))
+
+# ---------------------------------------------------------------------------
+print("=== Ideale Gase und kondensierte Stoffe (NASA thermo.inp, IG:) ===")
+import CoolProp.CoolProp as _CP
+import ideal_gas
+import thermodynamics as _th
+from parser import parse_reference_states as _parse_reference
+
+_data = ideal_gas.database()
+check("thermo.inp eingelesen (> 2000 Spezies, Gase und kondensierte)",
+      len(_data) > 2000 and not _data['N2'].condensed and _data['H2O(L)'].condensed, str(len(_data)))
+check("Spezies ohne T-Bereich übersprungen (JP-4, CH4(L))", 'JP-4' not in _data and 'CH4(L)' not in _data)
+check("Leerer Bereich (Tmax <= Tmin) übersprungen, gleicher Name zusammengefasst (Fe(a))",
+      bool(np.all(_data['Ca(a)'].t_max > _data['Ca(a)'].t_min))
+      and _data['Fe(a)'].range_text() == "300 ... 1184 K", _data['Fe(a)'].range_text())
+_h2o, _h2ol = _data['H2O'], _data['H2O(L)']
+check("h(IG:H2O, 298.15 K) = -241.826 kJ/mol, s° = 188.83 J/(mol K)",
+      abs(_th.enthalpy('IG:H2O', T=298.15) * _h2o.molar_mass / 1e3 + 241.826) < 0.005
+      and abs(_th.entropy('IG:H2O', T=298.15, p=1e5) * _h2o.molar_mass - 188.83) < 0.01)
+check("h(IG:H2O(L), 298.15 K) = -285.83 kJ/mol, s° = 69.95 J/(mol K)",
+      abs(_th.enthalpy('IG:H2O(L)', T=298.15) * _h2ol.molar_mass / 1e3 + 285.83) < 0.005
+      and abs(_th.entropy('IG:H2O(L)', T=298.15) * _h2ol.molar_mass - 69.95) < 0.01)
+check("JANAF N2: cp(300 K) = 29.125 J/(mol K), H(1000) - H(298.15) = 21.460 kJ/mol",
+      abs(_th.cp('IG:N2', T=300) * 0.0280134 - 29.125) < 0.01
+      and abs((_th.enthalpy('IG:N2', T=1000) - _th.enthalpy('IG:N2', T=298.15)) * 0.0280134 / 1e3 - 21.460) < 0.01)
+_R = ideal_gas.R_UNIVERSAL / 0.0280134
+check("Δs N2 bei 300 K, 1 -> 10 bar = -R·ln(10)",
+      abs(_th.entropy('IG:N2', T=300, p=10e5) - _th.entropy('IG:N2', T=300, p=1e5) + _R * np.log(10)) < 1e-9)
+check("Ideales Gas: v = R*T/p, rho = 1/v, u = h - R*T, cv = cp - R, g = h - T*s",
+      abs(_th.volume('IG:N2', T=500, p=2e5) - _R * 500 / 2e5) < 1e-12
+      and abs(_th.density('IG:N2', T=500, p=2e5) * _th.volume('IG:N2', T=500, p=2e5) - 1) < 1e-12
+      and abs(_th.intenergy('IG:N2', T=500) - _th.enthalpy('IG:N2', T=500) + _R * 500) < 1e-6
+      and abs(_th.cv('IG:N2', T=500) - _th.cp('IG:N2', T=500) + _R) < 1e-9
+      and abs(_th.gibbs('IG:N2', T=500, p=2e5) - _th.enthalpy('IG:N2', T=500)
+              + 500 * _th.entropy('IG:N2', T=500, p=2e5)) < 1e-6)
+check("enthalpy/cp: p erlaubt, ohne Wirkung; kondensiert: s und g ohne Druckeinfluss",
+      _th.enthalpy('IG:N2', T=500, p=7e5) == _th.enthalpy('IG:N2', T=500)
+      and _th.entropy('IG:H2O(L)', T=300, p=50e5) == _th.entropy('IG:H2O(L)', T=300))
+_h, _s = _th.enthalpy('IG:CO2', T=812.3), _th.entropy('IG:CO2', T=812.3, p=3e5)
+check("Umkehrfunktionen: temperature aus h, aus s und p; pressure aus T und s, aus T und rho",
+      abs(_th.temperature('IG:CO2', h=_h) - 812.3) < 1e-7
+      and abs(_th.temperature('IG:CO2', s=_s, p=3e5) - 812.3) < 1e-7
+      and abs(_th.pressure('IG:CO2', T=812.3, s=_s) - 3e5) < 1e-4
+      and abs(_th.pressure('IG:CO2', T=812.3, rho=_th.density('IG:CO2', T=812.3, p=3e5)) - 3e5) < 1e-6)
+_T = np.array([300.0, 1500.0, 7000.0])
+check("Vektorisiert über alle T-Bereiche (Parameterstudien)",
+      np.allclose(_th.enthalpy('IG:N2', T=_T), [_th.enthalpy('IG:N2', T=t) for t in _T]))
+check("molarmass: IG in kg/mol (SI), CoolProp-Fluide ebenso",
+      abs(_th.molarmass('IG:CH4') - 0.01604246) < 1e-10
+      and abs(_th.molarmass('water') - _CP.PropsSI('M', 'Water')) < 1e-15)
+check("Namen: exakt, sonst ohne Groß-/Kleinschreibung (ig:n2, IG::N2, IG:h2o(l))",
+      _th.enthalpy('ig:n2', T=400) == _th.enthalpy('IG::N2', T=400) == _th.enthalpy('IG:N2', T=400)
+      and _th.enthalpy('IG:h2o(l)', T=300) == _th.enthalpy('IG:H2O(L)', T=300))
+check("CoolProp unverändert: enthalpy(water, ...) ohne Präfix",
+      _th.enthalpy('water', T=300, p=1e5) == _CP.PropsSI('H', 'T', 300, 'P', 1e5, 'Water'))
+for _text, _part in (("h = enthalpy(IG:co, T=300 K)", "IG:co ist nicht eindeutig: IG:CO, IG:Co"),
+                     ("h = enthalpy(IG:Cs2, T=300 K)\nh_2 = enthalpy(IG:cs2, T=300 K)", "IG:CS2, IG:Cs2"),
+                     ("s = entropy(IG:N2, T=300 K)", "Druck p angeben"),
+                     ("g = gibbs(IG:CO2, T=300 K)", "Druck p angeben"),
+                     ("v = volume(IG:H2O(L), T=300 K, p=1 bar)", "für kondensierte Stoffe nicht verfügbar"),
+                     ("c = cv(IG:H2O(L), T=300 K)", "für kondensierte Stoffe nicht verfügbar"),
+                     ("h = enthalpy(IG:N2, T=300 K, x=1)", "Dampfgehalt gibt es bei IG:-Stoffen nicht"),
+                     ("h = enthalpy(IG:N2, T=300 K, h=1)", "hängen bei idealen Gasen beide nur von T ab"),
+                     ("mu = viscosity(IG:N2, T=300 K, p=1 bar)", "für IG:-Stoffe nicht verfügbar"),
+                     ("h = enthalpy(IG:isooctane, T=300 K)", "ähnlich: IG:C8H18,isooctane"),
+                     ("M = molarmass(IG:N2, T=300 K)", "keine Zustandsgrößen")):
+    check(f"IG-Meldung beim Einlesen: {_text.splitlines()[-1]!r}", _part in parse_error(_text), parse_error(_text))
+try:
+    _th.enthalpy('IG:N2', T=150.0)
+    check("T außerhalb des Datenbereichs -> Meldung", False)
+except ValueError as _exc:
+    check("T außerhalb des Datenbereichs -> Meldung mit Bereich", "200 ... 20000 K" in str(_exc), str(_exc))
+try:
+    _parse_reference("REFERENCE IG:N2 IIR")
+    check("REFERENCE IG:... -> Fehler", False)
+except EquationSyntaxError as _exc:
+    check("REFERENCE IG:... -> Fehler (Bildungsenthalpie, absolute Entropie)", "gilt nicht für IG:" in str(_exc))
+set_reference_states(parse_reference_states("REFERENCE water NBP"))
+_h_ig = _th.enthalpy('IG:H2O', T=400)
+_g_ref = _th.gibbs('water', T=300, p=1e5)
+_g_calc = _th.enthalpy('water', T=300, p=1e5) - 300 * _th.entropy('water', T=300, p=1e5)
+set_reference_states({})
+check("REFERENCE water verschiebt IG:H2O nicht", _h_ig == _th.enthalpy('IG:H2O', T=400))
+check("gibbs(water) mit REFERENCE = h - T*s im Bezugszustand", abs(_g_ref - _g_calc) < 1e-6, f"{_g_ref} {_g_calc}")
+# Stoffnamen mit Klammern und Komma bleiben ein Argument, keine Variablen
+eqs, variables, consts, _, orig, uvals = parse_equations(
+    "h = enthalpy(IG:C8H18,isooctane, T=500 K)\nh_l = enthalpy(IG:H2O(L), T=T_w)\nT_w = 300 K\n"
+    "h_a = enthalpy(IG:ZnSO4(a'), T=T_z)\nT_z = 1000 K")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+_units = propagate_all_units_complete(orig, {k: u.calc_unit for k, u in uvals.items() if u.calc_unit})
+check("IG:C8H18,isooctane, IG:H2O(L), IG:ZnSO4(a'): ein Argument, keine Variablen daraus, Einheit J/kg",
+      variables == {'h', 'h_l', 'h_a'} and ok
+      and abs(sol['h'] - ideal_gas.calculate_property('enthalpy', 'C8H18,isooctane', T=500)) < 1e-9
+      and abs(sol['h_a'] - ideal_gas.calculate_property('enthalpy', "ZnSO4(a')", T=1000)) < 1e-9
+      and _units.get('h_a') == 'J/kg',
+      f"{variables} {msg} {_units}")
+check("Zeile mit '=' nur im Aufruf (Fortsetzung ohne Klammer) wird gemeldet, nicht still verworfen",
+      "geht nur in einer offenen Klammer" in parse_error("a = 1\nb = a + 2\n  + enthalpy(water, T=a, p=1e5)"),
+      parse_error("a = 1\nb = a + 2\n  + enthalpy(water, T=a, p=1e5)"))
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "T_1 = 300 K\np_1 = 1 bar\np_2 = 10 bar\ns_1 = entropy(IG:N2, T=T_1, p=p_1)\n"
+    "s_1 = entropy(IG:N2, T=T_2, p=p_2)")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Implizit: T_2 der Isentrope aus entropy(IG:N2, T=T_2, p=p_2) = s_1",
+      ok and abs(sol['T_2'] - _th.temperature('IG:N2', s=_th.entropy('IG:N2', T=300, p=1e5), p=10e5)) < 1e-6,
+      msg)
+
+# ---------------------------------------------------------------------------
+print("=== Chemisches Gleichgewicht (EQUILIBRIUM, Gibbs-Minimierung) ===")
+import equilibrium as _eqm
+from parser import parse_equilibria
+from scipy.optimize import fsolve as _fsolve
+
+_GG_HEAD = "n_CH4_1 = 1 mol\nn_O2_1 = 0.66 mol\nn_N2_1 = n_O2_1*0.79/0.21\nT = 745 °C\np = 1 bar\n"
+_GG_OUT = "OUT IG:CH4 = a, IG:H2O = b, IG:CO = c, IG:CO2 = d, IG:H2 = e, IG:N2 = f"
+for _form in ("EQUILIBRIUM T=T, p=p\n  IN IG:CH4 = n_CH4_1, IG:O2 = n_O2_1, IG:N2 = n_N2_1\n  " + _GG_OUT,
+              "EQUILIBRIUM T=T, p=p IN IG:CH4 = n_CH4_1, IG:O2 = n_O2_1, IG:N2 = n_N2_1 " + _GG_OUT,
+              "equilibrium t=T, p=p\n  in IG:CH4 = n_CH4_1, IG:O2 = n_O2_1,\n     IG:N2 = n_N2_1\n  out IG:CH4 = a,\n"
+              "      IG:H2O = b, IG:CO = c, IG:CO2 = d, IG:H2 = e, IG:N2 = f"):
+    _st = parse_equilibria(_GG_HEAD + _form)
+    check(f"EQUILIBRIUM einlesen: {_form.splitlines()[0][:40]!r}",
+          len(_st) == 1 and _st[0].line == 6 and [n for n, _ in _st[0].outputs][0] == 'IG:CH4'
+          and len(_st[0].equations()) == 6, str(_st))
+# Gibbs-Minimum = Gleichgewichtskonstanten (unabhängig: zwei K-Gleichungen mit fsolve, g° aus ideal_gas)
+eqs, variables, consts, _, orig, uvals = parse_equations(
+    _GG_HEAD + "EQUILIBRIUM T=T, p=p\n  IN IG:CH4 = n_CH4_1, IG:O2 = n_O2_1, IG:N2 = n_N2_1\n  " + _GG_OUT)
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+_g = {n: ideal_gas.standard_gibbs_RT(ideal_gas.find_species(n), 1018.15) for n in ('CH4', 'H2O', 'CO', 'CO2', 'H2')}
+_K_SR, _K_WGS = np.exp(-(_g['CO'] + 3 * _g['H2'] - _g['CH4'] - _g['H2O'])), np.exp(-(_g['CO2'] + _g['H2'] - _g['CO'] - _g['H2O']))
+def _kform(v):
+    ch4, co, co2 = v
+    h2o = 2 * 0.66 - co - 2 * co2
+    h2 = (4 - 4 * ch4 - 2 * h2o) / 2
+    n = ch4 + h2o + co + co2 + h2 + 0.66 * 0.79 / 0.21
+    return [ch4 + co + co2 - 1, co * h2 ** 3 / (ch4 * h2o * n ** 2) / _K_SR - 1, co2 * h2 / (co * h2o) / _K_WGS - 1]
+_ref = _fsolve(_kform, [0.02, 0.85, 0.13], xtol=1e-14)
+check("EQUILIBRIUM = Gleichgewichtskonstanten (Dampfreformierung, Shift) bei 745 °C",
+      ok and np.allclose([sol['a'], sol['c'], sol['d']], _ref, rtol=1e-8), f"{msg} {[sol.get(k) for k in 'acd']} {_ref}")
+_units = propagate_all_units_complete(orig, {k: u.calc_unit for k, u in uvals.items() if u.calc_unit})
+check("EQUILIBRIUM: Austrittsmengen in der Einheit der Eintrittsmengen (mol), T absolut",
+      all(_units.get(v) in ('mol', 'mole') for v in 'abcdef') and _units.get('T') == 'K', str(_units))
+# Spurenanteil und Positivität (Knallgas mit H2-Überschuss: O2 ~ 1e-20)
+_m = _eqm.equilibrium_amounts(['IG:H2', 'IG:O2', 'IG:H2O'], ['IG:H2', 'IG:O2'], 1000.0, 1e5, [1.0, 0.25])
+_Kp = np.exp(-(ideal_gas.standard_gibbs_RT(ideal_gas.find_species('H2O'), 1000.0)
+               - ideal_gas.standard_gibbs_RT(ideal_gas.find_species('H2'), 1000.0)
+               - 0.5 * ideal_gas.standard_gibbs_RT(ideal_gas.find_species('O2'), 1000.0)))
+_x = {k: v / sum(_m.values()) for k, v in _m.items()}
+check("Spurenanteil O2 ~ 1e-20 positiv und genau (K der Knallgasreaktion)",
+      _m['IG:O2'] > 0 and abs(_x['IG:H2O'] / (_x['IG:H2'] * _x['IG:O2'] ** 0.5) / _Kp - 1) < 1e-9, str(_m))
+# Ruß: Methanspaltung CH4 = C(gr) + 2 H2, K = x_H2^2/x_CH4 bei 1 bar (geschlossen)
+_K = np.exp(-(ideal_gas.standard_gibbs_RT(ideal_gas.find_species('C(gr)'), 1000.0)
+              + 2 * ideal_gas.standard_gibbs_RT(ideal_gas.find_species('H2'), 1000.0)
+              - ideal_gas.standard_gibbs_RT(ideal_gas.find_species('CH4'), 1000.0)))
+_y = (-_K + np.sqrt(_K ** 2 + 4 * _K)) / 2          # x_H2: x^2/(1 - x) = K
+_c = _eqm.equilibrium_amounts(['IG:CH4', 'IG:H2', 'IG:C(gr)'], ['IG:CH4'], 1000.0, 1e5, [1.0])
+check("Ruß: Methanspaltung bei 1000 K (C(gr) erscheint, x_H2 wie K)",
+      _c['IG:C(gr)'] > 0.5 and abs(_c['IG:H2'] / (_c['IG:H2'] + _c['IG:CH4']) - _y) < 1e-10, f"{_c} {_y}")
+_c2 = _eqm.equilibrium_amounts(['IG:CO', 'IG:CO2', 'IG:O2', 'IG:C(gr)'], ['IG:CO2'], 1500.0, 1e5, [1.0])
+check("Ruß nur, wenn stabil: CO2 bei 1500 K bildet keinen C(gr)", _c2['IG:C(gr)'] == 0.0, str(_c2))
+# Kondensat: H2O(L) - Partialdruck = Sättigungsdruck aus g°(Flüssigkeit) = g°(Gas) + ln(p_s/p°)
+_w = _eqm.equilibrium_amounts(['IG:N2', 'IG:H2O', 'IG:H2O(L)'], ['IG:N2', 'IG:H2O'], 330.0, 1e5, [1.0, 0.3])
+_ps = 1e5 * np.exp(ideal_gas.standard_gibbs_RT(ideal_gas.find_species('H2O(L)'), 330.0)
+                   - ideal_gas.standard_gibbs_RT(ideal_gas.find_species('H2O'), 330.0))
+check("Kondensat: H2O(L) erscheint, Partialdruck = Sättigungsdruck der Daten",
+      _w['IG:H2O(L)'] > 0 and abs(_w['IG:H2O'] / (_w['IG:N2'] + _w['IG:H2O']) * 1e5 / _ps - 1) < 1e-9, f"{_w} {_ps}")
+_w2 = _eqm.equilibrium_amounts(['IG:N2', 'IG:H2O', 'IG:H2O(L)'], ['IG:N2', 'IG:H2O'], 330.0, 1e5, [1.0, 0.05])
+check("Kein Kondensat unter dem Sättigungsdruck", _w2['IG:H2O(L)'] == 0.0 and abs(_w2['IG:H2O'] - 0.05) < 1e-15, str(_w2))
+# Adiabater CPOX-Reformer (Beispiel_02): T_2 unbekannt, OHNE Startwerte (Energiebilanz außen, Gleichgewicht innen)
+_cpox = ("n_CH4_1 = 0.003717 mol/s\nlambda = 0.34\nn_O2_1 = 2*lambda*n_CH4_1\nn_N2_1 = n_O2_1*0.79/0.21\nT_1 = 20 °C\n"
+         "p = 1 bar\nEQUILIBRIUM T=T_2, p=p\n  IN IG:CH4 = n_CH4_1, IG:O2 = n_O2_1, IG:N2 = n_N2_1\n"
+         "  OUT IG:CH4 = n_CH4, IG:H2O = n_H2O, IG:CO = n_CO, IG:CO2 = n_CO2, IG:H2 = n_H2, IG:N2 = n_N2\n"
+         "H_1 = n_CH4_1*enthalpy(IG:CH4, T=T_1)*molarmass(IG:CH4) + n_O2_1*enthalpy(IG:O2, T=T_1)*molarmass(IG:O2)"
+         " + n_N2_1*enthalpy(IG:N2, T=T_1)*molarmass(IG:N2)\n"
+         "H_1 = (n_CH4*enthalpy(IG:CH4, T=T_2)*molarmass(IG:CH4) + n_H2O*enthalpy(IG:H2O, T=T_2)*molarmass(IG:H2O)\n"
+         "  + n_CO*enthalpy(IG:CO, T=T_2)*molarmass(IG:CO) + n_CO2*enthalpy(IG:CO2, T=T_2)*molarmass(IG:CO2)\n"
+         "  + n_H2*enthalpy(IG:H2, T=T_2)*molarmass(IG:H2) + n_N2*enthalpy(IG:N2, T=T_2)*molarmass(IG:N2))")
+_t0 = time.time()
+eqs, variables, consts, _, orig, _ = parse_equations(_cpox)
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+_elapsed = time.time() - _t0
+_H_out = sum(sol[v] * _th.enthalpy(f'IG:{s}', T=sol.get('T_2', 300.0)) * _th.molarmass(f'IG:{s}')
+             for v, s in (('n_CH4', 'CH4'), ('n_H2O', 'H2O'), ('n_CO', 'CO'), ('n_CO2', 'CO2'), ('n_H2', 'H2'), ('n_N2', 'N2'))) if ok else 0
+check("Adiabater CPOX ohne Startwerte: T_2 = 1047.87 K, Energiebilanz erfüllt",
+      ok and abs(sol['T_2'] - 1047.8677) < 1e-3 and abs(_H_out / sol['H_1'] - 1) < 1e-9 and _elapsed < 20,
+      f"{msg} T_2={sol.get('T_2')} {_elapsed:.1f} s")
+for _text, _part in (("T = 1000 K\np = 1 bar\nn = 1 mol\nEQUILIBRIUM T=T, p=p\n  OUT IG:CH4 = a", "genau einen Teil IN"),
+                     ("T = 1000 K\nn = 1 mol\nEQUILIBRIUM T=T\n  IN IG:CH4 = n\n  OUT IG:CH4 = a", "p=... angeben"),
+                     ("T = 1000 K\np = 1 bar\nn = 1 mol\nEQUILIBRIUM T=T, p=p\n  IN IG:CH4 = n\n  OUT IG:H2 = b",
+                      "Element C der Eintrittsstoffe"),
+                     ("T = 1000 K\np = 1 bar\nEQUILIBRIUM T=T, p=p\n  IN IG:CH4 = 2 kg\n  OUT IG:CH4 = a, IG:H2 = b, IG:C(gr) = c",
+                      "keine Stoffmenge"),
+                     ("p = 1 bar\nn = 1 mol\nEQUILIBRIUM T=5 bar, p=p\n  IN IG:CH4 = n\n  OUT IG:CH4 = a, IG:H2 = b, IG:C(gr) = c",
+                      "erwartet: K"),
+                     ("T = 1000 K\np = 1 bar\nn = 1 mol\nEQUILIBRIUM T=T, p=p\n  IN IG:Methan = n\n  OUT IG:CH4 = a",
+                      "Zeile 4: EQUILIBRIUM IN: Unbekannter Stoff IG:Methan"),
+                     ("T = 1000 K\np = 1 bar\nn = 1 mol\nEQUILIBRIUM T=T, p=p\n  IN IG:CH4 = n\n  OUT IG:C(gr) = c",
+                      "mindestens einen gasförmigen Stoff"),
+                     ("T = 1000 K\np = 1 bar\nn = 1 mol\nEQUILIBRIUM T=T, p=p\n  IN IG:CH4 = n\n  OUT IG:CH4 = 2*a, IG:H2 = b",
+                      "Name der Variable")):
+    check(f"EQUILIBRIUM-Meldung: {_part}", _part in parse_error(_text), parse_error(_text))
+# Name mit Komma unter OUT, Ein-Zeilen-Form, Parameterstudie über T
+eqs, variables, consts, sweeps, orig, _ = parse_equations(
+    "n = 1 mol\nT = 800:200:1200 K\np = 1 bar\nEQUILIBRIUM T=T, p=p IN IG:CH4 = n "
+    "OUT IG:CH4 = a, IG:H2 = b, IG:C(gr) = c, IG:C2H2,acetylene = d")
+from solver import solve_parametric as _solve_parametric
+ok, sol, msg = _solve_parametric(eqs, variables, sweeps, {}, constants=consts, original_equations=orig)
+check("EQUILIBRIUM: Parameterstudie über T, Name mit Komma (IG:C2H2,acetylene)",
+      ok and np.all(np.diff(sol['c']) > 0) and np.all(np.asarray(sol['d']) > 0)
+      and np.allclose(np.asarray(sol['a']) + np.asarray(sol['c']) + 2 * np.asarray(sol['d']), 1.0, rtol=1e-12),
+      f"{msg} {sol.get('c')}")
+
+# Befunde der Validierung (fc_b): Datenbereich kondensierter Stoffe, Einheiten, Schreibweisen, Meldungen
+_c3 = _eqm.equilibrium_amounts(['IG:N2', 'IG:H2O', 'IG:H2O(cr)', 'IG:H2O(L)'], ['IG:N2', 'IG:H2O'], 333.15, 1e5, [1.0, 0.5])
+check("Kondensierter Stoff außerhalb seines Datenbereichs wird ausgelassen (H2O(cr) bei 60 °C)",
+      _c3['IG:H2O(cr)'] == 0.0 and _c3['IG:H2O(L)'] > 0, str(_c3))
+eqs, variables, consts, _, orig, uvals = parse_equations(
+    "T = 60 °C\nEQUILIBRIUM T=T, p=1 bar\n  {Eintritt}\n  IN IG:N2 = 1 mol,\n\n     IG:H2O = 0.5 mol\n"
+    "  \"Austritt\"\n  OUT IG:N2 = a, IG:H2O = b, IG:H2O(L) = c\nin = 3\nout = b/(a + b)")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+_units = propagate_all_units_complete(orig, {k: u.calc_unit for k, u in uvals.items() if u.calc_unit})
+check("EQUILIBRIUM: Kommentar-/Leerzeilen in der Anweisung, Variablen in/out, Zahl mit Einheit behält mol",
+      ok and _units.get('a') in ('mol', 'mole') and abs(sol['out'] * 1e5 - _ps_60) < 1 if (
+          _ps_60 := 1e5 * np.exp(ideal_gas.standard_gibbs_RT(ideal_gas.find_species('H2O(L)'), 333.15)
+                                 - ideal_gas.standard_gibbs_RT(ideal_gas.find_species('H2O'), 333.15))) else False,
+      f"{msg} {_units.get('a')} {sol.get('out')}")
+from parser import readable as _readable
+check("EQUILIBRIUM: Meldungen zeigen die Anweisung (EQUILIBRIUM (Zeile n): Stoff = Variable), intern Gleichung",
+      any(_readable(f"Fehler in '{o}': x") == "Fehler in 'EQUILIBRIUM (Zeile 2): IG:N2 = a': x" for o in orig.values())
+      and all('equilibrium(' in o for o in orig.values() if 'IG:' in o), str(list(orig.values())))
+for _text, _part in (("n = 1 mol\nEQUILIBRIUM T=300 K, p=1 bar\n  IN IG:N2 = 0,07 mol/s, IG:O2 = n\n  OUT IG:N2 = a, IG:O2 = b",
+                      "Dezimalkomma"),
+                     ("n = 1 mol\nEQUILIBRIUM T=20:10:80 °C, p=1 bar\n  IN IG:N2 = n\n  OUT IG:N2 = a", "Parameterstudie"),
+                     ("n = 1 mol\nEQUILIBRIUM T=900 K, p=1 bar\n  IN IG:CH4 = n\n  OUT IG:CH4 = a, IG:H2 = a, IG:C(gr) = c",
+                      "a steht mehrfach"),
+                     ("n = 1 mol\nEQUILIBRIUM T=900 K, p=1 bar\n  IN IG:N2 n\n  OUT IG:N2 = a", "erwartet Stoff = Menge")):
+    check(f"EQUILIBRIUM-Meldung: {_part}", _part in parse_error(_text), parse_error(_text))
+eqs, variables, consts, _, orig, _ = parse_equations("equilibrium = 3\nx = equilibrium + 1")
+check("Variable mit dem Namen equilibrium bleibt möglich", consts.get('equilibrium') == 3.0 and 'x' in variables,
+      str((consts, variables)))
+# Argument mit falscher Dimension (allgemein): T = 1 bar in enthalpy(), Masse als EQUILIBRIUM-Menge
+from unit_constraints import check_all_unit_consistency as _check_units
+_w = _check_units({'T': 1e5, 'p': 1e5, 'h': 1.0}, {"(h) - (enthalpy('water', T=T, p=p))": "h = enthalpy(water, T=T, p=p)"},
+                  {'T': 'Pa', 'p': 'Pa'})
+check("Einheitenwarnung: Druck als T= in enthalpy()", any('T= T hat die Einheit Pa' in str(w.units) for w in _w), str(_w))
+_eq_m = "(a) - (equilibrium('IG:N2', 'IG:N2', 'IG:N2', T, p, m))"
+_w = _check_units({'a': 1, 'm': 0.002, 'T': 300, 'p': 1e5}, {_eq_m: "EQUILIBRIUM (Zeile 3): IG:N2 = a"},
+                  {'m': 'kg/s', 'T': 'K', 'p': 'Pa'})
+check("Einheitenwarnung: Masse als Menge in EQUILIBRIUM (Stoffmenge erwartet)",
+      any('keine' in str(w.units) or 'Stoffmenge' in str(w.units) for w in _w), str(_w))
+# Plateau: Gleichung für einen ganzen Bereich erfüllt -> nicht eindeutig (keine willkürliche Lösung)
+for _text, _var in (("y = 3\ny = max(0, x - 5) + 3", 'x'),
+                    ("n_N2 = 0.01 mol/s\nn_W = 0.004 mol/s\np = 1 bar\nEQUILIBRIUM T=T, p=p\n  IN IG:N2 = n_N2, IG:H2O = n_W\n"
+                     "  OUT IG:N2 = a, IG:H2O = b, IG:H2O(L) = n_L\nn_L = 0 mol/s", 'T')):
+    eqs, variables, consts, _, orig, _ = parse_equations(_text)
+    ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    check(f"Plateau -> 'Lösung nicht eindeutig' ({_text.splitlines()[-1]})",
+          not ok and 'nicht eindeutig' in msg and f'Bereich von {_var}' in msg, msg)
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "n_N2 = 0.01 mol/s\nn_W = 0.004 mol/s\np = 1 bar\nEQUILIBRIUM T=T, p=p\n  IN IG:N2 = n_N2, IG:H2O = n_W\n"
+    "  OUT IG:N2 = a, IG:H2O = b, IG:H2O(L) = n_L\nn_L = 0.5*n_W")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Umkehraufgabe: Temperatur für gegebene Kondensatmenge (eindeutig)",
+      ok and abs(sol['n_L'] - 0.002) < 1e-15 and 320 < sol['T'] < 335, f"{msg} {sol.get('T')}")
+
+# Kleine Zielmenge knapp über dem Rauschen der Funktion (Taupunkt über n_L = 1e-9*n_W): Vorzeichenwechsel
+# einer stetigen Funktion auf Maschinengenauigkeit ist eine Wurzel (Pol und Sprung bleiben keine)
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "n_N2 = 0.07 mol/s\nn_O2 = 0.0126 mol/s\nn_W = 0.0226 mol/s\np = 1 bar\nEQUILIBRIUM T=T_tau, p=p\n"
+    "  IN IG:N2 = n_N2, IG:O2 = n_O2, IG:H2O = n_W\n  OUT IG:N2 = a, IG:O2 = b, IG:H2O = n_D, IG:H2O(L) = n_L\n"
+    "n_L = 1e-9*n_W")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+_ps = 1e5 * 0.0226 / (0.07 + 0.0126 + 0.0226)       # Taupunkt: Dampfdruck = Partialdruck des Wassers
+_g, _l = ideal_gas.find_species('H2O'), ideal_gas.find_species('H2O(L)')
+from scipy.optimize import brentq as _brentq
+_T_dew = _brentq(lambda T: 1e5 * np.exp(ideal_gas.standard_gibbs_RT(_l, T) - ideal_gas.standard_gibbs_RT(_g, T)) - _ps,
+                300, 360)
+check("Taupunkt als Umkehraufgabe mit n_L = 1e-9*n_W (Rauschen der Stoffwerte ~1e-10)",
+      ok and abs(sol['T_tau'] - _T_dew) < 1e-6, f"{msg} {sol.get('T_tau')} {_T_dew}")
+for _text in ("1/(x-2) = 0", "floor(x) - 2.5 = 0", "y = IF(x, 3, -1, 0, 1)\ny = 0.5"):
+    eqs, variables, consts, _, orig, _ = parse_equations(_text)
+    ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    check(f"Pol/Sprung bleibt ohne Lösung: {_text.splitlines()[0]}", not ok, f"{msg} {sol}")
+for _text, _part in (("n = 1 mol\nEQUILIBRIUM T=300 K; p=1 bar\n  IN IG:N2 = n\n  OUT IG:N2 = a", "nicht ';'"),
+                     ("n = 1 mol\nEQUILIBRIUM T=300 K, p=1 bar\n  IN N2 = n\n  OUT IG:N2 = a", "Präfix IG:"),
+                     ("n = 1 mol\nEQUILIBRIUM\n  IN IG:N2 = n\n  OUT IG:N2 = a", "T=... und p=... angeben"),
+                     ("n = 1 mol\nEQUILIBRIUM T=300 K, p=1 bar\n  IN IG:N2 = n\n  OUT IG:N2 = a,\ny = 2*a",
+                      "Zeile 5 gehört wegen ','"),
+                     ("n = 1 mol\nEQUILIBRIUM T=300 K, p=1 bar\n  IN IG:N2 = 0.5*n + 0.2 mol\n  OUT IG:N2 = a",
+                      "Menge von IG:N2 = 0.5*n + 0.2 mol: Syntaxfehler")):
+    check(f"EQUILIBRIUM-Meldung: {_part}", _part in parse_error(_text), parse_error(_text))
+# Masse statt Stoffmenge: nur die Warnung mit der Ursache, keine Folgewarnung "Inkompatible Terme"
+_eqs, _v, _c, _, _orig, _uv = parse_equations(
+    "m = 2 g/s\nn_W = 0.004 mol/s\nEQUILIBRIUM T=300 K, p=1 bar\n  IN IG:N2 = m, IG:H2O = n_W\n"
+    "  OUT IG:N2 = a, IG:H2O = b, IG:H2O(L) = c")
+_ok, _sol, _ = solve_system(_eqs, _v, constants=_c, original_equations=_orig)
+_w = _check_units({**_c, **_sol}, _orig, {k: u.calc_unit for k, u in _uv.items() if u.calc_unit})
+check("Masse als Menge: genau eine Warnung (Stoffmenge erwartet)",
+      len(_w) == 1 and 'Stoffmenge' in _w[0].explanation, str([w.explanation for w in _w]))
+
+# Validierung fc_a/fc_c/fc_d: Gasphase verschwindet, unerfüllbare Bilanz, Ströme summieren, Meldungen
+_out = ['IG:H2', 'IG:O2', 'IG:H2O', 'IG:H2O(L)']
+_n350 = _eqm.equilibrium_amounts(_out, ['IG:H2', 'IG:O2'], 350.0, 1e5, [1.0, 0.5])
+_n400 = _eqm.equilibrium_amounts(_out, ['IG:H2', 'IG:O2'], 400.0, 1e5, [1.0, 0.5])
+check("Gasphase verschwindet (H2 + O2 stöchiometrisch, 350 K): nur H2O(L), keine Restgase; 400 K nur Dampf",
+      _n350['IG:H2O(L)'] == 1.0 and _n350['IG:H2'] == 0 and _n350['IG:H2O'] == 0
+      and _n400['IG:H2O(L)'] == 0 and abs(_n400['IG:H2O'] - 1) < 1e-12, f"{_n350} {_n400}")
+import time as _time_mod
+_t0 = _time_mod.time()
+try:
+    _eqm.equilibrium_amounts(['IG:H2', 'IG:H2O'], ['IG:H2', 'IG:O2'], 1000.0, 1e5, [1.0, 1.0])
+    _msg_inf = ''
+except Exception as _exc:
+    _msg_inf = str(_exc)
+check("Unerfüllbare Elementbilanz: sofort 'Überschuss an O' (statt 'keine Konvergenz' nach 30 s)",
+      'Überschuss an O' in _msg_inf and 'IG:O2' in _msg_inf and _time_mod.time() - _t0 < 2, _msg_inf)
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "n_a = 0.5 mol\nEQUILIBRIUM T=1000 K, p=1 bar\n  IN IG:H2 = 1 mol, IG:H2O = n_a, IG:H2O = 0.3 mol\n"
+    "  OUT IG:H2 = a, IG:H2O = b, IG:O2 = c")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Derselbe Stoff zweimal unter IN: Mengen addiert (zwei Ströme)", ok and abs(sol['b'] - 0.8) < 1e-9, f"{msg} {sol}")
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "in = 2 mol\nEQUILIBRIUM T=300 K, p=1 bar IN IG:N2 = in OUT IG:N2 = out\ny = out")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("IN/OUT nur vor einem Eintrag Stoff = ...: Variable in direkt vor OUT", ok and sol.get('y') == 2.0, f"{msg} {sol}")
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "n_1 = 1 mol\nn_2 = 0.1 mol\nEQUILIBRIUM T=100 K, p=1 bar\n  IN IG:N2 = n_1, IG:H2O = n_2\n  OUT IG:N2 = a, IG:H2O = b")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Gleiche Ursache in mehreren Gleichungen einmal gemeldet", msg.count('außerhalb ihres Datenbereichs') == 1, msg)
+check("Anzeige fasst die Gleichungen einer Anweisung zusammen",
+      "'EQUILIBRIUM (Zeile 3): IG:N2 = a, IG:H2O = b'" in _readable(msg), _readable(msg))
+_w = _check_units({'a': 1, 'n_1': 1, 'n_2': 0.25}, {"(a) - (equilibrium('IG:H2', 'IG:H2|IG:O2', 'IG:H2|IG:H2O', T, p, n_1, n_2))":
+                   "EQUILIBRIUM (Zeile 3): IG:H2 = a"}, {'n_1': 'mole', 'n_2': 'mole / second', 'T': 'K', 'p': 'Pa'})
+check("IN-Mengen in verschiedenen Einheiten (mol, mol/s): Warnung mit beiden Einheiten",
+      any('verschiedenen Einheiten' in w.explanation and 'mol/s' in w.explanation for w in _w), str([w.explanation for w in _w]))
+# Meldung der 1-D-Suche nennt die richtige Grenze (gemerkte Werte kopiert: fsolve verändert sein Array)
+eqs, variables, consts, _, orig, _ = parse_equations("h_t = -150 kJ/kg\nenthalpy(IG:O2, T=T_x) = h_t")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig, initial_values={'T_x': 350.0})
+check("Datenbereich: Meldung nennt die untere Grenze (T = 199 K), nicht 20000 K", 'T = 199 K' in msg, msg)
+# Gescheiterter Block nennt den Auswertungsfehler (Stoffwert außerhalb des Datenbereichs)
+eqs, variables, consts, _, orig, _ = parse_equations(
+    "T_1 = 20 °C\nn_1 = 1 mol\nEQUILIBRIUM T=T_2, p=1 bar\n  IN IG:CH4 = n_1\n  OUT IG:CH4 = n_CH4, IG:H2 = n_H2, IG:C(gr) = n_C\n"
+    "n_1*enthalpy(IG:CH4, T=T_1)*molarmass(IG:CH4) = n_CH4*enthalpy(IG:CH4, T=T_2)*molarmass(IG:CH4) + "
+    "n_H2*enthalpy(IG:H2, T=T_2)*molarmass(IG:H2) + n_C*enthalpy(IG:C(gr), T=T_2)*molarmass(IG:C(gr))")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Block scheitert am Datenbereich von C(gr): Meldung nennt die Ursache", not ok and 'IG:C(gr)' in msg
+      and 'außerhalb des Datenbereichs' in msg, msg)
+# Plateau skalenfrei, Underflow kein Plateau
+for _text, _expect in (("y = 3e-9\ny = max(0, x - 5e-6) + 3e-9", True), ("exp(-x^2) = 0", False)):
+    eqs, variables, consts, _, orig, _ = parse_equations(_text)
+    ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+    check(f"Plateau-Erkennung skalenfrei: {_text.splitlines()[-1]} -> nicht eindeutig: {_expect}",
+          ('nicht eindeutig' in msg) == _expect and not ok, msg)
+# Überbestimmter Block mit abhängiger Schleife: eine ihrer Gleichungen wird Prüfgleichung
+eqs, variables, consts, _, orig, _ = parse_equations("x + y = 10\n2*x + 2*y = 20\nw = ln(x - 7)\nw = 0.5")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("Abhängige Schleife im überbestimmten Block: gelöst über die übrige Information",
+      ok and abs(sol['x'] - (7 + np.exp(0.5))) < 1e-9 and abs(sol['y'] - (3 - np.exp(0.5))) < 1e-9, f"{msg} {sol}")
+_n_gas = _eqm.equilibrium_amounts(['IG:N2', 'IG:O2', 'IG:NO2'], ['IG:N2', 'IG:O2'], 298.15, 1e5, [1.0, 1.0])
+check("Gas außerhalb seines Datenbereichs (NO2 ab 300 K) ausgelassen: Menge 0, übrige wie ohne NO2",
+      _n_gas['IG:NO2'] == 0 and _n_gas['IG:N2'] == 1.0 and _n_gas['IG:O2'] == 1.0, str(_n_gas))
+try:
+    _eqm.equilibrium_amounts(['IG:N2'], ['IG:N2'], 100.0, 1e5, [1.0])
+    _msg_gas = ''
+except Exception as _exc:
+    _msg_gas = str(_exc)
+check("Alle Stoffe eines Elements außerhalb ihres Datenbereichs: Meldung mit Bereich",
+      'fallen weg' in _msg_gas and '200 ... 20000 K' in _msg_gas, _msg_gas)
+try:
+    _eqm.equilibrium_amounts(['IG:CO', 'IG:CO2', 'IG:H2O'], ['IG:CH4', 'IG:H2O', 'IG:CO', 'IG:CO2', 'IG:H2'], 1000.0, 1e5,
+                             [1.0, 2.0, 2.0, 2.0, 2.0])
+    _msg_sug = ''
+except Exception as _exc:
+    _msg_sug = str(_exc)
+check("Vorschlag bei Überschuss: nur Eintrittsstoffe, die noch nicht unter OUT stehen",
+      '(z.B. IG:CH4, IG:H2)' in _msg_sug, _msg_sug)
+_eqs, _v, _c, _, _orig, _uv = parse_equations(
+    "n_1 = 1 mol\nn_2 = 1 mol\nn_3 = 1 mol/s\nEQUILIBRIUM T=300 °C, p=1 bar\n  IN IG:CH4 = n_1, IG:H2O = n_2, IG:H2O = n_3\n"
+    "  OUT IG:CH4 = a, IG:CO = b, IG:CO2 = c, IG:H2 = d, IG:H2O = e")
+_ok, _sol, _ = solve_system(_eqs, _v, constants=_c, original_equations=_orig)
+_w = _check_units({**_c, **_sol}, _orig, {k: u.calc_unit for k, u in _uv.items() if u.calc_unit})
+check("Gleiche Einheitenwarnung in mehreren Gleichungen einmal (mit allen Gleichungen)",
+      len(_w) == 1 and len(_w[0].equations) == 5, str([(w.explanation[:60], len(w.equations)) for w in _w]))
+eqs, variables, consts, _, orig, _ = parse_equations("x = ln(-y)\ny = 2")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+from diagnostics import describe_unsolved as _describe
+_d = _describe(eqs, set(variables), sol, orig)
+check("Direkte Auswertung aus festen Werten: kein Hinweis auf Startwerte", 'Eingaben prüfen' in _d
+      and 'Startwerte' not in _d, _d)
+check("Fortsetzung ohne Klammer: Hinweis auf die Klammerregel",
+      'offenen Klammer' in parse_error("a = 1\nb = 2\ny = a + b +\n    a*b"), parse_error("a = 1\nb = 2\ny = a + b +\n    a*b"))
 
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")

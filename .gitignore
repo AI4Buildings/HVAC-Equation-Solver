@@ -42,6 +42,9 @@ Thumbs.db
 *.txt
 !README.txt
 !requirements.txt
+# NASA-Stoffdaten: Lizenz und NOTICE gehören zur Datei (Apache 2.0)
+!data/nasa/LICENSE.txt
+!data/nasa/NOTICE.txt
 
 # Claude Code
 .claude/
