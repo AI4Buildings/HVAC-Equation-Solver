@@ -2,14 +2,15 @@
 
 Equation solver for teaching and rapid calculation of thermodynamic state changes in HVAC systems. Also used for developing benchmark tests for AI agents in building services engineering.
 
-![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![Version](https://img.shields.io/badge/Version-4.0.0-orange.svg)
 
 ## Features
 
 - **Intuitive Syntax**: Equations in natural form (`h = enthalpy(water, T=100°C, p=1bar)`)
-- **Thermodynamic Properties**: Over 100 fluids via CoolProp
+- **Thermodynamic Properties**: 124 fluids via CoolProp, reference states as in EES
+  (`REFERENCE R717 IIR`)
 - **Chemical Equilibrium**: statement `EQUILIBRIUM` - Gibbs minimisation as in NASA CEA, no
   reactions to choose, amounts always >= 0, soot (C(gr)) and condensate (H2O(L)) appear when stable;
   works with unknown temperature (adiabatic reformer) without start values
@@ -18,14 +19,18 @@ Equation solver for teaching and rapid calculation of thermodynamic state change
   `gibbs(IG:H2O(L), T=25 °C, p=1 bar)`, `molarmass(IG:CH4)`)
 - **Humid Air**: Psychrometric calculations (`h = HumidAir(h, T=25°C, rh=0.5, p_tot=1bar)`)
 - **Blackbody Radiation**: Planck's radiation functions (`Eb`, `Blackbody`, `Wien`, `Stefan_Boltzmann`)
-- **Robust Solver**: Block decomposition with bracket search and Brent's method
+- **Robust Solver**: Block decomposition, tearing, bracket search with Brent's method and
+  Levenberg-Marquardt for coupled blocks; contradictory and non-unique systems are reported
 - **Parameter Studies**: Simple sweep syntax (`p = 25:5:50 bar`) and value lists for measured data (`T = [20 25 31] °C`)
 - **Case Distinction**: `IF(a, b, x, y, z)` as in EES (`Nu = IF(Re, 2300, Nu_lam, Nu_turb, Nu_turb)`)
 - **Initial Values in the Sheet**: saved with the file as block `{$Startwerte ... $}`
 - **Optimization**: `MAXIMIZE eps_tot VARY m_dot_gly = 0.1 .. 4 kg/s` - also several quantities and per point of a parameter study (measured data)
-- **Unit System**: Automatic unit parsing, propagation and consistency checking
-- **GUI**: Modern CustomTkinter interface with plotting capabilities
-- **Temperature Display**: Configurable display in °C or K (Settings)
+- **Unit System**: Automatic unit parsing, propagation and consistency checking; calculations
+  always in SI and Kelvin
+- **GUI**: Modern CustomTkinter interface with plotting capabilities; display units selectable
+  per quantity and in the Settings (°C/K, bar/Pa, kJ/J, kW/W)
+- **Language**: menus in English, messages and hints in German (teaching use at a German-speaking
+  university)
 
 ## Installation
 
@@ -65,13 +70,14 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
-## Screenshot
+## User Interface
 
-The application provides an intuitive interface for entering equations and displaying results:
-
-- **Left Panel**: Equation input
-- **Right Panel**: Solution results
-- **Plot Function**: For parameter studies
+- **Left panel**: equation sheet (syntax as below, comments in `{...}` or `"..."`)
+- **Right panel**, tab *Results*: values with a selectable display unit per quantity, status line
+  and messages; tab *Residuals*: equations, blocks and residuals, unit warnings (⚠) and hints (ⓘ)
+- **Menus**: File (`.hes`, `.txt`), Edit (Insert Example), View (font size 6-36 pt), Solve (F5,
+  Initial Values), Plot (plot windows for parameter studies, with zoom/pan/save), Settings
+  (display units), Help (function reference, fluid list with all CoolProp and `IG:` species)
 
 ## Architecture
 
@@ -110,7 +116,9 @@ HVAC-Equation-Solver/
 
 **☰ Examples** (or Edit → Insert Example) loads a sheet that shows the main features: water/steam,
 humid air, radiation, a heating curve in °C (`value`/`quantity`, temperature spread in K), pipe flow
-with `IF` and an economic insulation thickness with `MINIMIZE`. Press F5 to solve.
+with `IF`, an economic insulation thickness with `MINIMIZE`, ammonia with `REFERENCE R717 IIR` and
+ideal gases (heating value of methane, fuel cell voltage, steam reformer with `EQUILIBRIUM`).
+Press F5 to solve.
 
 ### Simple Example
 
@@ -455,7 +463,15 @@ The solver uses robust block decomposition:
 1. **Assign Constants**: Explicit definitions like `T_1 = 450`
 2. **Direct Evaluation**: Equations of the form `var = expression` are calculated sequentially
 3. **Single Unknowns**: Bracket search + Brent's method
-4. **Block-wise Solution**: Connected equation blocks with `scipy.fsolve`
+4. **Block-wise Solution**: coupled equations are split into their smallest independent cores
+   (block triangular form) and solved core by core:
+   - **tearing**: one estimated variable, all others follow one after another (e.g. a film
+     temperature iteration) - solved by the 1-D bracket search; also several tearing variables
+     (radiation networks) with `least_squares`
+   - otherwise simultaneously with `least_squares` (Levenberg-Marquardt), `fsolve` as fallback
+   - **over-determined blocks** (a redundant balance): a square subsystem is solved and the
+     remaining equations are checked - consistent, or "Widersprüchliches System" with the violated
+     equation
 5. **Iteration**: Steps 2-4 are repeated until all equations are solved
 
 ### Robust Root Finding
@@ -477,15 +493,21 @@ The solver uses robust block decomposition:
 - Contradictory systems (e.g. `x+1=3` and `x+1=4`) are reported as errors; redundant but
   consistent equations (an extra balance) are allowed and checked, whichever way they are written
   and wherever they stand in the sheet
-- Linearly dependent equations (`x + y = 1`, `2*x + 2*y = 2`, a balance written twice) are
-  reported as "Lösung nicht eindeutig" instead of returning an arbitrary point
+- Linearly dependent equations (`x + y = 1`, `2*x + 2*y = 2`, a balance written twice) and
+  equations that hold on a whole range (a flat `max`/`min`, a condensate amount 0 above the dew
+  point) are reported as "Lösung nicht eindeutig" instead of returning an arbitrary point; in an
+  over-determined block such a dependent loop becomes the check equation
+- A sign change of a continuous function, pinned down to machine precision, is a root even if
+  rounding in the function (e.g. a small condensate amount as the difference of large amounts)
+  keeps the residual above the tolerance; poles and jumps (`IF`, `floor`) are not
 - Errors of property functions (outside the valid range, supersaturated humid air) and 0/0
   are reported with the original line
 - Parameter studies use warm starts (previous point's solution as initial value)
 - Initial values from the unit (unknown temperatures at the mean of the given ones) or,
   without units, from the structure: an unknown that stands as a summand next to known
   values (`T_R - T_G1`) starts near them - sheets work with and without units
-- Time budget of ~10 s per single equation (unsolvable equations do not freeze the GUI)
+- Time budget of ~10 s per single equation and 60 s per solving run (per point of a parameter
+  study); after the limit the partial solution is shown with the open unknowns
 
 **Note:** A line is only treated as a constant assignment if the left-hand side
 is a bare variable name. `x + 5 = 2`, `sin(alpha) = 0.5` or `x^2 = 9` are
@@ -507,10 +529,12 @@ equations and are solved iteratively. Expression constants with units like
 | Entropy s | J/(kg·K) | |
 | Density rho | kg/m³ | |
 | Vapor quality x | - (0-1) | |
-| Molar mass M | kg/mol (display kg/kmol) | `28.97 kg/kmol` |
+| Amount of substance | mol, mol/s | `n = 0.5 mol`, `n_dot = 3.6 kmol/h` |
+| Molar mass M | kg/mol (display kg/kmol) | `28.97 kg/kmol`, `molarmass(IG:CH4)` |
 | Molar enthalpy, Gibbs energy | J/mol (display kJ/mol) | `-241.8 kJ/mol` |
 | Molar entropy | J/(mol·K) | |
-| Cell voltage, current | V, A | `F = 96485.33212 C/mol` |
+| Cell voltage, current, resistance | V, A, Ω | `F = 96485.33212 C/mol`, `ASR = 0.5 Ω*cm^2` |
+| Ratios | - | `eta = 89.2 %` (→ 0.892), `5 ‰`, `10 ppm` |
 
 **Angles:** a number without unit in `sin`/`cos`/`tan` is in degrees (`sin(30) = 0.5`), and
 `asin`/`acos`/`atan` return degrees (as in EES). Angles with a unit are SI internally (rad), like
@@ -553,10 +577,12 @@ unit has to be given (as a start value with unit) so that all others follow.
 | Property | Internal Unit (SI) |
 |----------|--------------------|
 | Enthalpy h | J/kg_dry_air |
-| Humidity ratio w | kg_water/kg_dry_air |
-| Relative humidity rh | - (0-1) |
-| Dew point T_dp | K (display: °C selectable) |
-| Wet bulb T_wb | K (display: °C selectable) |
+| Humidity ratio w (or x) | kg_water/kg_dry_air (display kg/kg or g/kg) |
+| Relative humidity rh (or phi) | - (0-1), or with unit `50 %` |
+| Partial pressure p_w, total pressure p_tot | Pa |
+| Densities rho_tot, rho_a, rho_w | kg/m³ |
+| Specific volume v | m³/kg_dry_air |
+| Dew point T_dp, wet bulb T_wb | K (display: °C selectable) |
 
 ## Available Functions
 
@@ -593,10 +619,10 @@ database thermo.inp instead of CoolProp; without the prefix nothing changes. Abo
   case-sensitive if unique; `IG:co` is ambiguous (CO or Co) and reported with suggestions.
 
 ```
-h = enthalpy(IG:N2, T=20 °C)               {J/kg}
-s = entropy(IG:N2, T=20 °C, p=10 bar)      {J/(kg K)}
-T_2 = temperature(IG:N2, s=s, p=1 bar)     {isentropic expansion}
-g = gibbs(IG:H2O(L), T=25 °C, p=1 bar)
+h = enthalpy(IG:N2, T=20 °C)               {-5.20 kJ/kg (with enthalpy of formation 0)}
+s = entropy(IG:N2, T=300 °C, p=10 bar)     {6.842 kJ/(kg K), absolute}
+T_2 = temperature(IG:N2, s=s, p=1 bar)     {isentropic expansion: 25.5 °C}
+g = gibbs(IG:H2O(L), T=25 °C, p=1 bar)     {-17.02 MJ/kg}
 ```
 
 ### Chemical Equilibrium (`EQUILIBRIUM`)
@@ -611,7 +637,9 @@ EQUILIBRIUM T=T_2, p=p
 
 - `OUT` receives the composition with minimum Gibbs energy at `T` and `p` under the element
   balances of `IN` (NASA data, ideal gas mixture, p° = 1 bar): no reactions to choose, the minimum
-  is unique (convex problem), all amounts are >= 0 and traces down to 1e-30 are resolved.
+  is unique (convex problem), all amounts are >= 0 and traces far below 1e-20 are resolved (for an
+  exactly stoichiometric mixture they are limited by the resolution of the element balance,
+  ~1e-16 of the main amounts).
 - Method as NASA CEA (Gordon/McBride, RP-1311): element potentials (Lagrange multipliers) with
   logarithmic amounts, globally convergent; condensed species (`IG:C(gr)` soot, `IG:H2O(L)`
   condensate) by an active set - they appear only when stable and only inside their data range
@@ -660,13 +688,22 @@ Units may also be written directly in the arguments: `Eb(500 °C, 5 µm)`.
 
 ## Error Analysis
 
-Errors are analysed generically, never by recognising particular equations:
-syntax errors are reported per line with their position (`▶`); the structure of the
-system is analysed with a Dulmage-Mendelsohn decomposition (which unknowns are
-under-determined, which equations over-determine something - even when the total
-counts match); unknowns that could not be solved numerically are listed with their
-lines; and unknowns that occur in only one equation and look like a typo of existing
-names (e.g. `r_1h_i` = `r_1` + `h_i`) are shown as hints.
+Errors are analysed generically, never by recognising particular equations (messages are in
+German):
+
+- syntax errors per line with their position (`▶`), e.g. a decimal comma, a non-ASCII name
+  (`η`), a continuation line outside an open bracket
+- the structure of the system with a Dulmage-Mendelsohn decomposition: which unknowns are
+  under-determined, which equations over-determine something - even when the total counts match
+- unknowns that could not be solved numerically, with their lines and the evaluation error of a
+  property function (outside the data range, supersaturated humid air, 0/0); the same cause is
+  named once
+- contradictory systems ("Widersprüchliches System" with the given and the computed value) and
+  non-unique solutions ("Lösung nicht eindeutig")
+- hints (ⓘ, the calculation is unchanged): names that look like a typo of existing names
+  (`r_1h_i` = `r_1` + `h_i`), a number without unit next to a non-SI input (`24 - t_S` with
+  `t_S` in h), `T + 273.15` (T is already in K), a wavelength without unit, `quality = -1`
+  outside the two-phase region, a species left out of `EQUILIBRIUM` (outside its data range)
 
 ## Unit System
 
@@ -711,21 +748,42 @@ q_dot = h*(T_s - T_inf)  {automatically gets W/m^2}
 
 ### Supported Unit Types
 
+Any unit known to [pint](https://pint.readthedocs.io) can be used and is converted to SI; the
+table lists the usual ones (all checked). Exponents may be written as `^2`, `2` or `²`/`³`, products
+as `*` or `·`; a denominator without brackets is read as a whole (`W/m^2K` = W/(m²·K),
+`kJ/kgK` = kJ/(kg·K)).
+
 | Category | Examples |
 |----------|----------|
-| Temperature | °C, K, °F |
-| Pressure | bar, Pa, kPa, MPa, atm, psi |
-| Energy | kJ, J, kWh |
-| Power | kW, W |
+| Temperature (absolute) | °C, K, °F |
+| Temperature difference | K (°C/°F are always absolute; in compound units °C is a difference: `2 °C/h`, `W/(m²·°C)`) |
+| Pressure | Pa, hPa, kPa, MPa, bar, mbar, atm, psi |
+| Energy | J, kJ, MJ, kWh, MWh |
+| Power, heat flow | W, kW, MW |
 | Force | N, kN |
-| Acceleration | m/s^2 |
-| Mass | kg, g |
-| Mass flow | kg/s, kg/h |
-| Heat flux | W/m^2 |
-| Heat transfer coeff. | W/m^2K |
-| Thermal resistance | m^2K/W |
-| Wavelength | µm, nm, m |
-| Stefan-Boltzmann | W/m^2K^4 |
+| Length, wavelength | m, km, cm, mm, µm, nm |
+| Area, volume | m², cm², mm², m³, dm³, L |
+| Mass | kg, g, t |
+| Mass flow | kg/s, kg/h, t/h |
+| Volume flow | m³/s, m³/h, L/s, L/min, L/h |
+| Velocity, acceleration | m/s, km/h, m/s² |
+| Time | s, min, h, d, a |
+| Frequency, rotational speed | Hz, 1/s, 1/h, rpm, U/min, rps (revolutions, u = π·D·n) |
+| Angle, angular velocity | deg, rad, rad/s, deg/h (SI rad internally) |
+| Heat flux, power density | W/m², W/m³ |
+| Heat transfer coefficient, U-value / UA-value | W/(m²·K), W/m²K / W/K |
+| Thermal conductivity | W/(m·K), W/mK |
+| Thermal resistance | m²K/W |
+| Specific enthalpy, heat capacity, entropy | J/kg, kJ/kg, J/(kg·K), kJ/(kg·K), kJ/kgK |
+| Density, specific volume | kg/m³, m³/kg |
+| Dynamic / kinematic viscosity | Pa·s, mPa·s / m²/s, mm²/s |
+| Amount of substance, molar flow | mol, kmol, mol/s, kmol/h |
+| Molar mass, molar quantities | kg/kmol, g/mol, kJ/mol, J/(mol·K) |
+| Electrochemistry | V, mV, A, A/m², A/cm², C/mol, Ω (ohm), kΩ, Ω·cm² |
+| Energy per area / volume, annual energy | kWh/m², kJ/m³, kWh/a |
+| Radiation | W/(m²·K^4), W/m^2K^4, W/(m²·µm) |
+| Expansion coefficient, specific consumption | 1/K, kg/kWh |
+| Ratios | %, ‰, ppm (dimensionless) |
 
 ### Dimensional Analysis
 
@@ -737,9 +795,11 @@ The solver automatically:
 
 ### Settings
 
-In the Settings dialog you can configure:
-- **Font Size**: Adjust the editor font size
-- **Temperature Display**: Choose between Kelvin (K) or Celsius (°C) for result display
+The Settings dialog sets the display units of temperatures (°C/K), pressures (bar/Pa), energies
+and specific values (kJ/J) and powers (kW/W); they act immediately on results, parameter studies
+and plots. Other quantities keep the unit they were entered in or derived with (MW, kWh,
+W/(m²K), ...), and every result can be switched to a compatible unit in the Results tab. The
+font size is set in the View menu.
 
 ## Tests
 
