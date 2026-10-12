@@ -138,7 +138,8 @@ bracket, if the line ends with '(', ',' or an operator:
 Values with units only in assignments 'name = number unit':
   T_1 = 20 °C    p = 1 bar    A = 20 cm2    V_dot = 500 m3/h
   U = 0.3 W/(m²·K)   (m2 = m^2 = m², · or * between units)
-  n = 0.3 1/h        (reciprocal units after a space; also h^-1)
+  s = 5.67e-8 W/m2K4 (also W/(m²·K⁴), W/m^2K^4; any exponent)
+  n = 0.3 1/h        (reciprocal units after a space; also h^-1, h⁻¹)
   eta = 89.2 %       (% and ‰ are units: eta = 0.892; rh=50 %)
   b = 0.25 kg/kWh    (prefixes stay prefixes: 1/kPa, kg/MJ)
   r = 2 °C/h         (°C in a compound unit is a difference: K/h)

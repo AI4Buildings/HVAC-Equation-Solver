@@ -1796,6 +1796,21 @@ check("Direkte Auswertung aus festen Werten: kein Hinweis auf Startwerte", 'Eing
 check("Fortsetzung ohne Klammer: Hinweis auf die Klammerregel",
       'offenen Klammer' in parse_error("a = 1\nb = 2\ny = a + b +\n    a*b"), parse_error("a = 1\nb = 2\ny = a + b +\n    a*b"))
 
+# Hochgestellte Exponenten (alle Ziffern und Minus) und Exponent ohne ^ auch nach K: K⁴, W/m2K4, s⁻¹
+_, _, consts, sweeps, _, uvals = parse_equations(
+    "s_1 = 5.67e-8 W/(m²·K⁴)\ns_2 = 5.67e-8 W/m2K4\ns_3 = 5.67e-8 W/m²K⁴\nn = 0.3 h⁻¹\nrho = 1.2 kg·m⁻³\n"
+    "f = 1:3 s⁻¹")
+check("Exponenten: W/(m²·K⁴), W/m2K4, W/m²K⁴ gleich W/(m^2*K^4); h⁻¹, kg·m⁻³, Sweep in s⁻¹",
+      all(abs(consts[k] - 5.67e-8) < 1e-20 and uvals[k].calc_unit == 'W/(m^2*K^4)' for k in ('s_1', 's_2', 's_3'))
+      and abs(consts['n'] - 0.3 / 3600) < 1e-15 and consts['rho'] == 1.2 and list(sweeps['f']) == [1.0, 2.0, 3.0],
+      str((consts, {k: u.calc_unit for k, u in uvals.items()})))
+eqs, variables, consts, _, orig, uvals = parse_equations(
+    "sigma = 5.67e-8 W/(m²·K⁴)\nT = 500 °C\nq = sigma*T^4")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+_units = propagate_all_units_complete(orig, {k: u.calc_unit for k, u in uvals.items() if u.calc_unit})
+check("Strahlung mit sigma in W/(m²·K⁴): q in W/m²", ok and abs(sol['q'] - 5.67e-8 * 773.15**4) < 1e-6
+      and _units.get('q') in ('W/m^2', 'watt / meter ** 2'), f"{msg} {sol} {_units.get('q')}")
+
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")
 if FAILED:

@@ -443,7 +443,10 @@ COMPATIBLE_UNITS = {
 
 # Regex für Wert mit Einheit
 # Matches: "15", "15.5", "-3.14", "1.5e-3", "15°C", "100kJ/kg", "4.18kJ/(kg*K)", "89.2 %"
-_UNIT_BODY = r'(?:[a-zA-Z0-9²³µ°/*()·⋅%‰Ω\u2126]|\^-?)*'   # Zeichen einer Einheit, auch h^-1
+# Hochgestellte Exponenten (m², K⁴, s⁻¹): jede Folge wird zu ^n (normalize_unit)
+_SUPERSCRIPTS = '⁰¹²³⁴⁵⁶⁷⁸⁹⁻'
+_SUPERSCRIPT_DIGITS = str.maketrans(_SUPERSCRIPTS, '0123456789-')
+_UNIT_BODY = r'(?:[a-zA-Z0-9' + _SUPERSCRIPTS + r'µ°/*()·⋅%‰Ω\u2126]|\^-?)*'   # Zeichen einer Einheit, auch h^-1
 VALUE_WITH_UNIT_PATTERN = re.compile(
     r'^'
     r'(-?\d+\.?\d*(?:[eE][+-]?\d+)?)'  # Zahl (inkl. wissenschaftliche Notation)
@@ -961,8 +964,8 @@ def normalize_unit(unit_str: str) -> str:
     # Ersetze Unicode-Zeichen
     unit_str = unit_str.replace('°C', 'degC')
     unit_str = unit_str.replace('°F', 'degF')
-    unit_str = unit_str.replace('³', '^3')
-    unit_str = unit_str.replace('²', '^2')
+    unit_str = re.sub('[' + _SUPERSCRIPTS + ']+',
+                      lambda m: '^' + m.group(0).translate(_SUPERSCRIPT_DIGITS), unit_str)
     unit_str = unit_str.replace('µ', 'micro')
     unit_str = unit_str.replace('·', '*').replace('⋅', '*')
 

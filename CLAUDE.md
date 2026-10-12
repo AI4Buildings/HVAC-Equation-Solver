@@ -714,8 +714,9 @@ p = 1 bar                {Druck}
 sigma = 5.67e-8 W/m^2K^4 {Stefan-Boltzmann}
 L = 4 µm                 {Wellenlänge}
 h = 25 W/m^2K            {Wärmeübergangskoeffizient}
-A = 20 cm2               {Exponent auch ohne ^: m2, m3/h, kg/m3, W/m2K}
+A = 20 cm2               {Exponent auch ohne ^: m2, m3/h, kg/m3, W/m2K, W/m2K4}
 U = 0.3 W/(m²·K)         {Malpunkt erlaubt}
+sigma = 5.67e-8 W/(m²·K⁴) {hochgestellte Exponenten: alle Ziffern und ⁻ (s⁻¹, kg·m⁻³) -> ^n}
 ```
 
 - Unbekannte Einheiten sind ein **Fehler** ("Unbekannte Einheit 'qcm'") - früher wurde

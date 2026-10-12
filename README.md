@@ -722,7 +722,8 @@ V = 200 L
 
 Every unit is converted to SI for the calculation (also cm², L, kW/m², kW/(m²K),
 mPa·s, mm²/s, µm). Exponents may be written without `^` (`20 cm2`, `500 m3/h`,
-`10 W/m2K`), and `·` is accepted as multiplication (`W/(m²·K)`). `%` and `‰` are units
+`10 W/m2K`, `5.67e-8 W/m2K4`) or as superscripts (`W/(m²·K⁴)`, `0.3 h⁻¹`), and `·` is accepted as
+multiplication (`W/(m²·K)`). `%` and `‰` are units
 (`eta = 89.2 %` is 0.892, also `rh=50 %` in function arguments). Prefixed units in a
 denominator stay prefixes (`kg/kWh`, `1/kPa`, `kg/MJ`), °C in a compound unit is a kelvin-sized
 difference (`2 °C/h`, `1/°C`, `W/(m²·°C)`), and `rpm` / `U/min` mean revolutions per minute
@@ -749,7 +750,8 @@ q_dot = h*(T_s - T_inf)  {automatically gets W/m^2}
 ### Supported Unit Types
 
 Any unit known to [pint](https://pint.readthedocs.io) can be used and is converted to SI; the
-table lists the usual ones (all checked). Exponents may be written as `^2`, `2` or `²`/`³`, products
+table lists the usual ones (all checked). Exponents may be written as `^4`, `4` or `⁴` (any
+superscript digits, also negative: `s⁻¹`, `kg·m⁻³`), products
 as `*` or `·`; a denominator without brackets is read as a whole (`W/m^2K` = W/(m²·K),
 `kJ/kgK` = kJ/(kg·K)).
 
@@ -781,7 +783,7 @@ as `*` or `·`; a denominator without brackets is read as a whole (`W/m^2K` = W/
 | Molar mass, molar quantities | kg/kmol, g/mol, kJ/mol, J/(mol·K) |
 | Electrochemistry | V, mV, A, A/m², A/cm², C/mol, Ω (ohm), kΩ, Ω·cm² |
 | Energy per area / volume, annual energy | kWh/m², kJ/m³, kWh/a |
-| Radiation | W/(m²·K^4), W/m^2K^4, W/(m²·µm) |
+| Radiation | W/(m²·K⁴), W/m2K4, W/m^2K^4, W/(m²·µm) |
 | Expansion coefficient, specific consumption | 1/K, kg/kWh |
 | Ratios | %, ‰, ppm (dimensionless) |
 
