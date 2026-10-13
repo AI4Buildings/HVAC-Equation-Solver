@@ -87,7 +87,7 @@ Dauer: etwa 1–5 Minuten. Am Ende erscheint **„Installation erfolgreich“**.
 - macOS: Rechtsklick auf `starten_mac.command` → „Alias erzeugen“ → Alias auf den Schreibtisch ziehen.
 
 **Welche Version habe ich?** Steht in der Titelleiste und unten rechts in der
-Statusleiste („Version 4.0.0“).
+Statusleiste („Version 4.1.0“).
 
 ---
 

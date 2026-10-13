@@ -4,7 +4,7 @@ Equation solver for teaching and rapid calculation of thermodynamic state change
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Version](https://img.shields.io/badge/Version-4.0.0-orange.svg)
+![Version](https://img.shields.io/badge/Version-4.1.0-orange.svg)
 
 ## Features
 
