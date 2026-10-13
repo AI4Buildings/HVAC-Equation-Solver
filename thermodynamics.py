@@ -1,7 +1,7 @@
 """
 Thermodynamik-Modul für den HVAC Equation Solver
 
-Verwendet CoolProp für Stoffdatenberechnung mit EES-ähnlicher Syntax.
+Verwendet CoolProp für die Stoffdatenberechnung.
 
 Einheiten (SI-Basiseinheiten für interne Berechnungen):
 - Temperatur: K
@@ -16,7 +16,7 @@ Einheiten (SI-Basiseinheiten für interne Berechnungen):
 - Wärmeleitfähigkeit: W/(m·K)
 - Prandtl-Zahl: -
 
-Syntax (wie EES):
+Syntax:
     h = enthalpy(Water, T=373.15, p=100000)  # T in K, p in Pa
     rho = density(R134a, T=298.15, x=1)
     s = entropy(Water, p=1000000, h=500000)  # p in Pa, h in J/kg
@@ -35,7 +35,7 @@ import re
 # Hinweis: Das Mapping Funktionsname -> CoolProp-Output-Property erfolgt
 # direkt in calculate_property() (if/elif-Kette).
 
-# Mapping von EES Input-Parametern zu CoolProp
+# Mapping der Input-Parameter zu CoolProp
 INPUT_MAP = {
     't': 'T',      # Temperatur
     'p': 'P',      # Druck
@@ -164,7 +164,7 @@ def get_available_fluids() -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Bezugszustand (wie EES: REFERENCE R134a IIR). CoolProp rechnet jedes Fluid in
+# Bezugszustand (REFERENCE R134a IIR). CoolProp rechnet jedes Fluid in
 # seinem Standard-Bezugszustand (R134a, R32, CO2, Propan: IIR; Ammoniak, Wasser
 # nicht). Ein anderer Bezugszustand verschiebt h, u und s um Konstanten -
 # Differenzen sowie T, p, x, rho, cp bleiben gleich.

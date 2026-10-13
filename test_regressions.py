@@ -918,7 +918,7 @@ s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations
 check("Null-Gleichung mit großen inneren Termen wird akzeptiert", s_ and abs(sol['J_3'] - 350) < 1e-9, msg)
 
 # ---------------------------------------------------------------------------
-print("\n=== Fallunterscheidung IF(a, b, x, y, z) wie EES ===")
+print("\n=== Fallunterscheidung IF(a, b, x, y, z) ===")
 # ---------------------------------------------------------------------------
 check("IF: a < b -> x, a = b -> y, a > b -> z",
       if_function(1, 2, 10, 20, 30) == 10 and if_function(2, 2, 10, 20, 30) == 20

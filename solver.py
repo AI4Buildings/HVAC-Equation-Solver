@@ -378,7 +378,7 @@ class BlockAnalysis:
     sub_blocks: List[BlockInfo] = field(default_factory=list)           # Sub-Blöcke (gekoppelte Kerne)
 
 
-# Trigonometrische Funktionen in GRAD (wie EES)
+# Trigonometrische Funktionen in GRAD
 def sin(x):
     """Sinus mit Argument in Grad."""
     return np.sin(np.radians(x))

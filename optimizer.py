@@ -393,8 +393,7 @@ def optimize_parametric(
     original_equations: Optional[Dict[str, str]] = None,
 ):
     """
-    Optimierung für jeden Punkt einer Parameterstudie (wie die Min/Max-Tabelle in
-    EES). Das Optimum des vorigen Punkts ist zusätzlicher Kandidat des nächsten.
+    Optimierung für jeden Punkt einer Parameterstudie. Das Optimum des vorigen Punkts ist zusätzlicher Kandidat des nächsten.
     """
     names = {n for g in goals for n in g.names}
     previous: Dict[str, float] = {}

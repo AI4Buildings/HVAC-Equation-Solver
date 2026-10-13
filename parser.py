@@ -1,5 +1,5 @@
 """
-EES-ähnlicher Gleichungsparser
+Gleichungsparser des HVAC Equation Solvers
 
 Unterstützte Syntax:
 - Gleichungen: x + y = 10
@@ -64,7 +64,7 @@ HUMID_AIR_FUNCTIONS = {
 # equilibrium(Stoff, Eintrittsstoffe, Austrittsstoffe, T, p, Mengen...) (equilibrium.py)
 EQUILIBRIUM_FUNCTIONS = {'equilibrium'}
 
-# Mapping von EES-Syntax zu Python
+# Mapping der Gleichungssyntax zu Python
 FUNCTION_MAP = {
     'ln': 'log',      # ln -> numpy.log
     '^': '**',        # Potenz
@@ -131,9 +131,9 @@ def display_name(name: str) -> str:
 
 def if_function(a, b, x, y, z):
     """
-    Fallunterscheidung wie in EES: IF(a, b, x, y, z) ist x für a < b, y für
-    a = b und z für a > b. Alle Argumente sind beim Aufruf bereits ausgewertet
-    (wie in EES). Elementweise für Arrays (vektorisierte Parameterstudien).
+    Fallunterscheidung: IF(a, b, x, y, z) ist x für a < b, y für
+    a = b und z für a > b. Alle Argumente sind beim Aufruf bereits ausgewertet.
+    Elementweise für Arrays (vektorisierte Parameterstudien).
     Ist a oder b ungültig (NaN, komplex), ist auch das Ergebnis ungültig -
     sonst würde stillschweigend der Zweig z gewählt.
     """
@@ -298,7 +298,7 @@ def is_vector_assignment(line: str, parse_units: bool = False) -> Tuple[bool, st
 def remove_comments(text: str) -> str:
     """Entfernt Kommentare aus dem Text.
 
-    EES-Kommentare:
+    Kommentare:
     - "..." (Anführungszeichen)
     - {...} (geschweifte Klammern)
 
@@ -427,14 +427,14 @@ def _split_call_args(args_str: str) -> List[str]:
 
 def _convert_call_parts(func_name: str, args_str: str, keep_case: bool = False) -> str:
     """
-    Konvertiert einen Thermodynamik-/HumidAir-Aufruf von EES zu Python-Syntax:
+    Konvertiert einen Thermodynamik-/HumidAir-Aufruf aus dem Blatt zu Python-Syntax:
     erstes Argument (Stoffname bzw. Output-Eigenschaft) wird gequotet,
     Einheiten in key=value Argumenten werden zu SI konvertiert.
 
-    EES:    enthalpy(water, T=100°C, p=1bar)
+    Blatt:  enthalpy(water, T=100°C, p=1bar)
     Python: enthalpy('water', T=373.15, p=100000)
 
-    EES:    HumidAir(h, T=25°C, rh=0.5, p_tot=1bar)
+    Blatt:  HumidAir(h, T=25°C, rh=0.5, p_tot=1bar)
     Python: HumidAir('h', T=298.15, rh=0.5, p_tot=100000)
     """
     args = _split_call_args(args_str)
@@ -584,7 +584,7 @@ def _replace_calls_balanced(text: str, func_names: Set[str], keep_case: bool = F
 
 
 def tokenize_equation(equation: str) -> str:
-    """Konvertiert EES-Syntax zu Python-Syntax."""
+    """Konvertiert die Gleichungssyntax zu Python-Syntax."""
     # Ersetze ^ durch **
     equation = equation.replace('^', '**')
 
@@ -692,7 +692,7 @@ def extract_variables(equation: str) -> Set[str]:
 def _get_const_eval_context() -> dict:
     """
     Eval-Kontext für rein numerische Konstanten-Ausdrücke.
-    Trigonometrie in GRAD (wie EES) - identisch für Pass 1 und Pass 2.
+    Trigonometrie in GRAD - identisch für Pass 1 und Pass 2.
     """
     def _sin(x): return np.sin(np.radians(x))
     def _cos(x): return np.cos(np.radians(x))
@@ -1034,7 +1034,7 @@ def _check_equation_syntax(left: str, right: str) -> None:
             # Gleichungssprache nicht vorgesehen (und wird so auch nie an eval übergeben)
             if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Constant):
                 # Eckige Klammern direkt nach einer Zahl: kein Index möglich -
-                # Einheit in EES-Schreibweise "1 [kg/s]"
+                # Einheit in eckigen Klammern "1 [kg/s]"
                 raise EquationSyntaxError(
                     f"Eckige Klammern nach einer Zahl - Einheiten ohne Klammern schreiben "
                     f"(1 kg/s statt 1 [kg/s]); Wertelisten als eigene Zeile x = [1 2 3] Einheit, "
@@ -1640,7 +1640,7 @@ def start_value_units(text: str) -> Dict[str, object]:
     """
     Einheiten der mit Einheit angegebenen Startwerte {Name: UnitValue}. Sie gelten auch
     als Einheitenangabe für berechnete Größen, deren Einheit aus den Gleichungen allein
-    nicht folgt (wie "Variable Info" in EES).
+    nicht folgt.
     """
     units = {}
     for name, (_, line) in start_value_entries(text).items():
@@ -2025,7 +2025,7 @@ def parse_optimization(text: str) -> List[OptimizationGoal]:
 
 
 # ---------------------------------------------------------------------------
-# Bezugszustand eines Fluids (wie EES): REFERENCE R717 IIR - eigene Zeile, gilt
+# Bezugszustand eines Fluids: REFERENCE R717 IIR - eigene Zeile, gilt
 # für das ganze Blatt; IIR, ASHRAE, NBP oder DEFAULT (CoolProp-Standard)
 # ---------------------------------------------------------------------------
 _REFERENCE_PATTERN = re.compile(r'^\s*REFERENCE\b[^=]*$', re.IGNORECASE)

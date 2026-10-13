@@ -37,9 +37,9 @@ OUTPUT_MAP = {
     'rho_w': (None, None),                          # Special handling: W / Vda
     't_dp': ('Tdp', lambda x: x),                   # K -> K
     't_wb': ('Twb', lambda x: x),                   # K -> K
-    'cp': ('cp', lambda x: x),                      # J/(kg_dry_air K), wie cp(AirH2O) in EES
+    'cp': ('cp', lambda x: x),                      # J/(kg_dry_air K)
     'cp_ha': ('cp_ha', lambda x: x),                # J/(kg_humid_air K)
-    'v': ('Vda', lambda x: x),                      # m³/kg trockene Luft (EES: Volume(AirH2O))
+    'v': ('Vda', lambda x: x),                      # m³/kg trockene Luft
     'x': ('W', lambda x: x),                        # Wassergehalt x (deutsche Notation) = w
     'phi': ('R', lambda x: x),                      # relative Feuchte φ = rh
 }
@@ -55,8 +55,8 @@ INPUT_MAP = {
     'rf': ('R', lambda x: x),                       # rF = relative Feuchte (German alias for rh)
     'p_w': ('psi_w', None),                         # Special handling
     'h': ('Hda', lambda x: x),                      # J/kg -> J/kg (bereits SI)
-    't_dp': ('Tdp', lambda x: x),                   # Taupunkt K (EES: D=)
-    't_wb': ('Twb', lambda x: x),                   # Feuchtkugeltemperatur K (EES: B=)
+    't_dp': ('Tdp', lambda x: x),                   # Taupunkt K
+    't_wb': ('Twb', lambda x: x),                   # Feuchtkugeltemperatur K
     'x': ('W', lambda x: x),                        # Wassergehalt x (deutsche Notation) = w
     'phi': ('R', lambda x: x),                      # relative Feuchte φ = rh
     'p': ('P', lambda x: x),                        # Gesamtdruck = p_tot

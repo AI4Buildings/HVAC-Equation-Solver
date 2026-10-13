@@ -2222,7 +2222,7 @@ def missing_unit_annotations(equations: Dict[str, str], known_units: Dict[str, s
 def scale_offset_literals(equations: Dict[str, str], units: Dict[str, str]) -> List[Tuple[str, float, str]]:
     """
     Zahlen gleich dem Nullpunkt einer Temperaturskala (273.15 °C -> K, 459.67 °F -> °R; aus pint)
-    in einer Summe mit einer Temperatur - die Umrechnung "T + 273.15" aus EES/Excel. Hier sind
+    in einer Summe mit einer Temperatur - die Umrechnung "T + 273.15" aus Excel. Hier sind
     Temperaturen bereits in Kelvin; die Zahl verschiebt den Nullpunkt ein zweites Mal, ohne
     Einheitenfehler. Generisch über die Skalen von pint, unabhängig von Namen.
 
@@ -2321,7 +2321,7 @@ def si_number_literals(equations: Dict[str, str],
 
 # ----------------------------------------------------------------------------
 # Winkel: intern SI (rad = 1) wie alles. Zahlen ohne Einheit sind in sin/cos/tan Grad
-# (Festlegung der Eingabesprache wie EES: sin(30) = 0.5), asin/acos/atan liefern Grad.
+# (Festlegung der Eingabesprache: sin(30) = 0.5), asin/acos/atan liefern Grad.
 # Eine Winkelgröße (Einheit mit Winkel: deg, rad, rad/s * s, quantity(z, deg)) liest die
 # Funktion dagegen in ihrer Einheit: sin(phi) mit phi = 30 deg, sin(omega*t) mit omega in rad/s.
 # Welche Ausdrücke Winkelgrößen sind, folgt aus den Einheiten (Exponent des Winkels, wie die

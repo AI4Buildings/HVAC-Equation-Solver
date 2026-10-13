@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HVAC Equation Solver - Ein EES-ähnlicher Gleichungslöser
+HVAC Equation Solver - Gleichungslöser für Thermodynamik und Gebäudetechnik
 
 Hauptanwendung mit CustomTkinter GUI.
 """
@@ -1920,7 +1920,7 @@ class EquationSolverApp(ctk.CTk):
                 self.update()
 
             if goals and sweep_vars:
-                # Optimum je Punkt (wie die Min/Max-Tabelle in EES)
+                # Optimum je Punkt
                 success, solution, solve_msg = optimize_parametric(
                     equations, variables, sweep_vars, goals, solver_initial,
                     progress_callback=progress_callback, constants=constants,
@@ -2313,7 +2313,7 @@ class EquationSolverApp(ctk.CTk):
         open_k, _ = self._temperature_inputs(unit_values)
         for name, uv in getattr(self, '_start_units', {}).items():
             if name not in known_units:
-                # Startwert mit Einheit legt auch die Anzeige fest (wie Variable Info in EES):
+                # Startwert mit Einheit legt auch die Anzeige fest:
                 # q_V = 600 kJ/m^3 -> kJ/m^3 statt bar (gleiche Dimension, andere Größenart)
                 known_units[name] = (uv.original_unit.strip() if uv.calc_unit not in ('K', 'delta_K')
                                      and not scale_origin(uv.original_unit) else uv.calc_unit)

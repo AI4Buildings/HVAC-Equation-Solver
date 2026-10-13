@@ -107,7 +107,7 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - Converts equation syntax to Python: `^` → `**`, `ln` → `log`
 - Comments: `"..."` and `{...}` (auch verschachtelt und mehrzeilig)
 - Dezimalkomma wird als Fehler gemeldet (Punkt verwenden); `·` als Malzeichen; `lg` = `log10`
-- **Fallunterscheidung** `IF(a, b, x, y, z)` wie EES: x für a < b, y für a = b, z für a > b
+- **Fallunterscheidung** `IF(a, b, x, y, z)`: x für a < b, y für a = b, z für a > b
   (`parser.if_function`, elementweise für Arrays; NaN/komplexes a oder b -> NaN). Jede
   Schreibweise `if(`/`If(` wird in `mangle_keywords` zu `IF(` (sonst Python-Schlüsselwort);
   `if` ohne Klammer bleibt Variablenname. Alle Argumente werden ausgewertet (auch der nicht
@@ -135,7 +135,7 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   `(`, `,` oder einem Operator endet bzw. die nächste damit beginnt (`parser._join_bracket_lines`,
   Original für Meldungen ebenso zusammengefügt); eine vergessene `)` ohne Fortsetzung bleibt ein
   Fehler ihrer Zeile; endet die fehlerhafte Zeile mit einem Operator, nennt die Meldung die Klammerregel
-- **Bezugszustand** `REFERENCE R717 IIR` (eigene Zeile, wie EES; `parser.parse_reference_states`,
+- **Bezugszustand** `REFERENCE R717 IIR` (eigene Zeile; `parser.parse_reference_states`,
   `thermodynamics.set_reference_states` je Lösungslauf): IIR (h = 200 kJ/kg, s = 1 kJ/(kg K) für
   siedende Flüssigkeit bei 0 °C), ASHRAE (0 bei -40 °C), NBP (0 beim Normalsiedepunkt), DEFAULT
   (CoolProp). Verschiebt h, u, s um Konstanten (Ein- und Ausgaben), gilt für alle Namen des Fluids
@@ -161,7 +161,7 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   Eine Liste darf über mehrere Zeilen gehen (Spalte aus Excel/CSV/TXT zwischen `[`
   und `]` einfügen); Zeilennummern in Fehlermeldungen bleiben erhalten. Mehrere
   Listen/Sweeps werden punktweise kombiniert (gleiche Länge). `1 [kg/s]`
-  (EES-Einheitenschreibweise) wird mit Hinweis abgelehnt
+  (Einheit in eckigen Klammern) wird mit Hinweis abgelehnt
 - **Direct assignments** like `T_1 = 450`, `m = 10000/3600` or `m_dot = 10000/3600 kg/s`
   (numerischer Ausdruck + Einheit) are treated as constants
 - **Doppelte Vorgabe** derselben Größe (`x = 5` ... `x = 3`): die zweite Zeile ist eine Prüfgleichung
@@ -527,11 +527,11 @@ zusätzlichen Gleichungen); bei Widerspruch nennt die Meldung beide Seiten.
   - `w` - Humidity ratio [kg/kg]
   - `p_w` - Partial pressure water vapor [Pa]
   - `h` - Enthalpy [J/kg]
-  - `T_dp` - Dew point [K] (EES: D=), `T_wb` - Wet bulb temperature [K] (EES: B=)
+  - `T_dp` - Dew point [K], `T_wb` - Wet bulb temperature [K]
 - Case-insensitive: `HumidAir` = `humidair`; Meldungen nennen die Namen wie dokumentiert
   (`humid_air.display_names`: T, rF, T_dp)
 - Deutsche Notation: `x` = w (Wassergehalt; in HumidAir eindeutig), `phi` = rh, `p` = p_tot, Ausgabe
-  `v` (m³/kg trockene Luft); `AirH2O` (EES) in Stoffwertfunktionen -> Verweis auf HumidAir; w/x tragen
+  `v` (m³/kg trockene Luft); `AirH2O` in Stoffwertfunktionen -> Verweis auf HumidAir; w/x tragen
   das Label kg/kg (Startwert 0.01, Anzeige umschaltbar auf g/kg); rh außerhalb 0…1 -> Meldung
   ("als Anteil (0.5) oder mit Einheit (50 %)")
 - **Sättigung** (`humid_air._saturation`, für jede Eingabekombination): w > w_s(T, p)·(1 + 1e-6)
@@ -619,8 +619,7 @@ Eingaben mit anderen Einheiten (°C, bar, kJ) werden automatisch konvertiert.
 
 ### Trigonometrische Funktionen
 
-Eine **Zahl ohne Einheit** ist in den Winkelfunktionen **Grad** (Festlegung der Eingabesprache
-wie EES):
+Eine **Zahl ohne Einheit** ist in den Winkelfunktionen **Grad** (Festlegung der Eingabesprache):
 
 ```
 cos(60) = 0.5       {60°}
@@ -677,7 +676,7 @@ zusammengesetzte (rad/s) aber rad: `sin(omega*t)` und `s = alpha*r` waren still 
   Gleichungen nicht folgt, und je Gruppe die freien Größen der Elimination (Rang-Defekt) -
   gibt man deren Einheit an, folgen alle übrigen. GUI-Hinweis "Einheit nicht bestimmbar ...
   Einheit von q angeben" (nur in Blättern mit Einheiten). Angabe als Startwert mit Einheit
-  (`parser.start_value_units`, wie "Variable Info" in EES)
+  (`parser.start_value_units`)
 - **Einheiten-Propagation**: Leitet Einheiten für berechnete Variablen ab
 - **Dimensionsanalyse**: Verwendet AST-Parsing für algebraische Ausdrücke
 - **Rückwärts-Propagation**: Bei `q = h*dT` wird `h = q/dT` abgeleitet
@@ -842,7 +841,7 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
 - nicht bestimmbar: berechnete Größen gelten als absolut (°C nach Settings; Startwerte wie
   absolut), in K eingegebene Größen werden wie eingegeben in K angezeigt
   (`main._kelvin_display`) - eine in K eingegebene Differenz erscheint nie als -263 °C
-- Umrechnung im EES-/Excel-Stil `T + 273.15` (`scale_offset_literals`): eine Zahl gleich dem
+- Umrechnung im Excel-Stil `T + 273.15` (`scale_offset_literals`): eine Zahl gleich dem
   Nullpunkt einer Temperaturskala (273.15, 459.67 - aus pint) in einer Summe mit einer
   Temperatur -> Hinweis "ⓘ": T ist bereits in K, die Zahl verschiebt den Nullpunkt erneut
 - Zahl ohne Einheit in einer Summe mit einer in einer Nicht-SI-Einheit eingegebenen Größe
@@ -937,7 +936,7 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
   Größen mit Einheit (`_composed_label`): kürzt sich die Einheit auf eine (V_dot/V mit m3/h -> 1/h,
   V/V_dot -> h, A/L in mm), bleibt sie; Leistung mal Zeit je Länge/Volumen -> kWh/m, kWh/m³ (statt
   N/bar). IF/max/min behalten eine gemeinsame Eingabe-Einheit. Ein Startwert mit Einheit legt die
-  Anzeige fest (wie Variable Info in EES): `q_V = 600 kJ/m^3` -> kJ/m³ statt bar (gleiche Dimension
+  Anzeige fest: `q_V = 600 kJ/m^3` -> kJ/m³ statt bar (gleiche Dimension
   wie Druck - die Größenart folgt nicht aus der Dimension, p = R*T/v bleibt bar). Rundungsrest
   nach Offset-Umrechnung (-1.7e-13 °C) wird als 0 angezeigt (`main._si_to_unit`)
 - Ergebnisanzeige: Wert und Einheit stammen immer aus derselben Einheit. Die Settings
