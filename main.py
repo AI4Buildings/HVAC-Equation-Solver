@@ -193,11 +193,11 @@ are correct; asin/acos/atan give the angle if the result is used as
 an angle with a unit (a + asin(x)). A number in a sum with an angle
 is a value in rad (hint ⓘ) - write c = 90 deg. Formulas from the
 literature that use radians (e.g. view factors): atan(x)*pi/180.
-Not available (unlike EES): own functions.
+Not available: user-defined functions.
 
 CASE DISTINCTION - IF:
 ----------------------
-IF(a, b, x, y, z) compares a with b (as in EES):
+IF(a, b, x, y, z) compares a with b:
   a < b  ->  x          a = b  ->  y          a > b  ->  z
 Usable in every equation, nested and in parametric studies.
 Also written if(...) or If(...).
@@ -252,7 +252,7 @@ Candidates without a solution count as bad, not as an error.
 Accuracy: the goal to about 1e-8 (relative); at a very flat
 optimum the varied quantity to about 4 significant digits.
 With a parametric study or value lists, the optimum is found
-for every point (like the Min/Max table in EES).
+for every point.
 Several statements are allowed, each with its own quantities.
 If they influence each other, the result is an equilibrium
 (no goal gets better alone) - for a joint optimum form ONE goal.
@@ -283,7 +283,7 @@ of the sheet are ignored.
 A start value WITH unit also sets the unit of a computed quantity
 whose unit does not follow from the equations (reported under
 ⓘ HINWEISE: "Einheit nicht bestimmbar ... Einheit von q angeben"),
-and its display unit (as Variable Info in EES), e.g. an energy
+and its display unit, e.g. an energy
 per volume that would otherwise be shown as pressure (same
 dimension): q_V = 600 kJ/m^3 in the block -> q_V in kJ/m³.
 
@@ -324,7 +324,7 @@ Examples:
   h = enthalpy(water, T=100 °C, p=1 bar)     {also valid}
   rho = density(R134a, T=298.15 K, x=1)      {25°C, sat. vapor}
 
-Reference state (zero point of h, u, s) - own line, as in EES:
+Reference state (zero point of h, u, s) - own line:
   REFERENCE R717 IIR    h = 200 kJ/kg, s = 1 kJ/(kg K) for
                         saturated liquid at 0 °C (refrigeration)
   REFERENCE R134a ASHRAE   h = 0, s = 0 sat. liquid at -40 °C

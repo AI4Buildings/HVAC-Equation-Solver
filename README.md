@@ -9,7 +9,7 @@ Equation solver for teaching and rapid calculation of thermodynamic state change
 ## Features
 
 - **Intuitive Syntax**: Equations in natural form (`h = enthalpy(water, T=100°C, p=1bar)`)
-- **Thermodynamic Properties**: 124 fluids via CoolProp, reference states as in EES
+- **Thermodynamic Properties**: 124 fluids via CoolProp, selectable reference states
   (`REFERENCE R717 IIR`)
 - **Chemical Equilibrium**: statement `EQUILIBRIUM` - Gibbs minimisation as in NASA CEA, no
   reactions to choose, amounts always >= 0, soot (C(gr)) and condensate (H2O(L)) appear when stable;
@@ -22,7 +22,7 @@ Equation solver for teaching and rapid calculation of thermodynamic state change
 - **Robust Solver**: Block decomposition, tearing, bracket search with Brent's method and
   Levenberg-Marquardt for coupled blocks; contradictory and non-unique systems are reported
 - **Parameter Studies**: Simple sweep syntax (`p = 25:5:50 bar`) and value lists for measured data (`T = [20 25 31] °C`)
-- **Case Distinction**: `IF(a, b, x, y, z)` as in EES (`Nu = IF(Re, 2300, Nu_lam, Nu_turb, Nu_turb)`)
+- **Case Distinction**: `IF(a, b, x, y, z)` (`Nu = IF(Re, 2300, Nu_lam, Nu_turb, Nu_turb)`)
 - **Initial Values in the Sheet**: saved with the file as block `{$Startwerte ... $}`
 - **Optimization**: `MAXIMIZE eps_tot VARY m_dot_gly = 0.1 .. 4 kg/s` - also several quantities and per point of a parameter study (measured data)
 - **Unit System**: Automatic unit parsing, propagation and consistency checking; calculations
@@ -213,7 +213,7 @@ Nu = IF(Re, Re_krit, Nu_lam, Nu_turb, Nu_turb)   {laminar below Re_krit}
 ```
 
 `IF(a, b, x, y, z)` returns `x` for `a < b`, `y` for `a = b` and `z` for `a > b`
-(as in EES; also `if(...)`). It can be nested and used in parameter studies. `a`, `b`
+(also written `if(...)`). It can be nested and used in parameter studies. `a`, `b`
 and `x`, `y`, `z` must have the same unit. All arguments are evaluated - the branch
 not chosen must be computable too (no division by zero).
 
@@ -232,9 +232,8 @@ bounds. Method: a grid over the whole range (finds the best of several local opt
 then an exact local search (Brent for one quantity, Powell for several, both bounded);
 ranges over more than two decades are scanned logarithmically. For every candidate the
 normal solver solves the remaining system (warm start). Optima at a bound are reported.
-Together with a parameter study or value lists the optimum is found for every point
-(like the Min/Max table in EES) - e.g. the optimal glycol mass flow for each operating
-hour of a year of measured data.
+Together with a parameter study or value lists the optimum is found for every point,
+e.g. the optimal glycol mass flow for each operating hour of a year of measured data.
 
 ### Initial Values in the Sheet
 
@@ -250,8 +249,8 @@ $}
 ```
 
 The block can also be edited by hand; deleting it restores the automatic values.
-A start value with unit also sets the display unit of a computed quantity (like Variable Info
-in EES), e.g. `q_V = 600 kJ/m^3` for an energy per volume that would otherwise be shown as a
+A start value with unit also sets the display unit of a computed quantity, e.g.
+`q_V = 600 kJ/m^3` for an energy per volume that would otherwise be shown as a
 pressure (same dimension).
 
 ## Steam Power Cycle Example
@@ -537,7 +536,7 @@ equations and are solved iteratively. Expression constants with units like
 | Ratios | - | `eta = 89.2 %` (→ 0.892), `5 ‰`, `10 ppm` |
 
 **Angles:** a number without unit in `sin`/`cos`/`tan` is in degrees (`sin(30) = 0.5`), and
-`asin`/`acos`/`atan` return degrees (as in EES). Angles with a unit are SI internally (rad), like
+`asin`/`acos`/`atan` return degrees. Angles with a unit are SI internally (rad), like
 every quantity: with `alpha = 30 deg` and `omega = 10 rad/s`, `sin(alpha)`, `sin(omega*t)`,
 `s = alpha*r` and `u = omega*r` are correct; `asin`/`acos`/`atan` return the angle when the
 result is used as an angle with a unit (`k = asin(x) + alpha`). Which expressions are angles follows
@@ -589,7 +588,7 @@ unit has to be given (as a start value with unit) so that all others follow.
 ### Thermodynamics
 `enthalpy`, `entropy`, `density`, `volume`, `intenergy`, `quality`, `temperature`, `pressure`, `viscosity`, `conductivity`, `prandtl`, `cp`, `cv`, `soundspeed`, `gibbs` (g = h − T·s), `molarmass` (kg/mol, shown in kg/kmol; `molarmass(water)` also for CoolProp fluids)
 
-Reference state of h, u, s per fluid as in EES, as an own line in the sheet:
+Reference state of h, u, s per fluid, as an own line in the sheet:
 `REFERENCE R717 IIR` (h = 200 kJ/kg, s = 1 kJ/(kg·K) for saturated liquid at 0 °C),
 `ASHRAE` (0 at −40 °C), `NBP` (0 at the normal boiling point) or `DEFAULT` (CoolProp). It applies
 to all names of the fluid (R717 = ammonia); differences, T, p, x, ρ are unchanged. CoolProp's
