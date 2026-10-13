@@ -93,13 +93,17 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - Neue Funktion: Tests in den Suiten, Hilfe (`FUNCTION_HELP_TEXT`, Zeilen ≤ 70 Zeichen - getestet),
   README.md, CLAUDE.md; das Beispielblatt (`main._insert_example`, Werte in `test_gui.py` geprüft)
   soll die Funktionen zeigen
-- **Lokal, nicht im Repo** (`Testbeispiele/` in `.gitignore`, nie committen): 123 Lehrbeispiele mit
-  Lösungsblättern und Testbericht, `Testbeispiele/PROJEKTSTAND.md` (Stand, Festlegungen, offene
-  Punkte) und `Testbeispiele/Pruefskripte/alle_pruefungen.sh` - vor jedem Push: alle Suiten und
-  alle Lehrbeispiele mit Einheiten, ohne Einheiten (alles SI), mit neutral umbenannten Variablen
-  sowie Vergleich der Anzeige-Einheiten (ca. 40 min)
-- Git: Arbeitsbranch (derzeit `fix/review-2026-10`), `main` per Fast-Forward; Commit, Push und
-  Aktualisieren von `main` nur auf ausdrücklichen Wunsch
+- **Lokal, nicht im Repo** (`Testbeispiele/` in `.gitignore`, nie committen): 134 Lehrbeispiele mit
+  Lösungsblättern und Testberichten, `Testbeispiele/PROJEKTSTAND.md` (Stand, Festlegungen, offene
+  Punkte - bei Weiterarbeit zuerst lesen) und `Testbeispiele/Pruefskripte/alle_pruefungen.sh` -
+  vor jedem Push: alle Suiten und alle Lehrbeispiele mit Einheiten, ohne Einheiten (alles SI),
+  mit neutral umbenannten Variablen sowie Vergleich der Anzeige-Einheiten (ca. 45 min)
+- Git: Arbeitsbranch (derzeit `fix/review-2026-10`), `main` per Fast-Forward; Commit, Push,
+  Aktualisieren von `main` und Releases nur auf ausdrücklichen Wunsch
+- Release: Versionsnummer in `version.py`, README-Badge und `INSTALLATION.md` ("Version x.y.z"),
+  Commit "Version x.y.z", annotierter Tag `vx.y.z`, `gh release create vx.y.z --verify-tag`
+  (Notizen englisch mit Installation und Lizenzvermerk); Quellarchiv vorher prüfen (`git archive`:
+  `data/nasa/thermo.inp` byte-gleich, `.bat` mit CRLF). Aktuell v4.1.1
 
 ## Kernfunktionen
 
