@@ -104,7 +104,7 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - Release: Versionsnummer in `version.py`, README-Badge und `INSTALLATION.md` ("Version x.y.z"),
   Commit "Version x.y.z", annotierter Tag `vx.y.z`, `gh release create vx.y.z --verify-tag`
   (Notizen englisch mit Installation und Lizenzvermerk); Quellarchiv vorher prüfen (`git archive`:
-  `data/nasa/thermo.inp` byte-gleich, `.bat` mit CRLF). Aktuell v4.1.1
+  `data/nasa/thermo.inp` byte-gleich, `.bat` mit CRLF). Programmversion 4.2.0 (auf `main`); letztes Release auf GitHub: v4.1.1
 
 ## Kernfunktionen
 
