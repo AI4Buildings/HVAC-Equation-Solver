@@ -15,12 +15,13 @@ import keyword
 import re
 from dataclasses import dataclass, field
 import numpy as np
-from typing import List, Set, Tuple, Dict, Union, Optional
+from typing import Any, List, Set, Tuple, Dict, Union, Optional
 
 # Einheiten-Modul (optional, falls nicht vorhanden wird ohne Einheiten gearbeitet)
 try:
     from units import (parse_value_with_unit, UnitValue, unit_value_strict, UnknownUnitError,
-                       check_unit_dimension, unit_affine, unit_number, unit_quantity, ureg, normalize_unit)
+                       check_unit_dimension, unit_affine, unit_number, unit_quantity, ureg, normalize_unit,
+                       unit_not_allowed)
     UNITS_AVAILABLE = True
 except ImportError:
     UNITS_AVAILABLE = False
@@ -29,6 +30,8 @@ except ImportError:
     class UnknownUnitError(Exception):
         """Platzhalter, wenn das Einheiten-Modul fehlt."""
 
+
+from physical_constants import CONSTANTS, MARKER as CONSTANT_MARKER, PREFIX as CONSTANT_PREFIX, names_text
 
 # Mathematische Funktionen die unterstützt werden
 MATH_FUNCTIONS = {
@@ -90,15 +93,86 @@ _MANGLED_PATTERN = re.compile(r'\b' + KEYWORD_PREFIX + r'(' + '|'.join(_MANGLED_
 _IF_CALL_PATTERN = re.compile(r'\bif(?=\s*\()', re.IGNORECASE)
 
 
+# Funktionsnamen als Größen (cp = cp(air, T=T_1, p=p_1), danach cp_2 = cp(...)): steht der Name
+# NICHT vor einer Klammer, ist er eine Größe und wird wie ein Schlüsselwort intern umbenannt
+# (cp -> _kw_cp). Sonst verdrängte der Wert der Größe die Funktion im Auswertungskontext - der
+# nächste Aufruf meldete "'float' object is not callable", je nach Reihenfolge der Zeilen.
+_function_name_patterns: List[Any] = []
+
+
+def _function_patterns():
+    """(Muster für Funktionsnamen als Größe, Muster zum Zurückbenennen) - nach dem Laden des Moduls."""
+    if not _function_name_patterns:
+        names = sorted(CALLABLE_NAMES | {'ln', 'lg'}, key=len, reverse=True)
+        alternatives = '|'.join(re.escape(name) for name in names)
+        _function_name_patterns.append(re.compile(r'(?<![\w.:])(' + alternatives + r')(?![\w(]|\s*\()'))
+        _function_name_patterns.append(
+            re.compile(r'\b' + KEYWORD_PREFIX + r'(' + '|'.join(_MANGLED_KEYWORDS) + '|' + alternatives + r')\b'))
+        # erstes Argument eines Stoffwert-/HumidAir-Aufrufs: Stoff- bzw. Eigenschaftsname, keine
+        # Größe (HumidAir(cp, T=...) - cp ist dort die gesuchte Eigenschaft)
+        special = '|'.join(sorted(THERMO_FUNCTIONS | HUMID_AIR_FUNCTIONS, key=len, reverse=True))
+        _function_name_patterns.append(
+            re.compile(r'\b((?:' + special + r')\s*\(\s*)' + KEYWORD_PREFIX + r'(?=\w)', re.IGNORECASE))
+    return _function_name_patterns
+
+
 def mangle_keywords(text: str) -> str:
-    """Benennt Python-Schlüsselwörter als Bezeichner um (lambda -> _kw_lambda)."""
-    text = _IF_CALL_PATTERN.sub('IF', text)
-    return _KEYWORD_PATTERN.sub(lambda m: KEYWORD_PREFIX + m.group(1), text)
+    """
+    Benennt Python-Schlüsselwörter als Bezeichner um (lambda -> _kw_lambda), ebenso
+    Funktionsnamen, die als Größe stehen (nicht vor einer Klammer: cp -> _kw_cp). Text in
+    Hochkommas (Stoffnamen und Einheiten erzeugter Gleichungen) bleibt unverändert.
+    """
+    as_quantity, _, first_argument = _function_patterns()
+    parts = text.split("'")
+    for index in range(0, len(parts), 2):
+        # Konstanten des Programms zuerst (sigma# -> _cn_sigma): e# und c# sind keine Größen e, c
+        part = _CONSTANT_PATTERN.sub(
+            lambda m: CONSTANT_PREFIX + m.group(1) if m.group(1) in CONSTANTS else m.group(0), parts[index])
+        part = _IF_CALL_PATTERN.sub('IF', part)
+        part = _KEYWORD_PATTERN.sub(lambda m: KEYWORD_PREFIX + m.group(1), part)
+        part = as_quantity.sub(lambda m: KEYWORD_PREFIX + m.group(1), part)
+        parts[index] = first_argument.sub(lambda m: m.group(1), part)
+    return "'".join(parts)
 
 
 def unmangle(text: str) -> str:
     """Macht mangle_keywords() rückgängig (für Anzeige von Namen und Gleichungen)."""
-    return _MANGLED_PATTERN.sub(lambda m: m.group(1), text)
+    text = _function_patterns()[1].sub(lambda m: m.group(1), text)
+    return _MANGLED_CONSTANT.sub(
+        lambda m: m.group(1) + CONSTANT_MARKER if m.group(1) in CONSTANTS else m.group(0), text)
+
+
+# Konstanten des Programms (physical_constants): im Blatt name# (sigma#, g#, R#) - ein eigener
+# Namensraum, damit Größen des Blatts (sigma, g, R) frei bleiben und eine Konstante nicht
+# überschreiben. Intern _cn_name (ein gültiger Bezeichner; '#' wäre für Python ein Kommentar)
+_CONSTANT_PATTERN = re.compile(r'(?<![\w.])([A-Za-z_][A-Za-z0-9_]*)' + re.escape(CONSTANT_MARKER))
+_MANGLED_CONSTANT = re.compile(r'\b' + CONSTANT_PREFIX + r'([A-Za-z0-9_]+?)\b')
+
+
+def is_constant_name(name: str) -> bool:
+    """Interner Name einer Konstante des Programms (_cn_sigma)?"""
+    return name.startswith(CONSTANT_PREFIX) and name[len(CONSTANT_PREFIX):] in CONSTANTS
+
+
+def _reject_constant_assignment(name: str) -> None:
+    """sigma# = 5: eine Konstante des Programms lässt sich nicht belegen."""
+    if is_constant_name(name):
+        constant = CONSTANTS[name[len(CONSTANT_PREFIX):]]
+        raise EquationSyntaxError(
+            f"{constant.name}{CONSTANT_MARKER} ist eine Konstante des Programms ({constant.value:.10g} "
+            f"{constant.unit}) und kann nicht belegt werden - für einen eigenen Wert einen eigenen "
+            f"Namen verwenden ({constant.name} = ...)")
+
+
+def commercial_round(x):
+    """
+    round(x): kaufmännisch gerundet - bei genau 0.5 vom Nullpunkt weg (2.5 -> 3, -2.5 -> -3), wie
+    in der Schule und in Tabellenkalkulationen. Früher numpy.round (zur geraden Zahl: 2.5 -> 2,
+    0.5 -> 0). Elementweise für Arrays; ohne Addition von 0.5 (0.49999999999999994 + 0.5 = 1).
+    """
+    magnitude = np.abs(x)
+    whole = np.floor(magnitude)
+    return np.sign(x) * (whole + (magnitude - whole >= 0.5)) + 0.0
 
 
 # Anzeige der aus EQUILIBRIUM erzeugten Gleichungen: interne Form -> "EQUILIBRIUM (Zeile n): IG:B = var"
@@ -151,6 +225,10 @@ def if_function(a, b, x, y, z):
     return np.where(np.isnan(a) | np.isnan(b), np.nan, result)
 
 
+class EquationSyntaxError(Exception):
+    """Gleichung ist syntaktisch nicht auswertbar (z.B. fehlendes '*')."""
+
+
 def parse_vector(value_str: str) -> Union[np.ndarray, None]:
     """
     Parst einen Vektor-String im MATLAB-Stil.
@@ -175,8 +253,16 @@ def parse_vector(value_str: str) -> Union[np.ndarray, None]:
         step = float(match3.group(2))
         end = float(match3.group(3))
         if step == 0:
-            return None
-        return _build_vector(start, step, end)
+            raise VectorSyntaxError(f"'{value_str}': Schrittweite 0 - start:Schritt:ende mit einer "
+                                    f"Schrittweite ungleich 0")
+        vector = _build_vector(start, step, end)
+        if vector is None:
+            # nicht still als Gleichung weiterlesen (MATLAB: leerer Vektor)
+            raise VectorSyntaxError(
+                f"'{value_str}': mit der Schrittweite {match3.group(2)} wird der Endwert vom Startwert "
+                f"aus nicht erreicht - Vorzeichen der Schrittweite prüfen, z.B. "
+                f"{match3.group(1)}:{_negated(match3.group(2))}:{match3.group(3)}")
+        return vector
 
     # Prüfe auf start:end Format (step=1)
     match2 = VECTOR_PATTERN_2.match(value_str)
@@ -192,8 +278,21 @@ def parse_vector(value_str: str) -> Union[np.ndarray, None]:
     return None
 
 
-class VectorSyntaxError(Exception):
-    """Werteliste [ ... ] ist fehlerhaft (z.B. Dezimalkomma, keine Zahl)."""
+class VectorSyntaxError(EquationSyntaxError):
+    """Parameterstudie a:b:c bzw. Werteliste [ ... ] ist fehlerhaft (Schrittweite, Dezimalkomma,
+    keine Zahl) - ein Einlesefehler wie jeder andere, die Zeilennummer ergänzt parse_equations."""
+
+
+def _negated(number: str) -> str:
+    """Zahl als Text mit umgekehrtem Vorzeichen ('1' -> '-1', '-0.5' -> '0.5')."""
+    return number[1:] if number.startswith('-') else '-' + number
+
+
+# Zahl in Dezimalschreibweise - float() läse auch 'inf', 'nan', 'infinity' als Zahl, das sind in
+# der Gleichungssprache gewöhnliche Namen (y = inf mit einer Größe inf)
+_DECIMAL_NUMBER = re.compile(r'[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?')
+
+_NUMBER_RANGE = "Zahl außerhalb des darstellbaren Bereichs (Betrag über 1.8e308)"
 
 
 def _parse_value_list(inner: str) -> np.ndarray:
@@ -214,6 +313,8 @@ def _parse_value_list(inner: str) -> np.ndarray:
             values.append(float(token))
         except ValueError:
             raise VectorSyntaxError(f"'{token}' ist keine Zahl (Werteliste [ ... ])") from None
+        if np.isinf(values[-1]):
+            raise VectorSyntaxError(f"'{token}': {_NUMBER_RANGE} (Werteliste [ ... ])")
     if not values:
         raise VectorSyntaxError("Leere Werteliste [ ]")
     return np.array(values, dtype=float)
@@ -300,21 +401,33 @@ def remove_comments(text: str) -> str:
 
     Kommentare:
     - "..." (Anführungszeichen)
-    - {...} (geschweifte Klammern)
+    - {...} (geschweifte Klammern, auch verschachtelt)
+
+    Ein Zeichenautomat für beide Arten: ein Anführungszeichen beginnt nur AUSSERHALB von {...}
+    einen Kommentar. In einem {...}-Kommentar ist es Text - ein Zollzeichen ({Rohr 1/2" }) fasste
+    sonst alles bis zum nächsten Anführungszeichen zu einem Kommentar zusammen (Zeilen dazwischen
+    fielen still weg). Wie find_start_values_block.
 
     Zeilenumbrüche INNERHALB von Kommentaren bleiben erhalten, damit die
     Zeilennummern mit dem Originaltext übereinstimmen (sonst verrutscht nach
     einem mehrzeiligen Kommentar die Zuordnung Gleichung -> Originalzeile).
     """
-    # Entferne "..." Kommentare (Zeilenumbrüche behalten)
-    text = re.sub(r'"[^"]*"', lambda m: '\n' * m.group(0).count('\n'), text)
-    # Entferne {...} Kommentare (auch verschachtelt, per Klammer-Zählung)
     result = []
     depth = 0
     unmatched_start = None  # Position des ersten unbalancierten '{'
     unmatched_result_len = 0  # Länge von result beim ersten unbalancierten '{'
-    for i, char in enumerate(text):
-        if char == '{':
+    i, length = 0, len(text)
+    while i < length:
+        char = text[i]
+        if char == '"' and depth == 0:
+            end = text.find('"', i + 1)
+            if end != -1:
+                # "..." Kommentar (Zeilenumbrüche behalten)
+                result.append('\n' * text.count('\n', i, end))
+                i = end + 1
+                continue
+            result.append(char)     # ohne schließendes Zeichen: bleibt stehen (Fehler dieser Zeile)
+        elif char == '{':
             if depth == 0:
                 unmatched_start = i
                 unmatched_result_len = len(result)
@@ -326,10 +439,40 @@ def remove_comments(text: str) -> str:
                     unmatched_start = None
         elif depth == 0 or char == '\n':
             result.append(char)
+        i += 1
     if depth > 0 and unmatched_start is not None:
         # Unbalancierter Kommentar: Text ab dem offenen '{' unverändert lassen
         result = result[:unmatched_result_len]
         result.append(text[unmatched_start:])
+    return ''.join(result)
+
+
+def _comments_only(text: str) -> str:
+    """
+    Gegenstück zu remove_comments: nur die Kommentare (mit ihren Klammern bzw. Anführungszeichen),
+    alles andere entfällt; Zeilenumbrüche bleiben. Derselbe Zeichenautomat.
+    """
+    result = []
+    depth = 0
+    i, length = 0, len(text)
+    while i < length:
+        char = text[i]
+        if char == '"' and depth == 0:
+            end = text.find('"', i + 1)
+            if end != -1:
+                result.append(text[i:end + 1])
+                i = end + 1
+                continue
+        elif char == '{':
+            depth += 1
+            result.append(char)
+        elif char == '}':
+            if depth > 0:
+                depth -= 1
+                result.append(char)
+        elif depth > 0 or char == '\n':
+            result.append(char)
+        i += 1
     return ''.join(result)
 
 
@@ -460,9 +603,18 @@ def _convert_call_parts(func_name: str, args_str: str, keep_case: bool = False) 
     # Restliche Argumente (key=value Paare) - konvertiere Einheiten zu SI
     rest_args = [_convert_arg_units(arg) for arg in args[1:]]
 
-    name = func_name if keep_case else func_name.lower()
+    name = _call_name(func_name) if keep_case else func_name.lower()
     new_args = [first] + rest_args
     return f"{name}({', '.join(new_args)})"
+
+
+def _call_name(func_name: str) -> str:
+    """
+    Name eines HumidAir-/Strahlungsaufrufs für die Auswertung: wie geschrieben, wenn der
+    Auswertungskontext diese Schreibweise kennt (HumidAir, Eb, Blackbody), sonst klein -
+    Groß-/Kleinschreibung ist bei diesen Funktionen egal (HUMIDAIR, BlackBody, WIEN).
+    """
+    return func_name if func_name in CALLABLE_NAMES else func_name.lower()
 
 
 def _iter_call_spans(text: str, func_names_lower: Set[str]):
@@ -512,7 +664,7 @@ def _convert_positional_call(func_name: str, args_str: str, keep_case: bool = Tr
                     check_unit_dimension(unit_value, expected_units[index], f"{func_name}({args_str})")
                 converted = repr(unit_value.calc_value)
         args.append(converted)
-    return f"{func_name}({', '.join(args)})"
+    return f"{_call_name(func_name)}({', '.join(args)})"
 
 
 _NUMBER_LITERAL = re.compile(r'\s*[+]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*')
@@ -547,8 +699,11 @@ def _convert_unit_function_call(func_name: str, args_str: str, keep_case: bool =
     args = _split_call_args(args_str)
     if len(args) != 2 or args[1].strip().startswith(("'", '"')):
         return f"{func_name.lower()}({args_str})"
-    unit_text = args[1].strip()
+    unit_text = unmangle(args[1].strip())       # 'in' (Zoll) ist kein Variablenname
     if UNITS_AVAILABLE:
+        reason = unit_not_allowed(unit_text)
+        if reason:
+            raise UnknownUnitError(f"Unbekannte Einheit '{unit_text}' ({reason})")
         unit_affine(unit_text)
     return f"{func_name.lower()}({args[0]}, {unit_text!r})"
 
@@ -632,11 +787,14 @@ def _reduce_special_calls_to_tokens(equation: str) -> str:
             args_str = equation[open_idx + 1:close_idx]
             if any(re.search(rf'\b{f}\s*\(', args_str, flags=re.IGNORECASE) for f in special_funcs):
                 continue  # Enthält inneren Aufruf - der wird zuerst verarbeitet
-            tokens = []
+            # die Argument-AUSDRÜCKE bleiben stehen (in Klammern): extract_variables behandelt sie
+            # wie jeden Ausdruck - Funktionsnamen darin (T=max(T_1, T_2), p=p_0*exp(-k)) sind dann
+            # keine Unbekannten (früher: alle Bezeichner, also auch 'max', 'exp')
+            values = []
             for arg in _split_call_args(args_str)[1:]:  # erstes Argument (Stoff/Property) fällt weg
-                value = arg.split('=', 1)[1] if '=' in arg else arg
-                tokens.extend(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', value))
-            equation = equation[:start] + ' ' + ' '.join(tokens) + ' ' + equation[close_idx + 1:]
+                values.append(arg.split('=', 1)[1] if '=' in arg else arg)
+            equation = (equation[:start] + ' ' + ' '.join(f"({value})" for value in values) + ' '
+                        + equation[close_idx + 1:])
             replaced = True
             break
         if not replaced:
@@ -670,6 +828,9 @@ def extract_variables(equation: str) -> Set[str]:
     for func in HUMID_AIR_FUNCTIONS | EQUILIBRIUM_FUNCTIONS:
         # Entferne nur func(...) Aufrufe, nicht alleinstehende func
         temp_eq = re.sub(rf'\b{func}\s*\(', '(', temp_eq, flags=re.IGNORECASE)
+
+    # Zahlen sind keine Bezeichner: der Exponent von 1.E-3 bzw. 2.e5 zählte sonst als Variable E/e
+    temp_eq = re.sub(r'(?<![\w.])(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?', ' ', temp_eq)
 
     # Finde alle Bezeichner (Variablen)
     # Variablen können Buchstaben, Zahlen und Unterstriche enthalten
@@ -706,7 +867,7 @@ def _get_const_eval_context() -> dict:
         'sin': _sin, 'cos': _cos, 'tan': _tan,
         'asin': _asin, 'acos': _acos, 'atan': _atan,
         'sqrt': np.sqrt, 'log': np.log, 'log10': np.log10,
-        'exp': np.exp, 'abs': abs, 'ceil': np.ceil, 'floor': np.floor, 'round': np.round,
+        'exp': np.exp, 'abs': abs, 'ceil': np.ceil, 'floor': np.floor, 'round': commercial_round,
         'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,
         'max': max, 'min': min, 'IF': if_function,
         'value': unit_number, 'quantity': unit_quantity,
@@ -717,13 +878,19 @@ _INVERSE_TRIG_CALL = re.compile(r'\b(?:asin|acos|atan)\s*\(')
 _TRIG_CALL = re.compile(r'\b(?:sin|cos|tan)\s*\(')
 
 
+_QUANTITY_CALL = re.compile(r'\bquantity\s*\(')
+
+
 def _angle_dependent(expr: str) -> bool:
     """
-    Hängt der Wert eines Ausdrucks ohne Variablen davon ab, ob ein Winkel eine Zahl in Grad oder
-    eine Winkelgröße ist (asin(0.5); sin(quantity(30, deg)))? Dann ist die Zeile eine Gleichung,
-    die _angle_function_forms wie jede andere behandelt - keine beim Einlesen ausgewertete Konstante.
+    Darf ein Ausdruck ohne Variablen NICHT beim Einlesen zu einer Zahl ausgewertet werden?
+    - asin(0.5): Zahl in Grad oder Winkelgröße je nach Verwendung (_angle_function_forms)
+    - quantity(45, deg), quantity(20, °C): eine Größe MIT Einheit - als Zahl ginge die Einheit
+      verloren (sin(b) rechnete 0.785 Grad, die Größe galt als dimensionslos)
+    Die Zeile bleibt dann eine Gleichung wie mit einer Variablen als Argument; Einheiten-Ableitung
+    und Winkel-Umschreibung behandeln sie wie jede andere.
     """
-    return bool(_INVERSE_TRIG_CALL.search(expr) or (_TRIG_CALL.search(expr) and 'quantity' in expr))
+    return bool(_INVERSE_TRIG_CALL.search(expr) or _QUANTITY_CALL.search(expr))
 
 
 def _eval_constant_expression(expr: str) -> Optional[float]:
@@ -770,7 +937,7 @@ def _split_expression_with_unit(right: str) -> Optional[Tuple[float, str]]:
     expr_part = ' '.join(tokens[:-1]).strip()
 
     # Einheit muss mit Buchstabe/°/µ/% (oder 1/ für Kehrwerte) beginnen und darf kein Operator-Rest sein
-    if not re.match(r'^(?:[a-zA-Z°µ%‰Ω\u2126]|1/)', unit_part):
+    if not re.match(r'^(?:[a-zA-Z°µ\u03bc%‰Ω\u2126]|1/)', unit_part):
         return None
     # Ausdruck muss mindestens eine Ziffer enthalten
     if not re.search(r'\d', expr_part):
@@ -792,10 +959,6 @@ def _split_expression_with_unit(right: str) -> Optional[Tuple[float, str]]:
         return None
 
     return value, unit_str
-
-
-class EquationSyntaxError(Exception):
-    """Gleichung ist syntaktisch nicht auswertbar (z.B. fehlendes '*')."""
 
 
 # Namen, die in Gleichungen als Funktion aufgerufen werden dürfen
@@ -996,6 +1159,9 @@ _UNSUPPORTED_NODES = {
     'Set': "Ausdruck { } wird nicht unterstützt - Kommentare in {...} müssen geschlossen sein",
     'Lambda': "lambda als Funktion ist nicht erlaubt",
 }
+# Operatoren, die Python kennt, die Gleichungssprache aber nicht (Schreibweise für die Meldung)
+_UNSUPPORTED_OPERATORS = {'BitAnd': '&', 'BitOr': '|', 'BitXor': '^', 'LShift': '<<', 'RShift': '>>',
+                          'MatMult': '@', 'Invert': '~', 'Not': 'not'}
 
 
 def _check_equation_syntax(left: str, right: str) -> None:
@@ -1039,12 +1205,25 @@ def _check_equation_syntax(left: str, right: str) -> None:
                     f"Eckige Klammern nach einer Zahl - Einheiten ohne Klammern schreiben "
                     f"(1 kg/s statt 1 [kg/s]); Wertelisten als eigene Zeile x = [1 2 3] Einheit, "
                     f"bei: {_excerpt(text, position(node.slice) - 1)}")
+            if isinstance(node, (ast.BinOp, ast.UnaryOp)) and not isinstance(node.op, _ALLOWED_NODES):
+                # Operator-Knoten tragen keine Position: Fundstelle aus dem Ausdruck (bei a & b
+                # hinter dem linken Operanden)
+                symbol = _UNSUPPORTED_OPERATORS.get(type(node.op).__name__, type(node.op).__name__)
+                where = position(node)
+                if isinstance(node, ast.BinOp):
+                    found = text.find(symbol, position(node.left, end=True))
+                    where = found if found >= 0 else position(node.left, end=True)
+                raise EquationSyntaxError(
+                    f"Operator '{symbol}' wird nicht unterstützt - erlaubt sind + - * / ^ und "
+                    f"Funktionen wie abs(x), bei: {_excerpt(text, where)}")
             if not isinstance(node, _ALLOWED_NODES):
                 raise EquationSyntaxError(
                     f"{_UNSUPPORTED_NODES.get(type(node).__name__, 'Nicht unterstützter Ausdruck')}, "
                     f"bei: {_excerpt(text, position(node))}")
             if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float, str)):
                 raise EquationSyntaxError(f"Nicht unterstützter Wert, bei: {_excerpt(text, position(node))}")
+            if isinstance(node, ast.Constant) and isinstance(node.value, float) and np.isinf(node.value):
+                raise EquationSyntaxError(f"{_NUMBER_RANGE}, bei: {_excerpt(text, position(node))}")
             # Komma außerhalb eines Funktionsaufrufs: in Gleichungen nie sinnvoll
             # (meist Dezimalkomma: "0,71" ergibt sonst stillschweigend ein Tupel)
             if isinstance(node, ast.Tuple):
@@ -1062,9 +1241,12 @@ def _check_equation_syntax(left: str, right: str) -> None:
             paren = text.find('(', func_end)
             func_text = ast.get_source_segment(text, func) or ''
             name = unmangle(func.id) if isinstance(func, ast.Name) else _python_to_display(func_text)
+            known = name.lower() if name.lower() in CALLABLE_NAMES else ''
+            reason = (f"Funktionsnamen klein schreiben: {'ln' if known == 'log' else known}(...)" if known
+                      else "vor '(' fehlt ein Operator oder der Funktionsname ist falsch")
             raise EquationSyntaxError(
-                f"'{name}' ist keine Funktion - vor '(' fehlt ein Operator oder der Funktionsname "
-                f"ist falsch, bei: {_excerpt(text, paren if paren >= 0 else func_end)}")
+                f"'{name}' ist keine Funktion - {reason}, bei: "
+                f"{_excerpt(text, paren if paren >= 0 else func_end)}")
 
 
 _CONTINUES_AFTER = ('(', ',', '+', '-', '*', '/', '^', '·')
@@ -1180,7 +1362,11 @@ def parse_equations(text: str, parse_units: bool = True) -> Tuple[List[str], Set
                     _EQUILIBRIUM_LABELS.clear()
                 for form in {equation.strip(), mangle_keywords(equation).strip()}:
                     _EQUILIBRIUM_LABELS[form] = statement.display(name, var)
-        text = '\n'.join('' if j in blank else line for j, line in enumerate(lines)) + '\n' + '\n'.join(generated)
+        # Kommentare der Anweisungszeilen bleiben stehen: ein mehrzeiliger Kommentar, der in einer
+        # Anweisungszeile beginnt oder endet, bliebe sonst ohne seine öffnende/schließende Klammer
+        comments = _comments_only(text).split('\n')
+        text = ('\n'.join(comments[j] if j in blank else line for j, line in enumerate(lines))
+                + '\n' + '\n'.join(generated))
     try:
         result = _parse_equations(text, parse_units, position)
     except (EquationSyntaxError, UnknownUnitError) as exc:
@@ -1293,12 +1479,29 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
     # umbenennen (lambda -> _kw_lambda), auch in den Originalzeilen, damit die
     # Einheiten-Analyse dieselben Namen sieht. Anzeige: display_name()/unmangle()
     spans: Dict[int, int] = {}
-    lines = [_mangle_line(line) for line in _join_bracket_lines(text.split('\n'), spans)]
+    lines = []
+    for line_index, line in enumerate(_join_bracket_lines(text.split('\n'), spans)):
+        position[0] = line_index + 1        # eine fehlerhafte Parameterstudie meldet sich hier
+        lines.append(_mangle_line(line))
     original_lines = [mangle_keywords(line) for line in original_text.split('\n')]
     for first, last in spans.items():      # mehrzeilige Gleichung: Original ebenso zusammen
         original_lines[first] = ' '.join(line.strip() for line in original_lines[first:last + 1])
     for line_index, line in enumerate(lines):
         position[0] = line_index + 1
+        if '#' in line:
+            unknown = _CONSTANT_PATTERN.search(line)
+            if unknown:
+                # name# ist die Schreibweise der Konstanten des Programms (sigma#, g#, R#)
+                similar = [n for n in CONSTANTS if n.lower() == unknown.group(1).lower()]
+                hint = f" - gemeint {similar[0]}{CONSTANT_MARKER}?" if similar else ""
+                raise EquationSyntaxError(
+                    f"Unbekannte Konstante '{unmangle(unknown.group(0))}'{hint} (vorhanden: {names_text()}; "
+                    f"'#' ist kein Kommentarzeichen)")
+            # Python verwirft beim Auswerten alles ab '#'; das letzte Wort dahinter galt dann als
+            # Einheit (m = 5 # Masse in g -> 5 g) bzw. die Wörter als Unbekannte
+            raise EquationSyntaxError(
+                f"'#' ist kein Kommentarzeichen - Kommentare in {{...}} oder \"...\" setzen "
+                f"(bei: {_excerpt(unmangle(line).strip(), unmangle(line).strip().index('#'))})")
         _check_ascii_names(line)
 
     equations = []
@@ -1346,13 +1549,10 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
             if _split_expression_with_unit(right) is not None:
                 pre_constants.add(var_name)
                 continue
-        # Reine Zahl
-        try:
-            float(right)
+        # Reine Zahl (inf, nan sind Namen)
+        if _DECIMAL_NUMBER.fullmatch(right):
             pre_constants.add(var_name)
             continue
-        except ValueError:
-            pass
         # Numerischer Ausdruck (ohne Variablen)
         # Gleicher Eval-Kontext wie Pass 2, damit beide Pässe konsistent erkennen
         right_tokenized = tokenize_equation(right)
@@ -1361,18 +1561,24 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
                 and _eval_constant_expression(right_tokenized) is not None):
             pre_constants.add(var_name)
 
-    def _repeated_assignment(var_name: str, value: float) -> bool:
+    def _repeated_assignment(var_name: str, value: float, magnitude: Optional[float] = None,
+                             unit_str: str = '') -> bool:
         """
         Zweite Vorgabe derselben Größe (x = 5 ... x = 3): nicht still überschreiben, sondern als
         Prüfgleichung aufnehmen - gleiche Werte sind zulässig, verschiedene meldet die
-        Widerspruchsprüfung mit der Zeile.
+        Widerspruchsprüfung mit der Zeile. Mit Einheit als quantity(Zahl, Einheit): die
+        Einheiten-Ableitung sieht dann dieselbe Größe wie in der ersten Vorgabe (T = 20 °C zweimal
+        ist Temperatur = Temperatur, keine Summe aus einer Temperatur und einer bloßen Zahl).
         """
         if var_name in sweep_vars:
             raise EquationSyntaxError(f"'{display_name(var_name)}' ist bereits eine Parameterstudie/"
                                       f"Werteliste - eine Größe nur einmal vorgeben")
         if var_name not in initial_values:
             return False
-        equation = f"({var_name}) - ({value!r})"
+        if unit_str and magnitude is not None:
+            equation = f"({var_name}) - (quantity({float(magnitude)!r}, {unit_str.strip()!r}))"
+        else:
+            equation = f"({var_name}) - ({value!r})"
         equations.append(equation)
         original_equations[equation] = original_line
         return True
@@ -1409,6 +1615,7 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
             # Prüfe ob Vektor erfolgreich geparst wurde
             if vec_array is None:
                 continue
+            _reject_constant_assignment(var_name)
             if var_name in sweep_vars or var_name in initial_values:
                 raise EquationSyntaxError(f"'{display_name(var_name)}' ist bereits vorgegeben - "
                                           f"eine Größe nur einmal vorgeben")
@@ -1466,15 +1673,18 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
                 if unit_str and magnitude is not None:
                     # Wert mit Einheit gefunden (z.B. "15°C", "10g", "10000/3600 kg/s")
                     var_name = left
+                    _reject_constant_assignment(var_name)
 
                     # °C/°F sind immer absolute Temperaturen (mit Offset), unabhängig vom
                     # Namen; Temperaturdifferenzen werden in K angegeben (kein Offset)
                     # Unbekannte Einheit -> UnknownUnitError (kein ValueError,
                     # wird also unten NICHT verschluckt)
                     unit_value = unit_value_strict(magnitude, unit_str, line)
+                    if not np.isfinite(unit_value.calc_value):
+                        raise EquationSyntaxError(f"'{unmangle(line)[:60]}': {_NUMBER_RANGE}")
                     # Verwende calc_value für Berechnungen (konvertiert zu Standard-Einheit)
                     # z.B. 10 kg/h → 0.00278 kg/s, 20 °C → 293.15 K
-                    if _repeated_assignment(var_name, unit_value.calc_value):
+                    if _repeated_assignment(var_name, unit_value.calc_value, magnitude, unit_str):
                         continue
                     initial_values[var_name] = unit_value.calc_value
 
@@ -1510,6 +1720,11 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
                 # Versuche als arithmetischen Ausdruck auszuwerten
                 # (Trigonometrie in GRAD, gleicher Kontext wie Pass 1)
                 value = _eval_constant_expression(right)
+            if value is not None and not np.isfinite(value):
+                # 1e400 wäre als Vorgabe inf (früher: "cannot convert float infinity to integer")
+                raise EquationSyntaxError(f"'{unmangle(line)[:60]}': {_NUMBER_RANGE}")
+            if value is not None:
+                _reject_constant_assignment(var_name)
             if value is not None:
                 if not _repeated_assignment(var_name, value):
                     initial_values[var_name] = value
@@ -1522,8 +1737,14 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
         all_variables |= all_vars
 
         # Erstelle Gleichung in der Form: left - right = 0
-        equation = f"({left}) - ({right})"
         _check_equation_syntax(left, right)
+        if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', right) and not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', left):
+            # f(T) = h wird gelöst wie h = f(T): steht nur rechts ein einzelner Name, kommt er intern
+            # nach links (direkte Auswertung, Tearing und Mehrfach-Tearing erkennen "Name = Ausdruck").
+            # Sonst hinge die Lösbarkeit von der Schreibweise ab; Anzeige und Meldungen nennen
+            # weiter die Zeile, wie sie im Blatt steht
+            left, right = right, left
+        equation = f"({left}) - ({right})"
         equations.append(equation)
 
         # Speichere Original-Zeile für Anzeige
@@ -1531,6 +1752,16 @@ def _parse_equations(text: str, parse_units: bool, position: List[int]
 
     # Entferne Sweep-Variablen aus der Variablenliste (sie sind keine Unbekannten)
     all_variables -= set(sweep_vars.keys())
+
+    # Konstanten des Programms (sigma#, intern _cn_sigma), die in den Gleichungen vorkommen: Vorgaben
+    # mit SI-Wert und Einheit - für Solver, Einheiten-Ableitung und Anzeige gewöhnliche gegebene Größen
+    for name, constant in CONSTANTS.items():
+        key = CONSTANT_PREFIX + name
+        if not any(re.search(r'\b' + re.escape(key) + r'\b', equation) for equation in equations):
+            continue
+        initial_values[key] = constant.value
+        if parse_units and UNITS_AVAILABLE and constant.unit:
+            unit_values[key] = unit_value_strict(constant.value, constant.unit)
 
     # Entferne Konstanten aus der Variablenliste (sie sind keine Unbekannten)
     all_variables -= set(initial_values.keys())
@@ -1907,6 +2138,16 @@ def parse_equilibria(text: str) -> List[EquilibriumStatement]:
                 f"Zeile {line_no}: EQUILIBRIUM OUT: {', '.join(unmangle(v) for v in twice)} steht mehrfach")
         try:
             from ideal_gas import find_species
+            charged = [n for n, _ in inputs + outputs
+                       if any(element.upper() == 'E' for element, _ in find_species(n[3:]).elements)]
+            if charged:
+                # geladene Stoffe (Element E = Elektron in thermo.inp): das Verfahren führt keine
+                # Ladungsbilanz - ihre Menge kam stets als 0 heraus (Argon bei 10000 K "nicht ionisiert")
+                raise EquationSyntaxError(
+                    f"Zeile {line_no}: EQUILIBRIUM: {', '.join(dict.fromkeys(charged))} "
+                    f"{'ist ein geladener Stoff' if len(set(charged)) == 1 else 'sind geladene Stoffe'} "
+                    f"(Ion/Elektron) - das Gleichgewicht rechnet ohne Ladungsbilanz, Ionen werden nicht "
+                    f"unterstützt (ihre Stoffwerte, z.B. enthalpy(IG:Ar+, T=...), bleiben verfügbar)")
             if all(find_species(n[3:]).condensed for n, _ in outputs):
                 raise EquationSyntaxError(
                     f"Zeile {line_no}: EQUILIBRIUM OUT: mindestens einen gasförmigen Stoff angeben")

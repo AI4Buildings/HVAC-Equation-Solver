@@ -26,7 +26,9 @@ Ideale Gase und kondensierte Stoffe aus der NASA-Datenbank mit dem Präfix IG:
 """
 
 import CoolProp.CoolProp as CP
+import numpy as np
 import ideal_gas
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import Dict, List, Tuple, Optional
 import re
@@ -244,6 +246,208 @@ def set_reference_states(states: Dict[str, str]) -> None:
     _reference_names.update(names)
 
 
+# Zustände unter dem Tripelpunkt (Festlegung des Nutzers 10.11.2026: "wichtig ist, dass es richtig ist,
+# und wenn nicht, dass es einen Hinweis gibt"). Im Gleichgewicht ist der Stoff dort Dampf oder fest:
+# - Dampf (p höchstens der Sublimationsdruck): richtig gerechnet. CoolProp nimmt unter der
+#   Tripeltemperatur T und p nicht an, wohl aber T und rho - die Dichte wird so bestimmt, dass der
+#   Druck stimmt (_vapour_density).
+# - Sättigung (x gegeben): Druck und Temperatur liegen auf der Sublimationslinie, dem Gleichgewicht
+#   von Dampf und fester Phase - Wasser bei -10 °C: 259.9 Pa über Eis, nicht die 286 Pa der über den
+#   Tripelpunkt hinaus verlängerten Siedelinie (unterkühltes Wasser, +10 %; bei -20 °C +22 %).
+#   Sattdampf (x = 1) wie der Dampf oben. Daten der festen Phase führt CoolProp nur für Wasser
+#   (Eis nach IAPWS, dieselben wie in HumidAir) - _sublimation_pressure.
+# - Was die kondensierte Phase braucht (Flüssigkeitsgebiet, x < 1), hat keine richtigen Daten: geliefert
+#   wird die unterkühlte Flüssigkeit (metastabil), solange sie thermodynamisch stabil gerechnet wird
+#   (cp > 0, (dp/drho)_T > 0, nicht unter _metastable_limit) - die Oberfläche gibt dazu einen Hinweis
+#   (collecting_supercooled). Weiter darunter und im Gebiet der festen Phase eine Meldung.
+# Toleranz relativ: 0 °C gilt bei Wasser (Tripelpunkt 0.01 °C) nicht als "unter dem Tripelpunkt".
+_TRIPLE_TOLERANCE = 1e-4
+
+# nur in einer Phase definiert: im Nassdampfgebiet lieferte CoolProp Zahlen ohne Bedeutung
+# (Wasser 100 °C: cp = 11.8 kJ/(kg K) bei x = 0.3, 2.65 bei x = 0.5)
+_SINGLE_PHASE_ONLY = {'C': 'cp', 'O': 'cv', 'V': 'viscosity', 'L': 'conductivity',
+                      'Prandtl': 'prandtl', 'A': 'soundspeed'}
+
+
+@lru_cache(maxsize=None)
+def _triple_point(coolprop_fluid: str) -> Tuple[Optional[float], Optional[float]]:
+    """(Tripeltemperatur K, Tripeldruck Pa) aus CoolProp; None, wo nicht verfügbar (Gemische)."""
+    result = []
+    for key in ('Ttriple', 'ptriple'):
+        try:
+            value = float(CP.PropsSI(key, coolprop_fluid))
+            result.append(value if np.isfinite(value) and value > 0 else None)
+        except Exception:
+            result.append(None)
+    return result[0], result[1]
+
+
+@lru_cache(maxsize=None)
+def _has_solid_data(coolprop_fluid: str) -> bool:
+    """Führt die Datenbank die feste Phase des Stoffs? CoolProp nur für Wasser (Eis Ih, IAPWS)."""
+    try:
+        return canonical_fluid(coolprop_fluid) == canonical_fluid('Water')
+    except Exception:
+        return False
+
+
+def _sublimation_pressure(coolprop_fluid: str, temperature: float) -> Optional[float]:
+    """Sublimationsdruck (Pa) bei T unter dem Tripelpunkt - Dampf im Gleichgewicht mit der festen
+    Phase; None ohne Daten der festen Phase bzw. außerhalb ihres Bereichs."""
+    if not _has_solid_data(coolprop_fluid):
+        return None
+    try:
+        from CoolProp.HumidAirProp import HAProps_Aux
+        value = float(HAProps_Aux('p_ws', float(temperature), 101325.0, 0.0)[0])
+    except Exception:
+        return None
+    return value if np.isfinite(value) and value > 0 else None
+
+
+def _sublimation_temperature(coolprop_fluid: str, pressure: float) -> Optional[float]:
+    """Temperatur (K) auf der Sublimationslinie zum Druck p unter dem Tripeldruck (Reifpunkt), sonst None."""
+    t_triple, _ = _triple_point(coolprop_fluid)
+    if t_triple is None or not _has_solid_data(coolprop_fluid) or not pressure > 0:
+        return None
+    low, high = 0.4 * t_triple, t_triple
+    p_low, p_high = _sublimation_pressure(coolprop_fluid, low), _sublimation_pressure(coolprop_fluid, high)
+    if p_low is None or p_high is None or not p_low <= pressure <= p_high:
+        return None
+    from scipy.optimize import brentq
+    return float(brentq(lambda T: np.log(_sublimation_pressure(coolprop_fluid, T) / pressure), low, high,
+                        xtol=1e-12, rtol=1e-14))
+
+
+@lru_cache(maxsize=None)
+def _melting_line(coolprop_fluid: str):
+    """CoolProp-Zustandsobjekt mit Schmelzdruckkurve (Wasser, CO2, N2, Propan ...) oder None."""
+    try:
+        state = CP.AbstractState('HEOS', coolprop_fluid)
+        return state if state.has_melting_line() else None
+    except Exception:
+        return None
+
+
+def _melting_temperature(coolprop_fluid: str, pressure: float) -> Optional[float]:
+    """Schmelztemperatur (K) beim Druck p, None ohne Schmelzdruckkurve bzw. außerhalb ihres Bereichs.
+    Wasser schmilzt unter Druck tiefer (200 bar: -1.54 °C): dort ist es knapp unter der
+    Tripeltemperatur stabil flüssig, nicht unterkühlt."""
+    state = _melting_line(coolprop_fluid)
+    if state is None:
+        return None
+    try:
+        value = float(state.melting_line(CP.iT, CP.iP, float(pressure)))
+    except Exception:
+        return None
+    return value if np.isfinite(value) and value > 0 else None
+
+
+def _vapour_density(coolprop_fluid: str, temperature: float, pressure: float) -> float:
+    """
+    Dichte des Dampfs bei T und p unter der Tripeltemperatur: CoolProp nimmt dort das Eingabepaar
+    (T, p) nicht an ("we don't support p below ptriple when T is less than Tmin"), rechnet die
+    Gasphase aber mit (T, rho) - die Dichte so, dass der Druck stimmt (Start: ideales Gas, der
+    Dampf ist dort nahezu ideal).
+    """
+    gas_constant = 8.314462618 / float(CP.PropsSI('M', coolprop_fluid))
+    density = pressure / (gas_constant * temperature)
+    for _ in range(30):
+        computed = float(CP.PropsSI('P', 'T', temperature, 'D', density, coolprop_fluid))
+        if abs(computed - pressure) <= 1e-13 * pressure:
+            break
+        density *= pressure / computed
+    return density
+
+
+def _below_triple_error(coolprop_fluid: str, temperature: float, pressure: Optional[float], kind: str,
+                        sublimation: Optional[float] = None) -> ValueError:
+    """Meldung für einen Zustand unter dem Tripelpunkt, für den es keine Stoffdaten gibt."""
+    t_triple, p_triple = _triple_point(coolprop_fluid)
+    triple = f"{t_triple - 273.15:.4g} °C" + (f", {p_triple:.4g} Pa" if p_triple is not None else "")
+    state = f"T = {temperature - 273.15:.4g} °C" + (f" und p = {pressure:.4g} Pa" if pressure is not None else "")
+    verb = "liegen" if pressure is not None else "liegt"
+    if kind == 'solid':
+        return ValueError(
+            f"{coolprop_fluid}: {state} {verb} im Gebiet der festen Phase (unter dem Tripelpunkt {triple}, "
+            f"über dem Sublimationsdruck {sublimation:.4g} Pa) - für die feste Phase gibt es keine Stoffdaten")
+    if kind == 'unknown':
+        return ValueError(
+            f"{coolprop_fluid}: {state} {verb} unter dem Tripelpunkt ({triple}) - dort ist der Stoff Dampf "
+            f"oder fest; ohne Daten der festen Phase (Sublimationsdruck) rechnet die Stoffdatenbank das nicht")
+    return ValueError(
+        f"{coolprop_fluid}: {state} {verb} zu weit unter dem Tripelpunkt ({triple}) - dort ist der "
+        f"Stoff fest, und die Stoffdaten der unterkühlten Flüssigkeit reichen nicht so weit "
+        f"(außerhalb des Gültigkeitsbereichs)")
+
+
+def _stable_state(coolprop_fluid: str, keys: list, values: list) -> bool:
+    """Thermodynamisch stabil (cp > 0, (dp/drho)_T > 0)? Bei Sättigung zählt die Flüssigkeit."""
+    state = [keys[0], values[0], keys[1], values[1]]
+    if 'Q' in keys:
+        state[2 * keys.index('Q') + 1] = 0.0
+    try:
+        heat_capacity = float(CP.PropsSI('C', *state, coolprop_fluid))
+        stiffness = float(CP.PropsSI('d(P)/d(D)|T', *state, coolprop_fluid))
+    except Exception:
+        return False
+    return bool(np.isfinite(heat_capacity) and np.isfinite(stiffness) and heat_capacity > 0 and stiffness > 0)
+
+
+@lru_cache(maxsize=None)
+def _metastable_limit(coolprop_fluid: str) -> float:
+    """
+    Tiefste Temperatur (K), bis zu der die siedende Flüssigkeit unter dem Tripelpunkt
+    thermodynamisch stabil gerechnet wird (Wasser etwa -41 °C) - darunter liefert die
+    Zustandsgleichung keine brauchbaren Werte mehr, auch wo ein einzelner Punkt zufällig stabil
+    aussieht (Wasser -52 °C, 1 bar: Dichte 3790 kg/m^3). Schrittweise abwärts bis zum ersten
+    instabilen Punkt, dann eingegrenzt; nicht tiefer als 60 % der Tripeltemperatur.
+    """
+    t_triple, _ = _triple_point(coolprop_fluid)
+    if t_triple is None:
+        return 0.0
+
+    def stable(temperature):
+        return _stable_state(coolprop_fluid, ['T', 'Q'], [temperature, 0.0])
+
+    good, bad = t_triple, None
+    for step in range(1, 41):
+        candidate = t_triple * (1 - 0.01 * step)
+        if stable(candidate):
+            good = candidate
+        else:
+            bad = candidate
+            break
+    if bad is None:
+        return good
+    for _ in range(20):
+        middle = 0.5 * (good + bad)
+        if stable(middle):
+            good = middle
+        else:
+            bad = middle
+    return good
+
+
+# Sammelliste für den Hinweis der Oberfläche: Zustände, für die statt des stabilen Zustands (fest)
+# die unterkühlte Flüssigkeit geliefert wurde - (Fluid, T, Bezugstemperatur, "dem Tripelpunkt" bzw.
+# "der Schmelztemperatur bei diesem Druck")
+_supercooled_notes: Optional[list] = None
+
+
+@contextmanager
+def collecting_supercooled():
+    """
+    with collecting_supercooled() as notes: ... - sammelt während der Auswertung die Zustände, deren
+    Wert für die unterkühlte Flüssigkeit gilt (nicht für den stabilen, festen Zustand).
+    """
+    global _supercooled_notes
+    previous, _supercooled_notes = _supercooled_notes, []
+    try:
+        yield _supercooled_notes
+    finally:
+        _supercooled_notes = previous
+
+
 def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
     """
     Berechnet eine thermodynamische Eigenschaft.
@@ -342,28 +546,116 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
     if len(inputs) != 2:
         raise ValueError(f"Genau 2 Zustandsgrößen erforderlich, {len(inputs)} gegeben")
 
-    # Nassdampf (x gegeben) gibt es nur oberhalb des Tripelpunkts - darunter Sublimation
-    # (Wasser: Eis); CoolProp extrapoliert sonst still in den metastabilen Bereich
-    if 'Q' in inputs and ('T' in inputs or 'P' in inputs):
-        try:
-            limit_key, limit = (('T', CP.PropsSI('Ttriple', coolprop_fluid)) if 'T' in inputs
-                                else ('P', CP.PropsSI('ptriple', coolprop_fluid)))
-        except Exception:
-            limit_key, limit = None, None
-        if limit_key and inputs[limit_key] < limit * (1 - 1e-9):
-            name = 'T' if limit_key == 'T' else 'p'
-            unit_text = (f"{inputs['T'] - 273.15:.4g} °C < {limit - 273.15:.4g} °C" if limit_key == 'T'
-                         else f"{inputs['P']:.4g} Pa < {limit:.4g} Pa")
-            raise ValueError(f"{coolprop_fluid}: {name} unterhalb des Tripelpunkts ({unit_text}) - "
-                             f"dort gibt es kein Nassdampfgebiet (Wasser: Eis)")
-
     # Erstelle CoolProp-Aufruf
     keys = list(inputs.keys())
     values = list(inputs.values())
+    vectors = any(np.ndim(value) > 0 for value in values)
+
+    # Zustand unter dem Tripelpunkt (siehe _TRIPLE_TOLERANCE): Dampf und Sättigung über der festen
+    # Phase richtig, sonst die unterkühlte Flüssigkeit (mit Hinweis) bzw. eine Meldung
+    t_triple, p_triple = _triple_point(coolprop_fluid)
+    below = None           # Temperatur des Zustands, wenn sie unter dem Tripelpunkt liegt
+    supercooled = False    # der gelieferte Wert gilt für die unterkühlte Flüssigkeit
+    direct = None          # Ergebnis ohne Zustandsberechnung (Sublimationslinie)
+    reference = ('dem Tripelpunkt', t_triple)     # Bezug für den Hinweis
+    if t_triple is not None:
+        limit = t_triple * (1 - _TRIPLE_TOLERANCE)
+        if 'T' in inputs:
+            if float(np.min(inputs['T'])) < limit:
+                below = float(np.min(inputs['T']))
+            elif set(keys) == {'T', 'P'} and not vectors and p_triple is not None and inputs['P'] > p_triple:
+                # Stoffe, deren Schmelztemperatur mit dem Druck steigt (CO2 bei 100 bar: -54.5 °C):
+                # unter ihr ist der Stoff fest, auch über der Tripeltemperatur
+                melting = _melting_temperature(coolprop_fluid, inputs['P'])
+                if melting is not None and inputs['T'] < melting * (1 - _TRIPLE_TOLERANCE):
+                    below, reference = float(inputs['T']), ('der Schmelztemperatur bei diesem Druck', melting)
+        elif 'Q' in inputs and 'P' in inputs and p_triple is not None and float(np.min(inputs['P'])) < p_triple:
+            if vectors:
+                raise ValueError("Zustand unter dem Tripelpunkt - punktweise auswerten")
+            saturation = _sublimation_temperature(coolprop_fluid, float(inputs['P']))
+            if saturation is None:
+                try:
+                    saturation = float(CP.PropsSI('T', 'P', inputs['P'], 'Q', inputs['Q'], coolprop_fluid))
+                except Exception:
+                    saturation = 0.0            # nicht berechenbar: weit unter dem Tripelpunkt
+            if saturation < limit:
+                below = saturation
+    if below is not None and vectors:
+        raise ValueError("Zustand unter dem Tripelpunkt - punktweise auswerten")
+    if below is not None:
+        sublimation = _sublimation_pressure(coolprop_fluid, below)
+        vapour_at = None                         # Dampfzustand (T, p), gerechnet über (T, rho)
+        if 'Q' in inputs and sublimation is not None:
+            # Sättigung über der festen Phase: p und T auf der Sublimationslinie
+            vapour_fraction = float(inputs['Q'])
+            inputs = {'T': below, 'Q': vapour_fraction}
+            keys, values = ['T', 'Q'], [below, vapour_fraction]
+            if output_prop == 'P':
+                direct = sublimation
+            elif output_prop == 'T':
+                direct = below
+            elif vapour_fraction >= 1 - 1e-9:
+                vapour_at = (below, sublimation)
+            else:
+                supercooled = True               # siedende "Flüssigkeit": im Gleichgewicht fest
+        elif 'Q' in inputs:
+            supercooled = True                   # ohne Daten der festen Phase: verlängerte Siedelinie
+        else:
+            if set(keys) == {'T', 'P'}:
+                state_pressure = float(inputs['P'])
+            else:
+                try:
+                    state_pressure = float(CP.PropsSI('P', keys[0], values[0], keys[1], values[1], coolprop_fluid))
+                except Exception:
+                    state_pressure = None
+            if state_pressure is None:
+                supercooled = True
+            elif sublimation is not None and state_pressure <= sublimation * (1 + 1e-9):
+                if set(keys) == {'T', 'P'}:
+                    vapour_at = (below, state_pressure)
+                # sonst: Dampf, mit dem gegebenen Eingabepaar gerechnet
+            elif p_triple is not None and state_pressure < p_triple:
+                raise _below_triple_error(coolprop_fluid, below, state_pressure,
+                                          'solid' if sublimation is not None else 'unknown', sublimation)
+            else:
+                # Flüssigkeitsgebiet: unter der Schmelztemperatur beim Druck des Zustands ist der
+                # Stoff im Gleichgewicht fest; darüber (Wasser unter hohem Druck) stabil flüssig
+                melting = _melting_temperature(coolprop_fluid, state_pressure)
+                supercooled = melting is None or below < melting * (1 - 1e-9)
+        if supercooled and below < _metastable_limit(coolprop_fluid):
+            raise _below_triple_error(coolprop_fluid, below, inputs.get('P'), 'range')
+        if vapour_at is not None:
+            try:
+                keys, values = ['T', 'D'], [vapour_at[0], _vapour_density(coolprop_fluid, *vapour_at)]
+            except Exception:
+                raise _below_triple_error(coolprop_fluid, below, vapour_at[1], 'range') from None
+            if output_prop == 'P':
+                direct = vapour_at[1]
+
+    # cp, cv, Viskosität, Wärmeleitfähigkeit, Prandtl-Zahl, Schallgeschwindigkeit gibt es nur in
+    # einer Phase (x = 0 bzw. x = 1 sind die Phasen an der Grenze)
+    if output_prop in _SINGLE_PHASE_ONLY and set(keys) != {'T', 'P'}:
+        try:
+            vapour = inputs['Q'] if 'Q' in inputs else CP.PropsSI(
+                'Q', keys[0], values[0], keys[1], values[1], coolprop_fluid)
+            inside = (np.asarray(vapour, dtype=float) > 1e-9) & (np.asarray(vapour, dtype=float) < 1 - 1e-9)
+        except Exception:
+            vapour, inside = None, np.array(False)
+        if np.any(inside):
+            if vectors:
+                raise ValueError("Zustand im Nassdampfgebiet - punktweise auswerten")
+            raise ValueError(
+                f"{coolprop_fluid}: {func_name} ist im Nassdampfgebiet (x = {float(vapour):.4g}) nicht "
+                f"definiert - dort liegen Flüssigkeit und Dampf nebeneinander vor. Wert der siedenden "
+                f"Flüssigkeit (x=0) oder des Sattdampfs (x=1) verwenden")
 
     try:
-        result_si = CP.PropsSI(output_prop, keys[0], values[0], keys[1], values[1], coolprop_fluid)
+        result_si = direct if direct is not None else CP.PropsSI(
+            output_prop, keys[0], values[0], keys[1], values[1], coolprop_fluid)
     except Exception as e:
+        if below is not None or 'below ptriple' in str(e):
+            raise _below_triple_error(coolprop_fluid, below if below is not None else float(inputs.get('T', 0.0)),
+                                      inputs.get('P'), 'unknown' if 'below ptriple' in str(e) else 'range') from None
         if set(keys) == {'T', 'P'} and 'Saturation pressure' in str(e):
             # T und p auf der Siedelinie bestimmen den Zustand nicht (Nassdampf: x fehlt)
             raise ValueError(f"{coolprop_fluid}: T = {inputs['T'] - 273.15:.4g} °C und p = "
@@ -377,6 +669,17 @@ def calculate_property(func_name: str, fluid: str, **kwargs) -> float:
                     f"REFERENCE {_reference_names.get(canonical_fluid(coolprop_fluid), '')}: "
                     f"h um {dh / 1e3:+.6g} kJ/kg, s um {ds / 1e3:+.6g} kJ/(kg K) verschoben)")
         raise ValueError(f"CoolProp Fehler für {coolprop_fluid}: {e}{note}")
+
+    if supercooled:
+        if not _stable_state(coolprop_fluid, keys, values):
+            raise _below_triple_error(coolprop_fluid, below, inputs.get('P'), 'range')
+        if _supercooled_notes is not None:
+            _supercooled_notes.append((coolprop_fluid, below, reference[1], reference[0]))
+
+    # Dampfgehalt außerhalb des Nassdampfgebiets: CoolProp liefert je nach Eingabepaar -1 (T, p)
+    # oder 10000 (rho mit u, h, s) - einheitlich -1 (wie dokumentiert, Hinweis in der Oberfläche)
+    if output_prop == 'Q' and not -1e-9 <= result_si <= 1 + 1e-9:
+        return -1.0
 
     # Ausgabe in SI (volume = 1/Dichte)
     if func_name == 'volume':

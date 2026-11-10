@@ -674,8 +674,12 @@ for text, name, expected in (
         ("P = 100 W\nm = 500 kg\nc = 0.714 kJ/(kg*K)\nt = 1 h\nm*c*r = P\ny = r*t", "y", (1.0084, "K")),
         ("m_1 = 1 kg/s\nm_2 = 3 kg/s\nT_1 = 20 °C\nT_2 = 60 °C\nm_3 = m_1 + m_2\nm_3*T_3 = m_1*T_1 + m_2*T_2",
          "T_3", (50.0, "°C")),
+        # m_3 ungleich m_1 + m_2: kein Ergebnis des Nullpunkt-Tests. T_1 ist eine sicher absolute
+        # Temperatur als Faktor (Gesetz auf der Verhältnisskala Kelvin, wie eine Mischung mit
+        # verschiedenen Wärmekapazitäten) - T_3 ist dann keine Differenz, sondern absolut
+        # (bis 09.11.2026 über die Produktregel als 258.52 K angezeigt)
         ("m_1 = 1 kg/s\nm_2 = 3 kg/s\nT_1 = 20 °C\nT_2 = 60 °C\nm_3 = 5 kg/s\nm_3*T_3 = m_1*T_1 + m_2*T_2",
-         "T_3", (258.52, "K")),
+         "T_3", (-14.63, "°C")),
         ("T_1 = 20 °C\nT_2 = T_1*5^0.286", "T_2", (191.3603, "°C")),
         ("sigma = 5.67e-8 W/(m^2*K^4)\nq = 500 W/m^2\nT_u = 20 °C\nq = sigma*(T_s^4 - T_u^4)", "T_s", (83.6314, "°C"))):
     solve(text)
@@ -1029,7 +1033,7 @@ check("Parameterstudie: Einheiten-Warnungen und Hinweise wie ohne Studie",
 solve("omega = 10 rad/s\nt = 2 s\nphi = omega*t\ny = sin(phi)\nalpha = 30 deg\nbeta = 2*alpha")
 check("Winkel: phi = omega*t in rad, sin(phi) in rad, 2*alpha in deg",
       shown("phi") == (20.0, "rad") and close(shown("y")[0], 0.912945) and close(shown("beta")[0], 60)
-      and shown("beta")[1] == "deg" and list(app.unit_dropdowns["phi"].cget("values")) == ["rad", "deg"],
+      and shown("beta")[1] == "deg" and list(app.unit_dropdowns["phi"].cget("values")) == ["rad", "deg", "-"],
       f"{shown('phi')} {shown('y')} {shown('beta')}")
 solve("alpha = 30 deg\nh = 90 - alpha")
 check("Winkel: Zahl ohne Einheit in Summe mit Winkel -> Hinweis (rad)",
@@ -1059,6 +1063,259 @@ solve("T = 25 °C\np = 1 bar\nEQUILIBRIUM T=T, p=p\n  IN IG:H2 = 2 mol, IG:O2 = 
 hints = list(getattr(app.last_analysis, 'hints', []) or [])
 check("Gas außerhalb seines Datenbereichs (NO2 bei 25 °C): gelöst, Warnhinweis",
       (app.last_solution or {}).get('a_NO2') == 0 and any('Achtung' in h and 'IG:NO2' in h for h in hints), str(hints))
+
+# --- Codeprüfung November 2026 ------------------------------------------------
+# Optimierte Größe: die Einheiten-Auswahl rechnet aus der Lösung (früher: untere Grenze der VARY-Angabe)
+solve("k_1 = 2\nk_2 = 0.5\nK = k_1*s/0.1 + k_2*0.1/s\nMINIMIZE K VARY s = 10 .. 400 mm")
+app._on_unit_changed("s", "cm")
+check("Optimierte Größe: Einheit umschalten zeigt das Optimum (5 cm), nicht die untere Grenze (1 cm)",
+      abs(float(app.value_labels["s"].cget("text")) - 5.0) < 1e-4, app.value_labels["s"].cget("text"))
+# Zusammengesetzte Einheit mit °C: Wert und Label aus derselben Einheit (früher SI-Wert unter °C/h)
+solve("r = 2 °C/h\nq = 2*r")
+check("Anzeige 2 °C/h und 4 °C/h (nicht 0.000556)", shown("r") == (2.0, "°C/h") and shown("q") == (4.0, "°C/h"),
+      f"{shown('r')} {shown('q')}")
+# Hinweise in Parameterstudien wie ohne Studie
+solve("T_1 = 20:10:40 °C\nT_2 = 80 °C\nm = 2 kg/s\nc = 4.19 kJ/(kg*K)\nQ = m*c*(T_2 - T1)\nQ = 300 kW")
+hints = list(getattr(app.last_analysis, 'hints', []) or [])
+check("Parameterstudie: Namens-Hinweis (T1 neben T_1) wie ohne Studie",
+      any('T1' in h and 'Tippfehler' in h for h in hints), str(hints))
+solve("h = 1500:500:3000 kJ/kg\nx = quality(water, h=h, p=1 bar)")
+hints = list(getattr(app.last_analysis, 'hints', []) or [])
+check("Parameterstudie: quality = -1 erst am letzten Punkt -> Hinweis mit dem Punkt",
+      any('nicht im Nassdampfgebiet' in h and 'Punkt 4' in h for h in hints), str(hints))
+# Parameterstudien verschiedener Länge ohne Gleichung: Meldung statt Spalten verschiedener Länge
+solve("T = 20:10:50 °C\nm = [1 2 3] kg/s")
+check("Nur Parameterstudien verschiedener Länge: Meldung", "gleich viele Werte" in app.info_label.cget("text"),
+      app.info_label.cget("text"))
+
+# --- Codeprüfung November 2026, zweite Runde -----------------------------------
+# Nur in K eingegebene Größen: daraus berechnete erscheinen wie eingegeben in K (früher -268.15 °C)
+solve("dT = 10 K\ndT_h = dT/2\nx = 2*dT\na = 4 K\nc = dT - a")
+check("dT = 10 K: dT/2, 2*dT und dT - a in K", shown("dT_h") == (5.0, "K") and shown("x") == (20.0, "K")
+      and shown("c") == (6.0, "K"), f"{shown('dT_h')} {shown('x')} {shown('c')}")
+solve("T_1 = 20 °C\ndT = 10 K\nx = dT/2\nT_2 = T_1 + dT")
+check("Gegenprobe: mit T_1 in °C bleibt T_2 in °C, dT/2 in K", shown("T_2") == (30.0, "°C") and shown("x") == (5.0, "K"),
+      f"{shown('T_2')} {shown('x')}")
+# Luftwechsel: m3 wie m^3
+solve("V_dot = 300 m3/h\nV = 150 m3\nn = V_dot/V")
+check("Luftwechsel mit m3/h und m3: 2 1/h", shown("n") == (2.0, "1/h"), str(shown("n")))
+# Stoffwerte unter dem Tripelpunkt: gerechnet, mit Hinweis
+solve("h = enthalpy(water, T=-10 °C, p=1 bar)\np_s = pressure(water, T=-10 °C, x=1)\nh_g = enthalpy(water, T=-10 °C, x=1)")
+hints = list(getattr(app.last_analysis, 'hints', []) or [])
+check("Wasser bei -10 °C: Sättigungsdruck über Eis (259.9 Pa) und Sattdampf richtig, Flüssigkeit mit Hinweis",
+      abs(app.last_solution['p_s'] - 259.874) < 0.01 and abs(app.last_solution['h_g'] - 2482559.5) < 1
+      and abs(app.last_solution['h'] + 42363) < 1
+      and [h for h in hints if 'nicht für den stabilen Zustand' in h] == [h for h in hints if "'h = enthalpy" in h]
+      and sum('nicht für den stabilen Zustand' in h for h in hints) == 1, str(hints))
+solve("h = enthalpy(water, T=5 °C, p=1 bar)\nh_0 = enthalpy(water, T=0 °C, x=0)\np_0 = pressure(R134a, T=-10 °C, x=1)")
+hints = list(getattr(app.last_analysis, 'hints', []) or [])
+check("Gegenprobe: Wasser bei 5 °C und 0 °C, R134a bei -10 °C ohne Hinweis",
+      "SOLUTION" in app.result_status_label.cget("text") and not any('Tripelpunkt' in h for h in hints), str(hints))
+solve("h = enthalpy(water, T=-52 °C, p=1 bar)")
+check("Wasser bei -52 °C: Meldung statt unbrauchbarer Werte", "zu weit unter dem Tripelpunkt" in app.info_label.cget("text"),
+      app.info_label.cget("text"))
+solve("h = enthalpy(water, T=-10 °C, p=400 Pa)")
+check("Wasser bei -10 °C und 400 Pa (Eis): Meldung", "Gebiet der festen Phase" in app.info_label.cget("text"),
+      app.info_label.cget("text"))
+# Name zugleich Größe und Funktion: Anzeige unter dem Namen aus dem Blatt
+solve("T_1 = 20 °C\ncp = cp(air, T=T_1, p=1 bar)\ncp_2 = cp(air, T=80 °C, p=1 bar)")
+check("cp = cp(...) und ein weiterer cp(...)-Aufruf: beide Zeilen, Name 'cp'", "cp" in shown_rows() and "cp_2" in shown_rows()
+      and not any(name.startswith("_kw_") for name in shown_rows()), str(shown_rows()))
+# Größe hebt sich heraus
+solve("x = x + 1")
+check("x = x + 1: Widerspruch statt 'nicht eindeutig'", "hebt sich" in app.info_label.cget("text"), app.info_label.cget("text"))
+# Dialog Initial Values: Einheit der SI-Zahl (früher "kW" neben 100000)
+unit_text = main.EquationSolverApp._si_unit_text
+check("Initial Values: SI-Einheit zur Anzeige-Einheit",
+      [unit_text(u) for u in (None, '', 'kW', 'bar', 'kJ/kg', '%', 'degC', 'kg/kmol', 'm3/h', 'W/(m^2*K)', 'kJ/mol')]
+      == ['???', '-', 'W', 'Pa', 'J/kg', '-', 'K', 'kg/mol', 'm^3/s', 'W/(m^2*K)', 'J/mol'],
+      str([unit_text(u) for u in (None, '', 'kW', 'bar', 'kJ/kg', '%', 'degC', 'kg/kmol', 'm3/h', 'W/(m^2*K)', 'kJ/mol')]))
+# Winkel-Ergebnis: auch als Zahl wählbar (Kennzahl mit rad/s im Produkt)
+solve("omega = 10 rad/s\nd = 0.2 m\nnu = 1e-6 m^2/s\nRe = omega*d^2/nu")
+check("Kennzahl mit rad/s: Auswahl rad, deg, -", list(app.unit_dropdowns["Re"].cget("values")) == ['rad', 'deg', '-'],
+      str(app.unit_dropdowns["Re"].cget("values")))
+app._on_unit_changed("Re", "-")
+check("Kennzahl als Zahl: 400000", abs(float(app.value_labels["Re"].cget("text")) - 4e5) < 1, app.value_labels["Re"].cget("text"))
+
+# --- Konstanten des Programms (name#), Zeilennummern, Hell/Dunkel -----------------
+import physical_constants
+set_text("T = 500 K\nq = ")
+app.equations_text.mark_set("insert", "2.4")
+app.insert_constant("sigma")
+check("Konstante einfügen: sigma# an der Schreibmarke", get_text().splitlines()[1] == "q = sigma#", get_text())
+constants_menu = app._constants_menu(app)
+labels = [constants_menu.entrycget(i, "label") for i in range(constants_menu.index("end") + 1)]
+check("Menü Constants: alle Konstanten mit Wert, Einheit und Bedeutung",
+      len(labels) == len(physical_constants.CONSTANTS) and labels[0].startswith("sigma#")
+      and "5.670374419e-08" in labels[0] and "Stefan-Boltzmann" in labels[0], str(labels[:2]))
+set_text("F_G = 2*")
+app.equations_text.mark_set("insert", "1.end")
+constants_menu.invoke(1)
+check("Auswahl im Menü fügt g# ein", get_text().strip() == "F_G = 2*g#", get_text())
+menubar = app.nametowidget(app.cget("menu"))
+edit_menu = app.nametowidget(menubar.entrycget(1, "menu"))
+view_menu = app.nametowidget(menubar.entrycget(2, "menu"))
+check("Edit > Insert Constant, View > Line Numbers und Light Mode vorhanden",
+      "Insert Constant" in [edit_menu.entrycget(i, "label") for i in range(edit_menu.index("end") + 1)]
+      and [view_menu.entrycget(i, "label") for i in range(view_menu.index("end") + 1) if view_menu.type(i) == "checkbutton"]
+      == ["Line Numbers", "Light Mode (Projector)"])
+solve("T = 500 K\nA = 2 m^2\nQ = sigma#*A*T^4\nm = 2 kg\nF_G = m*g#\nsigma = 3\ny = 2*sigma")
+check("Konstanten in den Ergebnissen: Name mit #, Wert und Einheit; eigene Größe sigma daneben",
+      shown_rows() == ["A", "F_G", "Q", "T", "g#", "m", "sigma", "sigma#", "y"]
+      and abs(shown("_cn_sigma")[0] - 5.670374e-08) < 1e-13 and shown("_cn_sigma")[1] == "W/(m^2*K^4)"
+      and abs(shown("Q")[0] - 7.087968) < 1e-5 and shown("Q")[1] == "kW" and shown("F_G") == (19.6133, "N")
+      and shown("y")[0] == 6.0, f"{shown_rows()} {shown('_cn_sigma')} {shown('Q')} {shown('F_G')}")
+solve("sigma# = 5.67e-8\nq = sigma#*2")
+check("sigma# belegen: Meldung mit Zeile", "Zeile 1" in app.info_label.cget("text")
+      and "kann nicht belegt werden" in app.info_label.cget("text"), app.info_label.cget("text"))
+# Zeilennummern neben den Gleichungen
+set_text("\n".join(f"x_{i} = {i}" for i in range(1, 13)))
+app.update()
+app.refresh_line_numbers()
+check("Zeilennummern: eingeblendet, 1 bis 12 neben den Zeilen",
+      app.line_numbers.winfo_manager() == "grid" and app.line_number_texts() == [str(i) for i in range(1, 13)]
+      and app.line_numbers_var.get(), str(app.line_number_texts()))
+positions = app._line_number_positions()
+line_height = app.equations_text._textbox.dlineinfo("1.0")[3]
+check("Zeilennummern: Abstand wie die Zeilen des Editors",
+      {positions[i + 1][1] - positions[i][1] for i in range(len(positions) - 1)} == {line_height}, str(positions[:3]))
+set_text("\n".join(f"x_{i} = {i}" for i in range(1, 201)))
+app.equations_text._textbox.see("150.0")
+app.update()
+app.refresh_line_numbers()
+first_visible = int(app.equations_text._textbox.index("@0,0").split(".")[0])
+check("Zeilennummern folgen dem Rollen (erste sichtbare Zeile, dreistellig)",
+      first_visible > 100 and app.line_number_texts()[0] == str(first_visible) and "150" in app.line_number_texts(),
+      str(app.line_number_texts()[:3]))
+app.toggle_line_numbers()
+app.update()
+app.refresh_line_numbers()
+check("Zeilennummern ausblenden (F7 / View)", app.line_numbers.winfo_manager() == "" and app.line_number_texts() == []
+      and not app.line_numbers_var.get())
+app.toggle_line_numbers()
+app.update()
+app.refresh_line_numbers()
+check("Zeilennummern wieder einblenden", app.line_numbers.winfo_manager() == "grid" and len(app.line_number_texts()) > 5)
+# Hell/Dunkel: ganzes Fenster, für den Projektor weißer Grund und schwarze Schrift
+editor = app.equations_text._textbox
+dark = (editor.cget("background"), editor.cget("foreground"))
+app.toggle_theme()
+app.update()
+solve("T = 20 °C\nx = 2*T")
+app.refresh_line_numbers()
+value_label = app.value_labels["x"]
+check("Light Mode: Editor weiß mit schwarzer Schrift, Ergebnisse und Leiste in hellen Farben",
+      ctk.get_appearance_mode() == "Light" and (editor.cget("background"), editor.cget("foreground")) == ("#ffffff", "#000000")
+      and value_label._apply_appearance_mode(value_label.cget("text_color")) == main.COLORS["value"][0]
+      and app.line_numbers.cget("background") == main.COLORS["bg_frame"][0] and app.light_mode_var.get()
+      and app.theme_btn.cget("text") == "☾" and "SOLUTION" in app.result_status_label.cget("text"),
+      f"{ctk.get_appearance_mode()} {editor.cget('background')} {editor.cget('foreground')}")
+app.toggle_theme()
+app.update()
+app.refresh_line_numbers()
+check("Zurück zu Dark Mode: Farben wie vorher",
+      ctk.get_appearance_mode() == "Dark" and (editor.cget("background"), editor.cget("foreground")) == dark
+      and dark == (main.COLORS["bg_input"][1], main.COLORS["text"][1])
+      and app.line_numbers.cget("background") == main.COLORS["bg_frame"][1] and not app.light_mode_var.get()
+      and app.theme_btn.cget("text") == "☀", f"{editor.cget('background')} {editor.cget('foreground')}")
+
+# --- Hell/Dunkel: die TATSÄCHLICH gezeichneten Farben ----------------------------
+# (nicht die Einstellungen der Widgets: ein Karteireiter gab seine Farbe als festen Wert weiter, im
+# hellen Modus blieben Ergebniszeilen, Tabellenkopf und Residuals mit schwarzem Grund stehen)
+import tkinter as _tk
+
+
+def _raw(widget, option):
+    """Tk-Option direkt (customtkinter-Widgets lehnen cget('bg') ab)."""
+    return str(widget.tk.call(widget._w, 'cget', '-' + option))
+
+
+def _luminance(widget, color):
+    r, g, b = [v / 65535 for v in widget.winfo_rgb(color)]
+    f = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4   # noqa: E731
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+
+
+def drawn_color_problems(light):
+    """
+    (Flächen in der Farbe des anderen Erscheinungsbilds, Beschriftungen ohne Kontrast). Sichtbar
+    sind Zeichenflächen samt ihrer Füllung, Beschriftungen, Textfelder, der Trennbalken und einfache
+    Tk-Rahmen (auch der Inhalt eines rollbaren Bereichs); der Rahmen eines customtkinter-Widgets
+    liegt unter seiner Zeichenfläche.
+    """
+    wrong, weak = [], []
+    for w in all_children(app):
+        if isinstance(w, _tk.Menu):
+            continue
+        colors = []
+        if (isinstance(w, (_tk.Canvas, _tk.Label, _tk.Text, _tk.Entry, _tk.PanedWindow, ctk.CTkScrollableFrame))
+                or type(w) is _tk.Frame):
+            try:
+                colors.append(_raw(w, 'bg'))
+            except _tk.TclError:
+                pass
+        if isinstance(w, _tk.Canvas):
+            for item in w.find_withtag('inner_parts'):
+                try:
+                    colors.append(w.itemcget(item, 'fill'))
+                except _tk.TclError:
+                    pass
+        for color in colors:
+            if not color:
+                continue
+            lum = _luminance(w, color)
+            if (light and lum < 0.12) or (not light and lum > 0.75):
+                wrong.append((color, type(w).__name__, type(w.master).__name__))
+        if isinstance(w, (_tk.Label, _tk.Text, _tk.Entry)):
+            text = _raw(w, 'text') if isinstance(w, _tk.Label) else type(w).__name__
+            if isinstance(w, _tk.Label) and not text.strip():
+                continue
+            a, b = _luminance(w, _raw(w, 'fg')), _luminance(w, _raw(w, 'bg'))
+            if (max(a, b) + 0.05) / (min(a, b) + 0.05) < 2.7:
+                weak.append((text[:30], _raw(w, 'fg'), _raw(w, 'bg')))
+    return sorted(set(wrong)), sorted(set(weak))
+
+
+solve("T_1 = 20:10:40 °C\nT_2 = 80 °C\nm = 2 kg/s\nc = 4.19 kJ/(kg*K)\nQ = m*c*(T_2 - T1)\nQ = 300 kW\nx = 3\ny = 5 m\nz = y + x")
+app.show_unit_warnings()
+app.show_hints()
+app.update()
+check("Dark Mode: alle Flächen dunkel, alle Beschriftungen lesbar", drawn_color_problems(False) == ([], []),
+      str(drawn_color_problems(False))[:400])
+app.toggle_theme()
+app.update()
+check("Light Mode mit Zeilen, Warnungen und Hinweisen aus dem dunklen Modus: nichts bleibt dunkel",
+      drawn_color_problems(True) == ([], []), str(drawn_color_problems(True))[:400])
+app.tab_view.set("Results")
+solve("x = 1\ny = 2")
+check("Light Mode, neu gelöst (x = 1, y = 2): Tabellenkopf und Ergebniszeilen auf hellem Grund",
+      drawn_color_problems(True) == ([], []), str(drawn_color_problems(True))[:400])
+row = app.var_rows_container.winfo_children()[0]
+check("Light Mode: Ergebniszeile gezeichnet in Weiß mit schwarzem Namen",
+      _raw(row._canvas, 'bg') == "#ffffff" and (_raw(row.winfo_children()[0]._label, 'bg'),
+                                                 _raw(row.winfo_children()[0]._label, 'fg')) == ("#ffffff", "#000000"),
+      f"{_raw(row._canvas, 'bg')} {_raw(row.winfo_children()[0]._label, 'bg')}")
+app.tab_view.set("Residuals")
+app.update()
+check("Light Mode, Karteireiter Residuals: heller Grund", drawn_color_problems(True) == ([], []),
+      str(drawn_color_problems(True))[:400])
+check("Trennbalken zwischen den Panels in der Fensterfarbe (hell)",
+      isinstance(app.paned, _tk.PanedWindow) and _raw(app.paned, 'bg') == main.COLORS["bg_dark"][0], _raw(app.paned, 'bg'))
+app.toggle_theme()
+app.update()
+check("Zurück zu Dark Mode mit Zeilen aus dem hellen Modus: nichts bleibt hell",
+      drawn_color_problems(False) == ([], []) and _raw(app.paned, 'bg') == main.COLORS["bg_dark"][1],
+      str(drawn_color_problems(False))[:400])
+app.tab_view.set("Results")
+app.update()
+check("Dark Mode, Results: nichts bleibt hell", drawn_color_problems(False) == ([], []),
+      str(drawn_color_problems(False))[:400])
+# Ergebniszeile: der Name wird zuletzt eingepasst - bei schmaler Spalte weicht er, nicht der Wert
+solve("T = 500 K\nq = sigma#*T^4")
+row = next(r for r in app.var_rows_container.winfo_children() if r.winfo_children()[0].cget("text") == "sigma#")
+check("Ergebniszeile: Wert und Einheit vor dem Namen eingepasst (5.670374e-08 wird nicht beschnitten)",
+      row.pack_slaves()[-1] is row.winfo_children()[0] and app.value_labels["_cn_sigma"].cget("text") == "5.670374e-08",
+      str([type(w).__name__ for w in row.pack_slaves()]))
 
 # ---------------------------------------------------------------------------
 app.destroy()

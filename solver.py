@@ -14,7 +14,7 @@ from numpy import sinh, cosh, tanh
 import re
 import time as _time
 
-from parser import if_function, display_name
+from parser import if_function, display_name, commercial_round
 try:
     from units import unit_number, unit_quantity
 except ImportError:  # ohne pint: Zahlenwertgleichungen nicht verfügbar
@@ -481,8 +481,22 @@ def solve_system(
     except Exception:
         _start_hints = None
     try:
-        return _solve_system_impl(equations, variables, initial_values, initial_guess, constants,
-                                  original_equations, return_analysis, _state=state)
+        result = _solve_system_impl(equations, variables, initial_values, initial_guess, constants,
+                                    original_equations, return_analysis, _state=state)
+        conflicts = state.get('root_conflicts')
+        if not result[0] and conflicts:
+            # Eine Prüfgleichung widerspricht einer Größe, die aus einer Gleichung mit mehreren
+            # Wurzeln stammt (x^2 = 4 -> 2, danach x^3 = -8): die Prüfgleichung zuerst lösen und
+            # die andere prüfen - sonst hinge "widersprüchlich" von der Reihenfolge im Blatt ab
+            try:
+                retry = _solve_system_impl(_checks_first(equations, conflicts), variables, initial_values,
+                                           initial_guess, constants, original_equations, return_analysis,
+                                           _state={})
+            except SolveTimeout:
+                retry = result
+            if retry[0]:
+                return retry
+        return result
     except SolveTimeout:
         if not own_deadline or not state:
             raise
@@ -502,6 +516,17 @@ def solve_system(
         _partial_solution = previous_partial
         if own_deadline:
             _deadline = None
+
+
+def _checks_first(equations: List[str], conflicts: List[Tuple[str, str]]) -> List[str]:
+    """Gleichungen in Blattreihenfolge, jede verletzte Prüfgleichung vor die Gleichung gestellt,
+    aus der die widersprechende Größe iterativ bestimmt wurde ((Prüfgleichung, Quelle), ...)."""
+    ordered = list(equations)
+    for check, source in conflicts:
+        if check in ordered and source in ordered and ordered.index(check) > ordered.index(source):
+            ordered.remove(check)
+            ordered.insert(ordered.index(source), check)
+    return ordered
 
 
 def _solve_system_impl(
@@ -581,6 +606,7 @@ def _solve_system_impl(
     max_iterations = len(equations) * 3 + 1
     iteration = 0
     violated_constraints = []  # Widersprüchliche Constraint-Gleichungen
+    root_source = {}           # Größe -> Gleichung, aus der sie iterativ (Wurzelwahl) bestimmt wurde
     non_unique = []            # (abhängige Gleichungen, unbestimmte Größen) gelöster Blöcke
     evaluation_errors = {}     # Gleichung -> Fehlermeldung der direkten Auswertung
     _LAST_SEARCH_ERROR.clear()  # nur Fehler dieses Lösungslaufs melden
@@ -642,17 +668,18 @@ def _solve_system_impl(
                 if len(unknowns) == 0:
                     # Überprüfe ob die Gleichung erfüllt ist (Residuum nahe 0)
                     residual = _calculate_residual(eq, known_values, context)
-                    value_scale = _sum_net_scale(eq, known_values)
-                    rel_residual = _relative_residual(eq, known_values, context,
-                                                      scale_floor=1e-9 * value_scale)
                     remaining_equations.remove(eq)
                     orig = original_equations.get(eq, eq)
                     analysis.add_direct(orig, eq, "(constraint)", 0.0, residual)
                     # Verletzte Constraints (z.B. "x+1=3" UND "x+1=4") dürfen NICHT
                     # stillschweigend entfernt werden - das System ist widersprüchlich
-                    if not np.isfinite(rel_residual) or rel_residual > 1e-4:
+                    if _check_violated(eq, known_values, context):
                         violated_constraints.append(
                             _describe_violation(eq, orig, known_values, constants, context))
+                        sources = [root_source[v] for v in
+                                   _get_equation_unknowns(eq, set(), set(root_source))]
+                        if sources and _state is not None:
+                            _state.setdefault('root_conflicts', []).append((eq, sources[0]))
                     made_progress = True
                     break
 
@@ -665,6 +692,7 @@ def _solve_system_impl(
                         evaluation_errors[eq] = f"{unknown}: {_LAST_SEARCH_ERROR[eq]}"
                     if success:
                         known_values[unknown] = value
+                        root_source[unknown] = eq
                         remaining_vars.discard(unknown)
                         remaining_equations.remove(eq)
                         stats['single'] += 1
@@ -897,11 +925,92 @@ def _non_unique_message(dependency, original_equations: Dict[str, str]) -> str:
                 f"ganzen Bereich von {free[0]} erfüllt "
                 f"(flacher Verlauf, z.B. max/min oder eine Menge, die dort null bleibt) - {free[0]} ist "
                 f"damit nicht bestimmt. Eine Vorgabe wählen, die {free[0]} festlegt.")
+    if len(dependent) == 1:
+        # eine Gleichung, auf die keine der Größen wirkt (Faktor null: 0*y = 0)
+        return (f"Lösung nicht eindeutig: Die Gleichung {lines} ist für jeden Wert erfüllt (z.B. ein "
+                f"Faktor null) und legt nichts fest - {', '.join(free)} "
+                f"{'ist' if len(free) == 1 else 'sind'} damit nicht bestimmt. Es fehlt eine "
+                f"unabhängige Gleichung bzw. Vorgabe.")
     return (f"Lösung nicht eindeutig: Die Gleichungen {lines} sind voneinander abhängig "
             f"(eine folgt aus den anderen) - {', '.join(free)} "
             f"{'ist' if len(free) == 1 else 'sind'} damit nicht bestimmt. Es fehlt eine "
             f"unabhängige Gleichung bzw. Vorgabe (z.B. eine Energie- statt einer zweiten "
             f"Massenbilanz).")
+
+
+# Prüfgleichungen (keine Unbekannte mehr): zulässige Abweichung relativ zu den beiden Seiten.
+# Gerundete Kontrollwerte (4.18 statt 4.1823) gelten damit als erfüllt, 4.3 nicht (Festlegung des
+# Nutzers 10.11.2026). Früher 1e-4 relativ zur INNEREN Termgröße: bei Q = m*c*(T_1 - T_2) zählten
+# m*c*T_1 in Kelvin (das 300-fache von Q) - 3 % Abweichung galten als erfüllt.
+CHECK_TOLERANCE = 1e-3
+
+
+def _check_scale(equation: str, values: Dict[str, float], context: dict) -> Optional[float]:
+    """
+    Maßstab einer Prüfgleichung links = rechts: der größere Betrag der beiden Seiten. Ist eine Seite
+    null (Bilanz in der Form ... = 0), stehen sich stattdessen die positiven und die negativen
+    Summanden der obersten Ebene gegenüber (Produkte bleiben ganz) - m_1 + m_2 - m_3 = 0 wird so
+    bewertet wie m_3 = m_1 + m_2. None, wenn ein Teil nicht auswertbar ist.
+    """
+    import ast
+    try:
+        tree = ast.parse(equation, mode='eval').body
+    except SyntaxError:
+        return None
+    local_ctx = context.copy()
+    local_ctx.update(values)
+
+    def value(node):
+        expr = ast.fix_missing_locations(ast.Expression(body=node))
+        result = float(_as_real(eval(compile(expr, '<check>', 'eval'), {"__builtins__": {}}, local_ctx)))
+        if not np.isfinite(result):
+            raise ValueError
+        return result
+
+    contributions = []
+
+    def collect(node, sign):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
+            collect(node.left, sign)
+            collect(node.right, sign if isinstance(node.op, ast.Add) else -sign)
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            collect(node.operand, -sign if isinstance(node.op, ast.USub) else sign)
+        else:
+            contributions.append(sign * value(node))
+
+    try:
+        if isinstance(tree, ast.BinOp) and isinstance(tree.op, ast.Sub):
+            left, right = abs(value(tree.left)), abs(value(tree.right))
+            if left > 0 and right > 0:
+                return max(left, right)
+        collect(tree, 1.0)
+    except Exception:
+        return None
+    return max(sum(v for v in contributions if v > 0), -sum(v for v in contributions if v < 0))
+
+
+def _check_violated(equation: str, values: Dict[str, float], context: dict) -> bool:
+    """
+    Ist eine Prüfgleichung verletzt? Erfüllt heißt: Abweichung höchstens CHECK_TOLERANCE des
+    Maßstabs (_check_scale) oder im Rauschen der Auswertung - 1e-6 der inneren Termgröße
+    (Auslöschung: T_1 - T_2 in Kelvin) bzw. numerisch null gegenüber gleichartigen Größen
+    (_sum_net_scale).
+    """
+    local_ctx = context.copy()
+    local_ctx.update(values)
+    try:
+        residual = abs(float(_as_real(eval(equation, {"__builtins__": {}}, local_ctx))))
+    except Exception:
+        return True
+    if not np.isfinite(residual):
+        return True
+    inner = _additive_term_scale(equation, local_ctx)
+    inner = inner if inner is not None and np.isfinite(inner) else 0.0
+    floor = 1e-13 * _sum_net_scale(equation, values)
+    scale = _check_scale(equation, values, context)
+    if scale is None:
+        return residual > max(1e-4 * inner, floor, 1e-304)
+    return residual > max(CHECK_TOLERANCE * scale, 1e-6 * inner, floor)
 
 
 def _describe_violation(equation: str, original: str, values: Dict[str, float],
@@ -932,7 +1041,20 @@ def _describe_violation(equation: str, original: str, values: Dict[str, float],
     if parts and parts[0] in constants:
         return (f"{parts[0]} ist vorgegeben ({left_val:.6g}), "
                 f"aus '{original}' folgt {right_val:.6g}")
+    if parts and _written_reversed(parts[0], original):
+        left_val, right_val = right_val, left_val       # im Blatt steht der Name rechts
     return f"'{original}' verletzt: links = {left_val:.6g}, rechts = {right_val:.6g}"
+
+
+def _written_reversed(var: str, original: str) -> bool:
+    """Steht die Gleichung im Blatt als 'Ausdruck = Name' (der Parser stellt einen einzelnen Namen
+    der rechten Seite intern nach links)? Für Meldungen, die linke und rechte Seite nennen."""
+    try:
+        from parser import _split_at_equals, remove_comments
+        sides = _split_at_equals(remove_comments(original))
+    except Exception:
+        return False
+    return len(sides) == 2 and sides[1].strip() == var and sides[0].strip() != var
 
 
 def _calculate_residual(equation: str, known_values: Dict[str, float], context: dict) -> float:
@@ -1210,7 +1332,7 @@ def _get_eval_context():
         'sinh': sinh, 'cosh': cosh, 'tanh': tanh,
         'exp': exp, 'log': log, 'log10': log10,
         'sqrt': sqrt, 'abs': np.abs, 'pi': pi,
-            'ceil': np.ceil, 'floor': np.floor, 'round': np.round,
+            'ceil': np.ceil, 'floor': np.floor, 'round': commercial_round,
         'max': max, 'min': min, 'IF': if_function,
         'value': unit_number, 'quantity': unit_quantity
     }
@@ -2010,32 +2132,110 @@ def _plateau_solution(equations: List[str], var: str, values: Dict[str, float],
     Größe auf einem Plateau: die Gleichungen sind am Lösungspunkt UND bei relativ verschobener Größe
     (1e-3) erfüllt (y = max(0, x - 5) + 3 mit y = 3; Kondensat n_L = 0 oberhalb des Taupunkts) - jeder
     Wert dort ist eine Lösung. Skalenfrei: erfüllt heißt Residuum <= 1e-12 der Termgröße ohne
-    Untergrenze, und mindestens eine Gleichung hat Terme ungleich null - verschwinden alle Terme
-    (Underflow: 1e-300*sin(y), exp(-x^2)), ist das kein Plateau. Bei x = 0 fehlt ein Maßstab für die
-    Verschiebung: keine Aussage. Rückgabe wie _non_unique_solution.
+    Untergrenze, und mindestens eine Gleichung hat Terme ungleich null. Verschwinden alle Terme, fehlt
+    dieser Maßstab: dann entscheidet, ob die Größe überhaupt eine Wirkung hat (_without_effect) -
+    0*x = 0 (Massenstrom 0 in Q = m*c*(T_2 - T_1) mit Q = 0) legt x nicht fest, der Underflow einer
+    abklingenden Funktion (exp(-x^2)) ist dagegen kein Plateau. Bei x = 0 fehlt ein Maßstab für die
+    Verschiebung: nur die Prüfung auf Wirkung. Rückgabe wie _non_unique_solution.
     """
     x = float(values[var])
-    if not np.isfinite(x) or x == 0:
+    if not np.isfinite(x):
         return None
-    step = 1e-3 * abs(x)
-    for shifted in (x + step, x - step):
-        trial = dict(values)
-        trial[var] = shifted
-        if _all_satisfied(equations, trial, context) and _all_satisfied(equations, values, context):
-            return list(equations), [var], 'plateau'
+    here, here_nonzero = _satisfaction(equations, values, context)
+    if not here:
+        return None
+    if x != 0:
+        step = 1e-3 * abs(x)
+        for shifted in (x + step, x - step):
+            trial = dict(values)
+            trial[var] = shifted
+            there, there_nonzero = _satisfaction(equations, trial, context)
+            if there and here_nonzero and there_nonzero:
+                return list(equations), [var], 'plateau'
+    if not here_nonzero and _without_effect(equations, var, values, context):
+        return list(equations), [var], 'plateau'
     return None
+
+
+def _satisfaction(equations: List[str], values: Dict[str, float], context: dict) -> Tuple[bool, bool]:
+    """(alle Gleichungen bis auf Rundung erfüllt: <= 1e-12 der Termgröße, ohne Untergrenze;
+    mindestens eine Gleichung mit Termen ungleich null)."""
+    nonzero = False
+    for eq in equations:
+        residual, scale = _residual_and_scale(eq, values, context)
+        if not np.isfinite(residual) or residual > 1e-12 * scale:
+            return False, False
+        nonzero = nonzero or scale > 0
+    return True, nonzero
 
 
 def _all_satisfied(equations: List[str], values: Dict[str, float], context: dict) -> bool:
     """Alle Gleichungen bis auf Rundung erfüllt (<= 1e-12 der Termgröße, ohne Untergrenze) und
     mindestens eine mit Termen ungleich null (sonst nur Underflow)."""
-    nonzero = False
-    for eq in equations:
-        residual, scale = _residual_and_scale(eq, values, context)
-        if not np.isfinite(residual) or residual > 1e-12 * scale:
-            return False
-        nonzero = nonzero or scale > 0
-    return nonzero
+    satisfied, nonzero = _satisfaction(equations, values, context)
+    return satisfied and nonzero
+
+
+# Faktoren, mit denen _without_effect eine Größe verschiebt: alle Größenordnungen (wie die
+# Testpunkte der 1-D-Suche) und die nähere Umgebung (Definitionsbereich von Stoffwertfunktionen)
+_EFFECT_FACTORS = tuple(10.0 ** e for e in range(-30, 31, 3) if e) + (0.5, 0.8, 0.9, 1.1, 1.25, 2.0)
+
+
+def _without_effect(equations: List[str], var: str, values: Dict[str, float], context: dict) -> bool:
+    """
+    Hat die Größe auf keine der Gleichungen eine Wirkung? Dann bleiben Residuum UND alle Terme für
+    Werte jeder Größenordnung und beider Vorzeichen exakt null (0*x = 0) - die Gleichungen legen
+    die Größe nicht fest. Beim Underflow einer abklingenden Funktion (exp(-x^2) = 0) gilt das nur
+    weit draußen. Nicht auswertbare Punkte (außerhalb des Definitionsbereichs) zählen nicht; ohne
+    einen zweiten auswertbaren Punkt keine Aussage.
+    """
+    x = float(values[var])
+    base = abs(x) if np.isfinite(x) and x != 0 else 1.0
+    valid = 0
+    for factor in _EFFECT_FACTORS:
+        for sign in (1.0, -1.0):
+            trial = dict(values)
+            trial[var] = sign * factor * base
+            state = [_residual_and_scale(eq, trial, context) for eq in equations]
+            if any(not np.isfinite(residual) for residual, _ in state):
+                continue
+            if any(residual != 0 or scale != 0 for residual, scale in state):
+                return False
+            valid += 1
+    return valid > 0
+
+
+def _cancels_out(equation: str, values_at, start: float, context: dict) -> Optional[float]:
+    """
+    Hebt sich die Größe aus der Gleichung heraus, OHNE dass diese erfüllt ist (x = x + 1)? Dann ist
+    links - rechts für Werte jeder Größenordnung und beider Vorzeichen dieselbe Zahl ungleich null -
+    bis auf die Auflösung der Gleitkommazahlen: weit draußen geht der feste Unterschied in der
+    Rundung der Terme unter (bei x = 5e30 ist x + 1 = x), die Gleichung ist dort nur scheinbar
+    erfüllt. Das ist kein Bereich von Lösungen, sondern ein Widerspruch. Kriterium: an allen
+    auswertbaren Punkten weicht das Residuum höchstens um die Rundung der Terme vom Wert am best
+    aufgelösten Punkt ab, und an mindestens sechs Punkten liegt dieser Wert klar über der Rundung.
+    values_at(x) liefert alle Werte zur Größe x (beim Tearing mit den daraus berechneten
+    Blockgrößen). Rückgabe: |links - rechts|, sonst None.
+    """
+    base = abs(start) if np.isfinite(start) and start != 0 else 1.0
+    samples = []
+    for factor in (1.0,) + _EFFECT_FACTORS:
+        for sign in (1.0, -1.0):
+            try:
+                residual, scale = _residual_and_scale(equation, values_at(sign * factor * base), context)
+            except Exception:
+                continue
+            if np.isfinite(residual):
+                samples.append((residual, scale))
+    if len(samples) < 6:
+        return None
+    rounding = 8 * np.finfo(float).eps
+    constant = min(samples, key=lambda sample: sample[1])[0]
+    if constant <= 0 or any(abs(residual - constant) > rounding * max(scale, constant)
+                            for residual, scale in samples):
+        return None
+    resolved = sum(1 for _, scale in samples if constant > 100 * rounding * scale)
+    return constant if resolved >= 6 else None
 
 
 def _non_unique_solution(equations: List[str], variables: Set[str], values: Dict[str, float],
@@ -2081,7 +2281,9 @@ def _non_unique_solution(equations: List[str], variables: Set[str], values: Dict
     jac = np.empty((n, n))
     for j in range(n):
         step = 1e-7 * abs(x0[j]) if x0[j] != 0 else 1e-7
-        for _ in range(12):
+        # Schritt vergrößern, bis er wirkt: eine Größe, die numerisch null ist (3.5e-30 statt 0),
+        # braucht viele Vergrößerungen - nach zwölf galt sie früher als Plateau ("nicht eindeutig")
+        for _ in range(40):
             x = x0.copy()
             x[j] += step
             column = (residuals(x) - r0) / step
@@ -2099,9 +2301,9 @@ def _non_unique_solution(equations: List[str], variables: Set[str], values: Dict
         return None
     jac = jac / col_norm
     row_norm = np.linalg.norm(jac, axis=1)
-    if np.any(row_norm == 0):
-        return None
-    jac = jac / row_norm[:, None]
+    # Nullzeile: keine Blockgröße wirkt auf diese (erfüllte) Gleichung (0*y = 0) - sie legt nichts
+    # fest; der Rang fehlt, der Fortsetzungstest unten entscheidet
+    jac = jac / np.where(row_norm > 0, row_norm, 1.0)[:, None]
     u, sigma, vt = np.linalg.svd(jac)
     if sigma[-1] > 1e-6 * sigma[0]:
         return None
@@ -2536,6 +2738,31 @@ def _solve_block_iteratively(
     return False, solved_values, f"Iterative Zerlegung unvollständig", block_analysis
 
 
+def _isolated_root(equation: str, var: str, values: Dict[str, float], context: dict) -> bool:
+    """
+    Ist der Wert eine echte Nullstelle einer Gleichung mit einer Unbekannten - kein Punkt auf einer
+    Asymptote (eps = 1 - exp(-NTU) mit eps = 1, tanh(x) = 1: jeder große Wert erfüllt die Gleichung
+    bis auf 1e-11, ohne dass es eine Lösung gibt)? Wie in der 1-D-Suche (is_credible_root): |f| muss
+    klein sein gegen |f| in der Umgebung (x ± 5 %); nicht auswertbare Nachbarn zählen als groß
+    (Rand des Definitionsbereichs). Exakt null im Punkt: darüber entscheidet die Plateau-Prüfung.
+    Bei x = 0 fehlt der Maßstab der Umgebung: keine Aussage.
+    """
+    x = float(values[var])
+    h = 0.05 * abs(x)
+    if not (np.isfinite(x) and h > 0):
+        return True
+
+    def magnitude(point):
+        trial = dict(values)
+        trial[var] = point
+        return abs(_calculate_residual(equation, trial, context))    # inf, wenn nicht auswertbar
+
+    here = magnitude(x)
+    if here == 0:
+        return True
+    return here <= 1e-3 * max(magnitude(x + h), magnitude(x - h))
+
+
 def _solve_block_simultaneously(
     equations: List[str],
     variables: Set[str],
@@ -2673,6 +2900,14 @@ def _solve_block_simultaneously(
             return float('inf')
         return relative
 
+    def isolated(x):
+        """Eine Gleichung, eine Unbekannte: echte Nullstelle, kein Punkt auf einer Asymptote?"""
+        if n_vars != 1:
+            return True
+        values = dict(known_values)
+        values[var_list[0]] = float(x[0])
+        return _isolated_root(equations[0], var_list[0], values, context)
+
     def polished(x):
         """Newton-Nachiteration der akzeptierten Lösung (siehe _polish_block_solution)."""
         values = dict(known_values)
@@ -2711,6 +2946,8 @@ def _solve_block_simultaneously(
                     continue
 
                 relative_residual = block_relative_residual(solution)
+                if relative_residual < 1e-4 and not isolated(solution):
+                    continue          # Asymptote (eps = 1 - exp(-NTU) mit eps = 1): keine Lösung
 
                 if relative_residual < 1e-8:
                     result_dict = {var: val for var, val in zip(var_list, polished(solution))}
@@ -2748,6 +2985,8 @@ def _solve_block_simultaneously(
                 continue
 
             relative_residual = block_relative_residual(solution)
+            if relative_residual < 1e-4 and not isolated(solution):
+                continue
 
             if ier == 1 and relative_residual < 1e-8:
                 result_dict = {var: val for var, val in zip(var_list, polished(solution))}
@@ -2839,8 +3078,21 @@ def _solve_single_unknown(equation: str, unknown: str, known_values: Dict[str, f
     _SEARCH_LOG['ok'], _SEARCH_LOG['err'], _SEARCH_LOG['plateau'] = [], [], []
     result = _solve_single_unknown_search(equation, unknown, known_values, context, manual_initial,
                                           inferred_units, chain, block_anchors)
+    cancelled = None
+    if not result[0] and (_SEARCH_LOG['plateau'] or not _SEARCH_LOG['err']):
+        start = _get_initial_value(unknown, manual_initial, known_values, inferred_units)
+        cancelled = _cancels_out(equation, chain or (lambda x: {**known_values, unknown: x}), start, context)
     if result[0]:
         _LAST_SEARCH_ERROR.pop(equation, None)
+    elif cancelled is not None:
+        # x = x + 1: weit draußen (x = 5e30) ist die Gleichung nur durch Rundung "erfüllt" - kein
+        # Bereich von Lösungen, die Größe hebt sich heraus und es bleibt ein Widerspruch
+        name = display_name(unknown)
+        where = ("aus der Gleichung" if chain is None
+                 else "mit den übrigen Gleichungen des Blocks eingesetzt")
+        _LAST_SEARCH_ERROR[equation] = (
+            f"Widerspruch: {name} hebt sich {where} heraus - linke und rechte Seite unterscheiden "
+            f"sich für jeden Wert von {name} um {cancelled:.6g}")
     elif _SEARCH_LOG['plateau']:
         # Die Gleichung ist auf einem ganzen Bereich erfüllt (min/max-Plateau, n_L = 0 oberhalb des
         # Taupunkts): jeder Wert dort wäre eine Lösung - keine willkürlich gewählte melden
@@ -3023,8 +3275,13 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
     def nearer_root_possible(root):
         """
         Newton kann über eine nähere Wurzel springen (x^3 - 3.3*x + 1 = 0 ab 1 -> -1.95 statt
-        1.64). Gibt es im Intervall Startwert ± |Wurzel - Startwert| einen weiteren
-        Vorzeichenwechsel, entscheidet die Bracket-Suche (dem Startwert nächstgelegene Wurzel).
+        1.64; tan(be) = 40 ab 0.5 -> 13948 statt 88.57). Die Newton-Wurzel gilt nur, wenn die
+        Funktion im Intervall Startwert ± |Wurzel - Startwert| monoton ist - dann ist sie dort die
+        einzige. Zeigen die Stützstellen einen weiteren Vorzeichenwechsel ODER einen
+        Richtungswechsel (Extremum, Pol, periodischer Verlauf), entscheidet die Bracket-Suche
+        mit ihrem dichten Raster (dem Startwert nächstgelegene Wurzel). Stützstellen zum Startwert
+        hin verdichtet (quadratisch): dort zählt die Auflösung, und ein periodischer Verlauf kann
+        bei ungleichen Abständen nicht als monoton erscheinen (Aliasing bei gleichen Abständen).
         Beim Tearing liegt jede Wurzel mit kleinerem Abstand aller Blockgrößen im Intervall
         Startwert ± Abstand * Bezugswert der Tearing-Größe.
         """
@@ -3036,7 +3293,8 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
             distance *= abs(initial_guess) or 1.0
         if distance == 0 or not np.isfinite(distance):
             return False
-        points = np.linspace(initial_guess - distance, initial_guess + distance, 65)
+        offsets = distance * (np.arange(1, 33) / 32.0) ** 2
+        points = np.concatenate([initial_guess - offsets[::-1], [initial_guess], initial_guess + offsets])
         values = []
         for point in points:
             try:
@@ -3048,6 +3306,18 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
             if (np.isfinite(v_1) and np.isfinite(v_2) and v_1 * v_2 < 0
                     and not p_1 - tol <= root <= p_2 + tol):
                 return True
+        # Richtungswechsel (relativ zur Spanne der Werte, Rauschen der Auswertung zählt nicht)
+        finite = [float(v) for v in values if np.isfinite(v)]
+        if len(finite) > 2:
+            spread = max(finite) - min(finite)
+            last = 0
+            for v_1, v_2 in zip(finite, finite[1:]):
+                if abs(v_2 - v_1) <= 1e-9 * spread:
+                    continue
+                direction = 1 if v_2 > v_1 else -1
+                if last and direction != last:
+                    return True
+                last = direction
         return False
 
     def polish_root(x, fx):
@@ -3227,6 +3497,14 @@ def _solve_single_unknown_search(equation: str, unknown: str, known_values: Dict
 
     # Erste Auswertung
     valid_points = eval_points(test_points)
+    if len(valid_points) > 1 and all(v == 0.0 for _, v in valid_points):
+        # An allen auswertbaren Testpunkten (alle Größenordnungen, beide Vorzeichen) exakt erfüllt:
+        # die Gleichung hängt nicht von der Unbekannten ab (0*x = 0, Massenstrom 0) - jeder Wert
+        # wäre eine Lösung; kein Underflow (der gilt nur weit draußen)
+        if time.monotonic() <= deadline:
+            _SEARCH_LOG['plateau'].append(min((x for x, _ in valid_points),
+                                              key=lambda x: abs(x - initial_guess)))
+            return False, 0.0
     brackets = find_brackets(valid_points)
     exact_zeros = find_exact_zeros(valid_points)
 
@@ -3415,6 +3693,16 @@ def _try_vectorized_evaluation(equations: List[str], variables: Set[str],
         return False, {}, "Vektorisierte Auswertung nicht möglich"
 
 
+def sweep_length_error(sweep_vars: Dict[str, Any]) -> str:
+    """Meldung, wenn Parameterstudien/Wertelisten verschieden viele Werte haben, sonst ''."""
+    lengths = {name: len(np.atleast_1d(arr)) for name, arr in sweep_vars.items()}
+    if len(set(lengths.values())) <= 1:
+        return ''
+    detail = ", ".join(f"{display_name(name)} ({count} Werte)" for name, count in lengths.items())
+    return (f"Alle Parameterstudien-Variablen müssen gleich viele Werte haben: {detail}. "
+            f"Die Werte werden punktweise kombiniert - Schrittweiten anpassen.")
+
+
 def solve_parametric(
     equations: List[str],
     variables: Set[str],
@@ -3461,6 +3749,14 @@ def solve_parametric(
     extra_result_vars = set(extra_result_vars or ())
     solve_point = point_solver or solve_system
 
+    # Alle Sweep-Variablen müssen gleich lang sein (punktweise Kombination) - VOR der
+    # vektorisierten Auswertung geprüft: die nahm verschieden lange Listen an, wenn keine
+    # Gleichung beide zugleich enthielt (Ergebnis-Spalten verschiedener Länge)
+    length_error = sweep_length_error(sweep_vars)
+    if length_error:
+        return False, {}, length_error
+    sweep_lengths = {name: len(arr) for name, arr in sweep_vars.items()}
+
     # Versuche zuerst vektorisierte direkte Auswertung (mit Konstanten,
     # NICHT mit Startwerten - siehe _try_vectorized_evaluation)
     if point_solver is None:
@@ -3476,13 +3772,6 @@ def solve_parametric(
         _collapse_sweep_independent(results, equations, variables, sweep_vars)
         results.update(constants)  # Konstanten als Einzelwerte, nicht als Arrays
         return True, results, msg
-
-    # Bestimme die Länge des Sweeps (alle Sweep-Variablen müssen gleich lang sein)
-    sweep_lengths = {name: len(arr) for name, arr in sweep_vars.items()}
-    if len(set(sweep_lengths.values())) > 1:
-        detail = ", ".join(f"{name} ({count} Werte)" for name, count in sweep_lengths.items())
-        return False, {}, (f"Alle Parameterstudien-Variablen müssen gleich viele Werte haben: {detail}. "
-                           f"Die Werte werden punktweise kombiniert - Schrittweiten anpassen.")
 
     n_points = next(iter(sweep_lengths.values()))
 

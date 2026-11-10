@@ -307,9 +307,9 @@ COMPATIBLE_UNITS = {
 
     # Winkel (intern rad) und Winkelgeschwindigkeit; Drehzahl 1/min ist kein Winkel je Zeit
     'deg': ['deg', 'rad'],
-    'rad': ['rad', 'deg'],
+    'rad': ['rad', 'deg', '-'],       # auch als Zahl: Kennzahl mit rad/s im Produkt (Re = omega*d^2/nu)
     'degree': ['deg', 'rad'],
-    'radian': ['rad', 'deg'],
+    'radian': ['rad', 'deg', '-'],
     'rad/s': ['rad/s', 'deg/s'],
     'deg/s': ['deg/s', 'rad/s'],
     'deg/h': ['deg/h', 'deg/s', 'rad/s'],
@@ -446,17 +446,17 @@ COMPATIBLE_UNITS = {
 # Hochgestellte Exponenten (m², K⁴, s⁻¹): jede Folge wird zu ^n (normalize_unit)
 _SUPERSCRIPTS = '⁰¹²³⁴⁵⁶⁷⁸⁹⁻'
 _SUPERSCRIPT_DIGITS = str.maketrans(_SUPERSCRIPTS, '0123456789-')
-_UNIT_BODY = r'(?:[a-zA-Z0-9' + _SUPERSCRIPTS + r'µ°/*()·⋅%‰Ω\u2126]|\^-?)*'   # Zeichen einer Einheit, auch h^-1
+_UNIT_BODY = r'(?:[a-zA-Z0-9' + _SUPERSCRIPTS + r'µ\u03bc°/*()·⋅%‰Ω\u2126]|\^-?)*'   # Zeichen einer Einheit, auch h^-1
 VALUE_WITH_UNIT_PATTERN = re.compile(
     r'^'
     r'(-?\d+\.?\d*(?:[eE][+-]?\d+)?)'  # Zahl (inkl. wissenschaftliche Notation)
     r'(?:'
     # Einheit, beginnend mit Buchstabe/°/µ (auch W/(m²·K), h^-1). Darf nicht mit
     # einem Exponenten beginnen: sonst zerlegt Backtracking "1e5*y" in 1 und e5*y
-    r'\s*((?![eE][+-]?\d)°?[a-zA-Z²³µ%‰Ω\u2126]' + _UNIT_BODY + r')'
+    r'\s*((?![eE][+-]?\d)°?[a-zA-Z²³µ\u03bc%‰Ω\u2126]' + _UNIT_BODY + r')'
     # oder Kehrwert-Einheit "1/h", "1/K" - nur NACH einem Leerzeichen
     # (sonst wäre "0.51/h" mehrdeutig)
-    r'|\s+(1/(?:\(|°?[a-zA-Z²³µ])' + _UNIT_BODY + r')'
+    r'|\s+(1/(?:\(|°?[a-zA-Z²³µ\u03bc])' + _UNIT_BODY + r')'
     r')?'
     r'$'
 )
@@ -674,11 +674,12 @@ class UnitValue:
         # Bestimme SI-Basiseinheit aus der Ziel-Einheit
         try:
             # Erstelle temporäre Quantity um SI-Basis zu ermitteln
-            temp_qty = 1.0 * ureg(normalized_unit)
+            # Quantity(1.0, Einheit) statt 1.0 * Einheit: gilt auch für °C/h, kW/°C (Differenz)
+            temp_qty = ureg.Quantity(1.0, normalized_unit)
             si_base_unit = str(temp_qty.to_base_units().units)
 
             # Erstelle SI-Quantity
-            si_quantity = si_value * ureg(si_base_unit)
+            si_quantity = ureg.Quantity(si_value, si_base_unit)
 
             # Konvertiere zur Ziel-Einheit
             target_quantity = si_quantity.to(normalized_unit)
@@ -742,7 +743,15 @@ class UnitValue:
                 factor = 1.0
                 si_base = 'joule / kilogram' if '/kg' in target_unit else 'joule'
 
-            target_value = si_value * factor
+            if not si_base:
+                # keine der bekannten Einheiten: über Nullpunkt und Faktor der Einheit (unit_affine,
+                # für jede Einheit) - nie den SI-Wert unter der Ziel-Einheit anzeigen
+                zero, scale = unit_affine(target_unit)
+                factor = 1.0 / scale
+                si_value_shifted = si_value - zero
+            else:
+                si_value_shifted = si_value
+            target_value = si_value_shifted * factor
             return cls(
                 si_value=si_value,
                 si_unit=si_base,
@@ -840,6 +849,115 @@ class UnknownUnitError(Exception):
     """
 
 
+# ---------------------------------------------------------------------------
+# Positivliste der Einheitenzeichen (Festlegung des Nutzers 10.11.2026)
+# pint liest fast jede Buchstabenfolge als Einheit: "5 Min" = 5 Mega-Inch (127 km), "75 PS" =
+# Petasiemens, "20 qm", "5 M" (molar), "20 ct", "T = 20 Grad" = Giga-Radiant, und in "h3 = 2 h1"
+# (Malzeichen vergessen) ist h1 = Stunde^1. Als Eingabe gelten daher nur:
+# - die Zeichen aus den eigenen Tabellen des Programms (_program_unit_symbols: Auswahllisten,
+#   Ausgabe-Einheiten der Funktionen) und die wenigen weiteren unten,
+# - ein SI-Vorsatz vor einer SI-Einheit (kW, mbar, µm, kmol, MWh, hPa) - nur wenn pint das Zeichen
+#   genauso liest (hbar ist bei pint die Planck-Konstante, nicht Hektobar),
+# - zusammengeschriebene Zeichen wie bisher (kgK = kg*K).
+# Eine Ziffer 1 direkt nach einem Zeichen (h1) ist kein Exponent. Alles andere: "Unbekannte Einheit".
+# Die Liste gilt nur für eingegebene Einheiten; intern erzeugte Labels prüft sie nicht.
+# ---------------------------------------------------------------------------
+_SI_PREFIXES = {'T': 1e12, 'G': 1e9, 'M': 1e6, 'k': 1e3, 'h': 1e2, 'da': 1e1, 'd': 1e-1, 'c': 1e-2,
+                'm': 1e-3, 'µ': 1e-6, 'u': 1e-6, 'n': 1e-9, 'p': 1e-12}
+# SI-Einheiten (und mit SI zugelassene), die einen Vorsatz tragen dürfen
+_PREFIXABLE_UNITS = frozenset({
+    'm', 'g', 's', 'A', 'K', 'mol', 'cd', 'W', 'J', 'N', 'Pa', 'V', 'Hz', 'C', 'F', 'S',
+    'ohm', 'Ohm', 'Ω', '\u2126', 'bar', 'l', 'L', 'Wh', 'Ah', 'VA', 'lm', 'lx', 'cal'})
+# weitere Zeichen ohne Vorsatz: Tag, Jahr, Steradiant, Zoll, Anteile, Hektar, große Energiemengen,
+# Winkel
+_EXTRA_UNITS = frozenset({'d', 'a', 'sr', 'in', 'ppm', 'ha', 'PJ', 'EJ', 'kelvin', 'degC', 'degF',
+                          'gon', 'turn'})      # Winkel: Neugrad, Umdrehung (neben deg, rad)
+
+
+@functools.lru_cache(maxsize=1)
+def _plain_units() -> frozenset:
+    return _program_unit_symbols() | _PREFIXABLE_UNITS | _EXTRA_UNITS
+
+
+@functools.lru_cache(maxsize=None)
+def _prefixed_unit(symbol: str) -> bool:
+    """SI-Vorsatz + SI-Einheit, und pint liest das Zeichen als genau dieses Vielfache."""
+    for prefix, factor in _SI_PREFIXES.items():
+        base = symbol[len(prefix):]
+        if not symbol.startswith(prefix) or base not in _PREFIXABLE_UNITS:
+            continue
+        try:
+            whole = ureg.Quantity(1.0, normalize_unit(symbol)).to_base_units()
+            part = ureg.Quantity(factor, normalize_unit(base)).to_base_units()
+        except Exception:
+            continue
+        if whole.units == part.units and abs(whole.magnitude - part.magnitude) <= 1e-9 * abs(part.magnitude):
+            return True
+    return False
+
+
+def _allowed_symbol(symbol: str) -> bool:
+    return symbol in _plain_units() or _prefixed_unit(symbol)
+
+
+def _allowed_token(token: str) -> bool:
+    """Ein Zeichen der Positivliste oder mehrere zusammengeschriebene (kgK), getrennt nur vor einem
+    Großbuchstaben bzw. vor degC/degF (wie _split_known_units)."""
+    if _allowed_symbol(token):
+        return True
+    for end in range(len(token) - 1, 0, -1):
+        rest = token[end:]
+        if (rest[0].isupper() or rest.startswith(('degC', 'degF'))) and _allowed_symbol(token[:end]) \
+                and _allowed_token(rest):
+            return True
+    return False
+
+
+@functools.lru_cache(maxsize=1)
+def _allowed_spellings() -> Dict[str, List[str]]:
+    """Kleinschreibung -> zulässige Zeichen (für den Hinweis auf die Schreibweise: Min -> min)."""
+    spellings: Dict[str, List[str]] = {}
+    candidates = set(_plain_units())
+    candidates.update(prefix + base for prefix in _SI_PREFIXES for base in _PREFIXABLE_UNITS
+                      if _prefixed_unit(prefix + base))
+    for symbol in sorted(candidates):
+        spellings.setdefault(symbol.lower(), []).append(symbol)
+    return spellings
+
+
+@functools.lru_cache(maxsize=4096)
+def unit_not_allowed(unit_str: str) -> Optional[str]:
+    """
+    Grund, warum ein eingegebener Einheitentext nicht zur Positivliste gehört, sonst None.
+    Aliase (U/min, rpm, W/mK ...) gelten als Ganzes.
+    """
+    text = unit_str.strip()
+    if not text or text in UNIT_ALIASES:
+        return None
+    text = text.replace('°C', 'degC').replace('°F', 'degF').replace('\u03bc', 'µ')
+    for match in re.finditer(r'([A-Za-zµΩ\u2126]+)(\^?)(-?\d*)', text):
+        token, caret, digits = match.groups()
+        if digits and not caret and digits.lstrip('-') in ('0', '1'):
+            return (f"'{token}{digits}': die Ziffer {digits} direkt nach einem Einheitenzeichen ist kein "
+                    f"Exponent - steht dort eine Größe, fehlt das Malzeichen (2*{token}{digits})")
+        similar = [s for s in _allowed_spellings().get(token.lower(), []) if s != token]
+        if _allowed_symbol(token) or (_allowed_token(token) and not similar):
+            continue
+        # KW, KJ, KPa ließen sich als K*W, K*J, K*Pa zerlegen - gemeint ist das Zeichen in anderer
+        # Schreibweise (kW): nicht still als Produkt lesen
+        hint = f" - Schreibweise beachten: {', '.join(similar[:3])}" if similar else ""
+        if not hint:
+            # ausgeschriebene Namen, die pint kennt (sec, liter, hour): das Zeichen nennen
+            try:
+                symbol = format(ureg.parse_units(token), '~')
+            except Exception:
+                symbol = ''
+            if symbol and symbol != token and re.fullmatch(r'[A-Za-zµ]+', symbol) and _allowed_symbol(symbol):
+                hint = f" - als Zeichen schreiben: {symbol}"
+        return f"'{token}' ist kein zulässiges Einheitenzeichen{hint}"
+    return None
+
+
 def unit_value_strict(value: float, unit_str: str, context: str = '') -> 'UnitValue':
     """
     Wie UnitValue.from_input, aber eine unbekannte Einheit ist ein FEHLER.
@@ -853,6 +971,10 @@ def unit_value_strict(value: float, unit_str: str, context: str = '') -> 'UnitVa
         raise UnknownUnitError(f"'{unit_str}': Nm³ (Normkubikmeter) ist eine Gasmenge im Normzustand, "
                                f"kein Volumen - Volumen in m³ angeben bzw. über die Dichte im "
                                f"Normzustand umrechnen{where}")
+    reason = unit_not_allowed(unit_str)
+    if reason:
+        where = f" in: {context}" if context else ""
+        raise UnknownUnitError(f"Unbekannte Einheit '{unit_str}'{where} ({reason})")
     unit_value = UnitValue.from_input(value, unit_str)
     if unit_value.quantity is None:
         where = f" in: {context}" if context else ""
@@ -966,7 +1088,7 @@ def normalize_unit(unit_str: str) -> str:
     unit_str = unit_str.replace('°F', 'degF')
     unit_str = re.sub('[' + _SUPERSCRIPTS + ']+',
                       lambda m: '^' + m.group(0).translate(_SUPERSCRIPT_DIGITS), unit_str)
-    unit_str = unit_str.replace('µ', 'micro')
+    unit_str = unit_str.replace('µ', 'micro').replace('\u03bc', 'micro')   # Mikro-Zeichen, griech. my
     unit_str = unit_str.replace('·', '*').replace('⋅', '*')
 
     # Exponent ohne '^' (m2, cm2, m3/h, kg/m3, W/m2K): Ziffern direkt nach einem
@@ -974,11 +1096,19 @@ def normalize_unit(unit_str: str) -> str:
     # wurde der Wert dann stillschweigend NICHT umgerechnet (20 cm2 -> 20 m²).
     unit_str = re.sub(r'(?<=[A-Za-z])(\d+)', r'^\1', unit_str)
 
+    # Zusammengesetzte Einheit: zusammengeschriebene Zeichen (kgK, m°C) auflösen - im Zähler, im
+    # Nenner und in Klammern nach derselben Regel (früher nur im Nenner ohne Klammern)
+    if '/' in unit_str or '*' in unit_str:
+        # ein Exponent hinter einem zusammengeschriebenen Zeichen gehört zum letzten Teil (kgK^2 = kg*K^2)
+        unit_str = re.sub(r'([A-Za-z]+)(\^-?\d+)?',
+                          lambda m: _compound_symbol(m.group(1), m.group(2) or ''), unit_str)
+        unit_str = re.sub(r'(\^-?\d+)(?=[A-Za-z(])', r'\1*', unit_str)     # m^2K -> m^2*K
+
     # Nenner ohne Klammern: alles nach '/' (z.B. "kJ/kgK" -> "kJ/(kg*K)")
     if '/' in unit_str and '(' not in unit_str:
         parts = unit_str.split('/')
         if len(parts) == 2:
-            unit_str = f"{parts[0]}/({_denominator_units(parts[1])})"
+            unit_str = f"{parts[0]}/({parts[1]})"
 
     return unit_str
 
@@ -992,31 +1122,63 @@ def _known_unit(text: str) -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=1)
+def _program_unit_symbols() -> frozenset:
+    """
+    Einheitenzeichen aus den eigenen Tabellen des Programms (Auswahllisten, Ausgabe-Einheiten der
+    Funktionen, SI-Labels): kg, K, m, s, W, kJ, mol, degC ... Nur in sie wird ein zusammengeschriebenes
+    Zeichen zerlegt - nicht in alles, was pint kennt (Tesla, Siemens, Poise, Naturkonstanten).
+    """
+    texts = list(COMPATIBLE_UNITS) + [u for units in COMPATIBLE_UNITS.values() for u in units]
+    texts += [label for _, label in STANDARD_UNITS]
+    texts += list(COOLPROP_UNITS.values()) + list(HUMID_AIR_UNITS.values()) + list(RADIATION_UNITS.values())
+    symbols = set()
+    for text in texts:
+        text = text.replace('°C', 'degC').replace('°F', 'degF').replace('µ', 'micro')
+        symbols.update(symbol for symbol in re.findall(r'[A-Za-z]+', text) if _known_unit(symbol))
+    return frozenset(symbols)
+
+
 def _split_known_units(text: str) -> Optional[List[str]]:
-    """Zerlegt 'kgK' in bekannte Einheiten ['kg', 'K'] - längster bekannter Anfang zuerst."""
+    """
+    Zerlegt 'kgK' in ['kg', 'K'], 'kgdegC' in ['kg', 'degC']: nur an einer Zeichengrenze (vor einem
+    Großbuchstaben bzw. vor degC/degF) und nur in Einheitenzeichen des Programms
+    (_program_unit_symbols), längster Anfang zuerst. Ein Wort ohne solche Grenze (Tag, Std, sek,
+    Pers) wird nicht zerlegt - es ist eine unbekannte Einheit (früher: T*a*g, s*e*k ... ohne Meldung).
+    """
     if not text:
         return []
+    symbols = _program_unit_symbols()
     for end in range(len(text), 0, -1):
-        if _known_unit(text[:end]):
-            rest = _split_known_units(text[end:])
-            if rest is not None:
-                return [text[:end]] + rest
+        rest = text[end:]
+        if rest and not (rest[0].isupper() or rest.startswith(('degC', 'degF'))):
+            continue
+        if text[:end] in symbols:
+            tail = _split_known_units(rest)
+            if tail is not None:
+                return [text[:end]] + tail
     return None
 
 
-def _denominator_units(denominator: str) -> str:
+# Feste Schreibweise: in einer zusammengesetzten Einheit ist m vor einer Temperatureinheit das Meter
+# (W/mK, W/(mK), W/m°C: Wärmeleitfähigkeit) - Millikelvin nur als alleinstehende Einheit
+_METRE_TEMPERATURE = {'mK': 'm*K', 'mdegC': 'm*degC', 'mdegF': 'm*degF'}
+
+
+def _compound_symbol(symbol: str, exponent: str = '') -> str:
     """
-    Nenner ohne Klammern als Produkt. Einen Nenner, den pint als Ganzes kennt (kWh, kPa, MJ,
-    degC, m^2K), liest pint selbst - Präfixe bleiben Präfixe. Nur einen unbekannten Nenner
-    (kgK, cmK, m^2degC) zerlegt die Funktion in bekannte Einheiten. Feste Schreibweise:
-    'mK' ist hier m·K (W/mK), nicht Millikelvin.
+    Ein Zeichen (Buchstabenfolge, ggf. mit Exponent) einer zusammengesetzten Einheit für pint. Was
+    pint als Ganzes kennt (kWh, kPa, MJ, degC), liest pint selbst - Präfixe bleiben Präfixe. Ein
+    unbekanntes Zeichen (kgK, cmK, kgdegC) wird in Einheitenzeichen des Programms zerlegt; gelingt
+    das nicht, bleibt es stehen (unbekannte Einheit -> Fehlermeldung). Der Exponent gehört zum
+    letzten Teil.
     """
-    if denominator == 'mK':
-        return 'm*K'
-    if _known_unit(denominator):
-        return denominator
-    parts = _split_known_units(denominator)
-    return '*'.join(parts) if parts else denominator
+    if symbol in _METRE_TEMPERATURE:
+        return f"({_METRE_TEMPERATURE[symbol]}{exponent})"
+    if _known_unit(symbol):
+        return symbol + exponent
+    parts = _split_known_units(symbol)
+    return f"({'*'.join(parts)}{exponent})" if parts and len(parts) > 1 else symbol + exponent
 
 
 def parse_value_with_unit(text: str) -> Tuple[float, str]:
@@ -1086,10 +1248,14 @@ def get_compatible_units(unit_str: str) -> List[str]:
         base_unit = str(quantity.to_base_units().units)
 
         # Suche kompatible Einheiten basierend auf Dimensionalität
+        # gleiche Dimension UND gleicher Winkel-Exponent: rad ist in pint dimensionslos - sonst
+        # bekämen 1/h, rpm, Hz die Liste von rad/s (1500 rpm als "25 rad/s")
+        angle = angle_exponent(unit_str)
         for key, units in COMPATIBLE_UNITS.items():
             try:
                 key_quantity = 1 * ureg(normalize_unit(key))
-                if quantity.dimensionality == key_quantity.dimensionality:
+                if (quantity.dimensionality == key_quantity.dimensionality
+                        and angle_exponent(key) == angle):
                     # Original-Einheit an erste Stelle
                     result = [unit_str] + [u for u in units if u != unit_str]
                     return result

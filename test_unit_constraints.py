@@ -510,6 +510,68 @@ warnings_ = check_all_unit_consistency(
 check("EQUILIBRIUM: Eintrittsmengen in mol und mol/s gemischt -> Einheitenwarnung", bool(warnings_), str(warnings_))
 
 # ---------------------------------------------------------------------------
+print("=== Codeprüfung November 2026: Temperatur-Charakter ===")
+
+
+def display(lines, known, open_k=()):
+    """Anzeige-Labels wie main._assign_result_units (ohne Nullpunkt-Test)."""
+    return propagate_all_units_complete(eqs(*lines), dict(known), open_temperatures=set(open_k),
+                                        undetermined_temperature='K', differences_in_products=True)
+
+
+gas = {'T_1': 'K', 'p_1': 'Pa', 'p_2': 'Pa', 'kappa': '', 'r': '', 'V': 'm^3', 'm': 'kg', 'R': 'J/(kg*K)',
+       'c_v': 'J/(kg*K)', 'Q': 'J', 'c': 'J/(kg*K)'}
+# Differenz zweier absoluter Temperaturen, eine davon aus einem Gesetz in Kelvin: früher erschien
+# die Differenz als absolute Temperatur (324 K als 51 °C, 58.9 K als -214 °C)
+for title, lines in (("Isentrope", ("T_2 = T_1*(p_2/p_1)^((kappa-1)/kappa)", "dT = T_1 - T_2")),
+                     ("Isentrope, umgekehrt", ("T_2 = T_1*(p_2/p_1)^((kappa-1)/kappa)", "dT = T_2 - T_1")),
+                     ("skaliert", ("T_2 = T_1*r", "dT = T_1 - T_2")),
+                     ("isochor", ("p_1/T_1 = p_2/T_2", "dT = T_1 - T_2")),
+                     ("isochor, Summe links", ("p_1/T_1 = p_2/T_2", "T_1 - T_2 = dT")),
+                     ("Gasgesetz + Q = m*c_v*dT", ("p_2*V = m*R*T_2", "dT = T_1 - T_2", "Q = m*c_v*dT")),
+                     ("geometrisches Mittel", ("T_2 = sqrt(T_1*T_1)", "dT = T_1 - T_2"))):
+    units = display(lines, gas)
+    check(f"Differenz in K, Temperatur absolut: {title}", units.get('dT') == 'delta_K' and units.get('T_2') == 'K',
+          str({k: units.get(k) for k in ('T_2', 'dT')}))
+# Gegenproben: die bisher richtigen Anzeigen bleiben
+units = display(("Q = m*c*theta", "T_2 = T_1 - theta"), gas)
+check("theta aus Q = m*c*theta bleibt Differenz, T_2 = T_1 - theta absolut",
+      units.get('theta') == 'delta_K' and units.get('T_2') == 'K', str(units))
+units = display(("T_out = T_1 - x",), {**gas, 'x': 'K'}, open_k={'x'})
+check("In K eingegebener Summand ohne bestimmten Charakter: T_out bleibt absolut (keine Aussage über x)",
+      units.get('T_out') == 'K', str(units))
+units = display(("p*v = R*T",), {'p': 'Pa', 'v': 'm^3/kg', 'R': 'J/(kg*K)'})
+check("Gasgesetz allein: T in K (wie bisher)", units.get('T') == 'delta_K', str(units))
+units = display(("dT_1 = T_h1 - T_c2", "dT_2 = T_h2 - T_c1", "dT_m = (dT_1 - dT_2)/ln(dT_1/dT_2)"),
+                {'T_h1': 'K', 'T_h2': 'K', 'T_c1': 'K', 'T_c2': 'K'})
+check("Mittlere logarithmische Temperaturdifferenz bleibt eine Differenz",
+      units.get('dT_m') == 'delta_K' and units.get('dT_1') == 'delta_K', str(units))
+# Thermodynamische Mitteltemperatur (T_2 - T_1)/ln(T_2/T_1): absolut verwendbar, kein Fehlalarm
+mean = {'T_1': 'K', 'T_2': 'K', 'T_u': 'K', 'p': 'Pa'}
+for title, lines in (("als T= einer Stoffwertfunktion", ("T_m = (T_2 - T_1)/ln(T_2/T_1)", "c_m = cp(air, T=T_m, p=p)")),
+                     ("in einer Differenz", ("T_m = (T_2 - T_1)/ln(T_2/T_1)", "dT = T_m - T_u")),
+                     ("in Stefan_Boltzmann", ("T_m = (T_2 - T_1)/ln(T_2/T_1)", "E = Stefan_Boltzmann(T_m)"))):
+    conflicts = temperature_sum_conflicts(eqs(*lines), mean)
+    check(f"Log. Mitteltemperatur {title}: keine 'Kombination absoluter Temperaturen'", not conflicts, str(conflicts))
+units = display(("T_m = (T_2 - T_1)/ln(T_2/T_1)", "dT = T_m - T_u"), mean)
+check("Log. Mitteltemperatur absolut, T_m - T_u Differenz", units.get('T_m') == 'K' and units.get('dT') == 'delta_K',
+      str(units))
+check("T_3 = T_1 + T_2 bleibt ein Fehler (Summe von Temperaturpunkten)",
+      len(temperature_sum_conflicts(eqs("T_3 = T_1 + T_2"), mean)) == 1)
+
+
+# --- Codeprüfung November 2026, zweite Runde -----------------------------------
+# Anzeige-Label eines Quotienten: m3 ist dieselbe Einheit wie m^3 (früher 1/s statt 1/h, V/V_dot in s)
+for volume in ('m3', 'm^3', 'm³'):
+    units = propagate(("n = V_dot/V", "t = V/V_dot"), {'V_dot': f'{volume}/h', 'V': volume})
+    check(f"Luftwechsel mit {volume}/h und {volume}: 1/h bzw. h", units.get('n') == '1/h' and units.get('t') == 'h', str(units))
+units = propagate(("d = A/L",), {'A': 'mm2', 'L': 'mm'})
+check("A/L mit mm2 und mm: mm", units.get('d') == 'mm', str(units))
+units = propagate(("u = V_dot/A",), {'V_dot': 'm3/h', 'A': 'm2'})
+check("V_dot/A mit m3/h und m2: keine einzelne Einheit bleibt -> SI aus der Dimension (Gegenprobe)",
+      units.get('u') == 'm/s', str(units))
+
+# ---------------------------------------------------------------------------
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")
 if FAILED:

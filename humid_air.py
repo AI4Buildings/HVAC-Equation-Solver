@@ -149,8 +149,8 @@ def _resolve_dual_humidity(inputs: dict, humidity_keys: set) -> dict:
             if T_K is not None:
                 return {'T': T_K, 'P': P, keep_key: keep_val}
 
-    raise ValueError(f"Could not find consistent temperature for given humidity properties "
-                     f"({key1}={val1}, {key2}={val2})")
+    raise ValueError(f"HumidAir: zu den beiden Feuchte-Angaben ({key1} = {val1:.6g}, {key2} = {val2:.6g}, "
+                     f"SI-Werte) gibt es keine Temperatur, bei der beide zusammenpassen")
 
 
 # Relative Toleranz für "gesättigt": Rundungsfehler aus den Iterationen und CoolProp
@@ -269,6 +269,17 @@ def HumidAir(output_prop: str, **kwargs) -> float:
     humidity_keys = {'W', 'R', 'psi_w', 'Tdp', 'Twb'}
     input_humidity = set(inputs.keys()) & humidity_keys
 
+    if len(input_humidity) == 2 and input_humidity <= {'W', 'psi_w', 'Tdp'}:
+        # Wassergehalt, Partialdruck und Taupunkt beschreiben bei gegebenem Druck dasselbe - die
+        # Temperatur folgt daraus nicht. Früher lief die Suche nach T an ihren unteren Rand:
+        # "Zustand übersättigt ... bei T = -60 °C" bzw. eine englische Meldung
+        names = [key for key in kwargs
+                 if key.lower() == 'p_w' or INPUT_MAP[key.lower()][0] in ('W', 'Tdp')]
+        raise ValueError(
+            f"HumidAir: {' und '.join(display_names(names).split(', '))} beschreiben beide den "
+            f"Wassergehalt der Luft (bei gegebenem Druck folgt die eine Angabe aus der anderen) - "
+            f"die Temperatur ist damit nicht festgelegt. Eine der beiden durch T, h, T_wb oder rh "
+            f"ersetzen")
     if len(input_humidity) == 2 and 'P' in inputs:
         # Two humidity properties given - need to find T iteratively
         inputs = _resolve_dual_humidity(inputs, input_humidity)
@@ -283,6 +294,9 @@ def HumidAir(output_prop: str, **kwargs) -> float:
     saturation = _saturation(inputs)
     if saturation is not None:
         T_s, w_state, w_sat, p_state = saturation
+        if w_state < 0:
+            raise ValueError(f"Wassergehalt w = {w_state * 1000:.4g} g/kg ist negativ - die Luft kann "
+                             f"nicht weniger als kein Wasser enthalten (Bilanz bzw. Vorzeichen prüfen)")
         if w_state > w_sat * (1 + SATURATION_TOLERANCE):
             raise ValueError(
                 f"Zustand übersättigt: w = {w_state * 1000:.4g} g/kg > w_s = {w_sat * 1000:.4g} g/kg "
@@ -318,8 +332,11 @@ def HumidAir(output_prop: str, **kwargs) -> float:
             return result_si
 
     except Exception as e:
-        # Gesättigte Luft: CoolProp rechnet rh = 1 + Rundungsfehler und lehnt das ab
-        if output_key == 'rh' and saturation is not None:
+        # Gesättigte Luft: CoolProp rechnet rh = 1 + Rundungsfehler und lehnt das ab - für die
+        # relative Feuchte unter jedem ihrer Namen (rh, phi, rF: CoolProp-Schlüssel R) und nur,
+        # wenn der Zustand tatsächlich an der Sättigung liegt (nicht bei jedem CoolProp-Fehler)
+        if (OUTPUT_MAP.get(output_key, (None,))[0] == 'R' and saturation is not None
+                and abs(saturation[1] - saturation[2]) <= saturation[2] * SATURATION_TOLERANCE):
             return 1.0
         raise ValueError(f"CoolProp HumidAirProp Error: {e}")
 

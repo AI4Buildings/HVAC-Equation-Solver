@@ -386,6 +386,46 @@ ok, sol, msg = opt("y = 1e-13*(x - 2)^2 + 1e-13\nMINIMIZE y VARY x = 0 .. 5")[:3
 check("Kleine Zielgröße (1e-13) wird optimiert, nicht 'ändert sich nicht'",
       ok and abs(sol['x'] - 2) < 1e-3, msg)
 
+
+# ---------------------------------------------------------------------------
+print("\n=== Codeprüfung November 2026 ===")
+# ---------------------------------------------------------------------------
+# Schmales, schräg bzw. gekrümmt liegendes Tal: die Suche entlang von Richtungen blieb stehen und
+# meldete ein "Minimum", das keines war (7.5 % über dem Minimum; Rosenbrock 0.011 statt 0)
+for _text, _x, _y, _z in (("z = (x + y - 3)^2 + 1000*(x - y)^2 + 1\nMINIMIZE z VARY x = 0 .. 10, y = 0 .. 10", 1.5, 1.5, 1.0),
+                          ("z = 1000*(x + y - 3)^2 + (x - y - 0.4)^2 + 1\nMINIMIZE z VARY x = 0 .. 10, y = 0 .. 10", 1.7, 1.3, 1.0),
+                          ("z = 100*(y - x^2)^2 + (1 - x)^2\nMINIMIZE z VARY x = -2 .. 2, y = -1 .. 3", 1.0, 1.0, 0.0)):
+    ok, sol, msg = opt(_text)[:3]
+    check(f"Zwei gekoppelte Größen: {_text.splitlines()[0]} -> ({_x}; {_y})",
+          ok and abs(sol['x'] - _x) < 1e-4 and abs(sol['y'] - _y) < 1e-4 and abs(sol['z'] - _z) < 1e-8,
+          f"{msg} x={sol.get('x')} y={sol.get('y')} z={sol.get('z')}")
+
+# Zeitlimit: "bestes bisher gefundenes Ergebnis" ist das beste gerechnete, nicht der Startpunkt
+_real_solve, _real_limit = optimizer.solve_system, optimizer.OPTIMIZE_TIME_LIMIT
+
+
+def _slow_solve(*args, **kwargs):
+    time.sleep(0.05)
+    return _real_solve(*args, **kwargs)
+
+
+optimizer.solve_system, optimizer.OPTIMIZE_TIME_LIMIT = _slow_solve, 1.0
+try:
+    ok, sol, msg = opt("y = (x - 0.5)^2 + 1\nMINIMIZE y VARY x = 0 .. 10")[:3]
+finally:
+    optimizer.solve_system, optimizer.OPTIMIZE_TIME_LIMIT = _real_solve, _real_limit
+check("Zeitlimit: bestes gerechnetes Ergebnis (x = 0.5 aus dem Raster), nicht die Bereichsmitte",
+      not ok and 'Zeitlimit' in msg and abs(sol['x'] - 0.5) < 1e-9 and abs(sol['y'] - 1) < 1e-9, f"{msg} {sol}")
+
+# Mehrere Anweisungen, die sich gegenseitig beeinflussen: nur ein stimmiges Ergebnis gilt als gefunden
+ok, sol, msg = opt("y = (x - 0.9*v)^2 + 1\nw = (v - 0.9*x - 1)^2 + 2\n"
+                   "MINIMIZE y VARY x = -20 .. 20\nMINIMIZE w VARY v = -20 .. 20")[:3]
+check("Gekoppelte Anweisungen ohne stimmiges Ergebnis: kein Erfolg, Meldung 'kein stimmiges Ergebnis'",
+      not ok and 'kein stimmiges Ergebnis' in msg, msg)
+ok, sol, msg = opt("y = (x - 2)^2 + 1\nw = (v - 3)^2 + 2\nMINIMIZE y VARY x = -20 .. 20\nMINIMIZE w VARY v = -20 .. 20")[:3]
+check("Unabhängige Anweisungen: beide Optima, kein Hinweis auf Kopplung",
+      ok and abs(sol['x'] - 2) < 1e-6 and abs(sol['v'] - 3) < 1e-6 and 'beeinflussen' not in msg, msg)
+
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")
 if FAILED:

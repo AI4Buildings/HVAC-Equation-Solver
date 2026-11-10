@@ -23,9 +23,12 @@ from typing import Dict, List, Optional, Set, Tuple
 from solver import _get_equation_unknowns, _direct_assignment
 
 try:
-    from parser import unmangle
+    from parser import unmangle, remove_comments
 except ImportError:  # pragma: no cover
     def unmangle(text):
+        return text
+
+    def remove_comments(text):
         return text
 
 
@@ -91,27 +94,51 @@ def _maximum_matching(equations: List[str], incidence: Dict[str, List[str]]
     return eq_match, var_match
 
 
+class _LineNumbers(dict):
+    """Gleichung -> Zeilennummer (erstes Vorkommen); `every` nennt alle Zeilen einer wörtlich
+    mehrfach im Blatt stehenden Gleichung."""
+
+    def __init__(self):
+        super().__init__()
+        self.every: Dict[str, List[int]] = {}
+
+
 def _source_line_numbers(original_equations: Dict[str, str], source_text: Optional[str]) -> Dict[str, int]:
-    """Gleichung -> Zeilennummer im Editortext (über die Originalzeile)."""
+    """
+    Gleichung -> Zeilennummer im Editortext (über die Originalzeile). Es zählen nur Zeilen, die
+    Code tragen: derselbe Text in einem mehrzeiligen Kommentar (auskommentierte erste Fassung)
+    ist nicht die Gleichung - die Meldung zeigte sonst auf den Kommentar.
+    """
+    numbers = _LineNumbers()
     if not source_text:
-        return {}
+        return numbers
     lines = [line.strip() for line in source_text.split('\n')]
+    code = remove_comments(source_text).split('\n')
     used: Set[int] = set()
-    numbers = {}
     for parsed, original in original_equations.items():
         target = unmangle(original.strip())
-        for index, line in enumerate(lines):
-            if index not in used and line == target:
-                numbers[parsed] = index + 1
-                used.add(index)
-                break
+        found = [index for index, line in enumerate(lines)
+                 if index not in used and line == target and index < len(code) and code[index].strip()]
+        if found:
+            used.update(found)
+            numbers[parsed] = found[0] + 1
+            numbers.every[parsed] = [index + 1 for index in found]
     return numbers
 
 
 def _format_lines(equations: List[str], line_numbers: Dict[str, int],
                   original_equations: Dict[str, str]) -> str:
-    """'Zeile 11, 14' bzw. die Gleichungen selbst, wenn Zeilen unbekannt sind."""
-    numbers = sorted(line_numbers[eq] for eq in equations if eq in line_numbers)
+    """'Zeile 11, 14' bzw. die Gleichungen selbst, wenn Zeilen unbekannt sind. Eine wörtlich
+    mehrfach stehende Gleichung erscheint mit jeder ihrer Zeilen (nicht 'Zeilen 2, 2')."""
+    every = getattr(line_numbers, 'every', {})
+    numbers, taken = [], {}
+    for eq in equations:
+        own = every.get(eq) or ([line_numbers[eq]] if eq in line_numbers else [])
+        index = taken.get(eq, 0)
+        taken[eq] = index + 1
+        if index < len(own):
+            numbers.append(own[index])
+    numbers.sort()
     if len(numbers) == len(equations) and numbers:
         label = "Zeile" if len(numbers) == 1 else "Zeilen"
         return f"{label} {', '.join(str(n) for n in numbers)}"

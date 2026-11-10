@@ -134,6 +134,10 @@ def _peak_points(T_kelvin, lambda_lo, lambda_hi):
 
 def _blackbody_single(T_kelvin, lambda1, lambda2):
     """Berechnet Blackbody-Fraktion für einen einzelnen Temperaturwert."""
+    if not (math.isfinite(T_kelvin) and math.isfinite(lambda1) and math.isfinite(lambda2)):
+        # nicht definierte Eingabe (gescheiterter Punkt einer Studie) bleibt nicht definiert -
+        # früher kam je nach Argument der Anteil 1 bzw. 0 heraus (Vergleiche mit NaN sind falsch)
+        return float('nan')
     # Bei lambda1 = 0: verwende sehr kleine untere Grenze (Singularität bei 0)
     lambda1_eff = max(lambda1, 1e-6)
 
@@ -212,6 +216,8 @@ def Blackbody(T, lambda1, lambda2):
 
 def _blackbody_cumulative_single(T_kelvin, wavelength):
     """Berechnet kumulative Blackbody-Fraktion für einen einzelnen Wert."""
+    if not (math.isfinite(T_kelvin) and math.isfinite(wavelength)):
+        return float('nan')              # wie _blackbody_single
     # Verwende sehr kleine untere Grenze statt 0 (Singularität)
     lambda_min = 1e-6
 

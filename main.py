@@ -16,6 +16,7 @@ if sys.platform == 'darwin':
 
 import tkinter as tk
 from tkinter import messagebox, filedialog
+from tkinter import font as tkfont
 from typing import List, Optional
 
 import customtkinter as ctk
@@ -23,7 +24,8 @@ import customtkinter as ctk
 from parser import (parse_equations, validate_system, display_name, unmangle, readable,
                     parse_start_values, parse_start_value, start_value_entries, start_values_edit,
                     parse_optimization, start_value_units, parse_reference_states, remove_comments,
-                    wavelength_literals, declared_angle_exponents)
+                    wavelength_literals, declared_angle_exponents, is_constant_name, mangle_keywords)
+import physical_constants
 from version import __version__
 from solver import solve_system, solve_parametric, SolveAnalysis
 import solver as solver_module
@@ -97,22 +99,31 @@ except:
     COOLPROP_VERSION = None
 
 
-# Farbschema
+# Farbschema: je Farbe (hell, dunkel). customtkinter wählt nach dem Erscheinungsbild
+# (ctk.set_appearance_mode) und färbt beim Umschalten alle seine Widgets neu - hell mit weißem
+# Grund und schwarzer Schrift für den Projektor im Hörsaal, dunkel für die Arbeit am Bildschirm.
 COLORS = {
-    "bg_dark": "#1a1a2e",
-    "bg_frame": "#16213e",
-    "bg_input": "#0f0f1a",
-    "accent": "#e94560",
-    "accent_hover": "#ff6b6b",
-    "text": "#eaeaea",
-    "text_dim": "#8892a0",
-    "success": "#4ade80",
-    "error": "#f87171",
-    "warning": "#fbbf24",
-    "info": "#60a5fa",
-    "value": "#fbbf24",
-    "border": "#2d3748",
+    "bg_dark": ("#dde1e8", "#1a1a2e"),
+    "bg_frame": ("#eef0f4", "#16213e"),
+    "bg_input": ("#ffffff", "#0f0f1a"),
+    "accent": ("#d6334f", "#e94560"),
+    "accent_hover": ("#e94560", "#ff6b6b"),
+    "text": ("#000000", "#eaeaea"),
+    "text_dim": ("#4b5563", "#8892a0"),
+    "success": ("#15803d", "#4ade80"),
+    "error": ("#b91c1c", "#f87171"),
+    "warning": ("#b45309", "#fbbf24"),
+    "info": ("#1d4ed8", "#60a5fa"),
+    "value": ("#1e3a8a", "#fbbf24"),
+    "border": ("#b9c0cc", "#2d3748"),
 }
+
+
+def theme_color(name: str) -> str:
+    """Farbe des aktuellen Erscheinungsbilds als Text - für Tk-Widgets, die customtkinter nicht
+    selbst umfärbt (Canvas der Zeilennummern, ttk-Stil)."""
+    return COLORS[name][0 if ctk.get_appearance_mode() == "Light" else 1]
+
 
 # Schriftgröße des Gleichungs-Editors (pt)
 FONT_SIZE_MIN = 6
@@ -130,7 +141,8 @@ One equation per line, in any form and any order:
   ^ = power (x^2), * must always be written (2*x, r_1*(a+b));
   · can be used instead of * (0.475·10^-6)
 Decimal POINT, not comma: 0.71 (a comma is reported as error)
-Comments: "text" or {text} (also over several lines)
+Comments: "text" or {text} (also over several lines); # is not a
+  comment character (reported with the line) - name# is a constant
 A long equation may continue on the next line inside an open
 bracket, if the line ends with '(', ',' or an operator:
   Nu = IF(Re, 2300, 3.66, 3.66,
@@ -144,8 +156,13 @@ Values with units only in assignments 'name = number unit':
   b = 0.25 kg/kWh    (prefixes stay prefixes: 1/kPa, kg/MJ)
   r = 2 °C/h         (°C in a compound unit is a difference: K/h)
   n = 1450 rpm       (rpm = U/min = 1/min: revolutions per time)
+Only the unit symbols of the program count (kW, min, m3/h, l/d,
+kWh/a, SI prefixes before SI units): 5 Min, 75 PS, 20 qm, 5 KW or
+20 Grad are reported instead of being read as some other unit.
 Each quantity is given once; a second value (x = 5, x = 3) is
 checked like an equation and reported as a contradiction.
+A check equation holds if both sides agree within 0.1 %: a rounded
+control value (4.18 for 4.1823) is fine, 4.3 is a contradiction.
 A constant WITHOUT unit is dimensionless (eta = 0.8) - except 0:
 zero is zero in every unit, its unit follows from the equations
 (Q_12 = 0 next to Q_12 + W_12 = m*c_v*(T_2 - T_1) is in kJ).
@@ -179,6 +196,7 @@ log10(x), lg(x)             Base 10 logarithm
 sqrt(x)                     Square root
 abs(x)                      Absolute value
 ceil(x), floor(x), round(x) Round up / down / to nearest integer
+                            (round: 2.5 -> 3, -2.5 -> -3)
 max(a, b), min(a, b)        Maximum / minimum
 IF(a, b, x, y, z)           Case distinction: x if a < b,
                             y if a = b, z if a > b (see below)
@@ -194,6 +212,19 @@ an angle with a unit (a + asin(x)). A number in a sum with an angle
 is a value in rad (hint ⓘ) - write c = 90 deg. Formulas from the
 literature that use radians (e.g. view factors): atan(x)*pi/180.
 Not available: user-defined functions.
+
+CONSTANTS - name#:
+------------------
+Constants of the program are written with a trailing #. They
+have their own names: a variable sigma, g or R of the sheet stays
+free and cannot overwrite a constant. Insert them with the button
+Constants above the equations or Edit > Insert Constant.
+@CONSTANTS@
+  Q = eps*sigma#*A*(T_1^4 - T_2^4)       F_G = m*g#
+  rho_n = p_n#*M/(R#*T_n#)               U_0 = -dg/(2*F#)
+Each constant has its unit and appears in the results. It cannot
+be assigned (sigma# = ... is reported); for a value of your own
+use your own name (sigma = 5.67e-8 W/m2K4).
 
 CASE DISTINCTION - IF:
 ----------------------
@@ -309,6 +340,18 @@ Properties (results in SI):
   soundspeed(...)    Speed of sound [m/s]
   gibbs(...)         Gibbs free energy g = h - T*s [J/kg]
   molarmass(fluid)   Molar mass [kg/mol], shown in kg/kmol
+cp, cv, viscosity, conductivity, prandtl and soundspeed exist only
+in one phase: inside the two-phase region (0 < x < 1) they are
+reported - use x=0 (boiling liquid) or x=1 (saturated vapour).
+Below the triple point (water: 0.01 °C) the substance is vapour or
+solid. Vapour and saturation over ice are computed correctly:
+pressure(water, T=-10 °C, x=1) = 259.9 Pa (sublimation pressure),
+temperature(water, p=..., x=1) is the frost point, x=1 is vapour
+over ice. For the solid itself there are no data: where the liquid
+would be needed (T, p in the liquid region, x < 1) the subcooled
+liquid is returned with a hint ⓘ (metastable, not the stable
+state); the region of the solid and states far below (water:
+about -41 °C) are reported. Ice data exist only for water.
 
 State properties (2 required; SI or with unit):
   T = Temperature [K]        e.g. T=373.15 K or T=100 °C
@@ -392,7 +435,8 @@ inside the statement; separate entries with ','. Messages name
 the statement: EQUILIBRIUM (Zeile 5): IG:H2O = n_D. The same
 species twice under IN (two streams) is summed. The gas phase
 may vanish (H2 + O2 below the boiling temperature at p: only
-H2O(L)).
+H2O(L)). Ions and electrons (IG:Ar+, IG:e-) are not supported
+(no charge balance) and are reported.
 Dew point: amount of condensate n_L = 0 holds for every T above
 it (not unique) - give a small amount (n_L = 1e-6*n_W) instead.
 
@@ -447,8 +491,10 @@ No Greek letters or umlauts (reported): Phi, eta, lambda, Q_waerme.
 Python keywords can be used: lambda = 0.04 W/mK works.
 Not usable: and, or, not, True, False, None.
 e is a normal variable; Euler's number: exp(1).
-Avoid naming a variable like a function you also call
-(sin, exp, ln, sqrt, max, pi, enthalpy, cp, ...).
+A variable may be named like a function (cp = cp(air, T=T_1,
+p=p_1)): before '(' the name is the function, otherwise the
+variable. pi is the constant. Function names: lower case; the
+property, HumidAir and radiation functions in any case.
 
 TEMPERATURE DIFFERENCES - ALWAYS IN K:
 --------------------------------------
@@ -543,6 +589,13 @@ Several sweep variables / lists are combined point by point
 After solving: Plot > New Plot Window (several curves) or
 Plot > Quick Plot X-Y.
 
+VIEW:
+-----
+Line numbers beside the equations (messages name the line):
+View > Line Numbers or F7. Light mode with white background and
+black text, e.g. for a projector: View > Light Mode, F6 or the
+button ☀ / ☾. Font size: Ctrl + / Ctrl -.
+
 MESSAGES:
 ---------
 Errors name the line and mark the position with ▶, e.g.
@@ -561,6 +614,7 @@ Optimierung: Minimum/Maximum von ... = optimisation result;
 ⚠ UNIT WARNINGS (n) and ⓘ HINWEISE (n) above the results are
 clickable and open the details in the Residuals tab.
 """
+FUNCTION_HELP_TEXT = FUNCTION_HELP_TEXT.replace("@CONSTANTS@", "\n".join(physical_constants.table_lines(70)))
 
 
 def pretty_unit(unit: str) -> str:
@@ -691,6 +745,14 @@ class EquationSolverApp(ctk.CTk):
         # Schriftgröße (Standard: 16, Bereich FONT_SIZE_MIN..FONT_SIZE_MAX)
         self.font_size = FONT_SIZE_DEFAULT
 
+        # Ansicht: Zeilennummern neben den Gleichungen (Meldungen nennen "Zeile n") und helles
+        # Erscheinungsbild (Projektor); beides im Menü View und über F7 / F6 umschaltbar
+        self.line_numbers_var = tk.BooleanVar(self, value=True)
+        self.light_mode_var = tk.BooleanVar(self, value=ctk.get_appearance_mode() == "Light")
+        self._line_numbers_shown = True
+        self._line_number_state = None
+        self._line_number_job = None
+
         # Re-Entrancy-Schutz: solve() ruft self.update() auf (Fortschritt),
         # dabei dürfen F5/Solve/New/Open/Clear keinen zweiten Lauf starten
         self._solving = False
@@ -793,6 +855,7 @@ class EquationSolverApp(ctk.CTk):
             hover_color=COLORS["border"],
             border_width=1,
             border_color=COLORS["border"],
+            text_color=COLORS["text"],
             font=ctk.CTkFont(size=13)
         )
         self.clear_btn.pack(side="left", padx=(0, 5))
@@ -808,9 +871,26 @@ class EquationSolverApp(ctk.CTk):
             hover_color=COLORS["border"],
             border_width=1,
             border_color=COLORS["border"],
+            text_color=COLORS["text"],
             font=ctk.CTkFont(size=13)
         )
         self.example_btn.pack(side="left", padx=(0, 5))
+
+        # Hell/Dunkel (heller Grund, schwarze Schrift für den Projektor)
+        self.theme_btn = ctk.CTkButton(
+            buttons_frame,
+            text="☀" if ctk.get_appearance_mode() == "Dark" else "☾",
+            command=self.toggle_theme,
+            width=36,
+            height=36,
+            fg_color=COLORS["bg_dark"],
+            hover_color=COLORS["border"],
+            border_width=1,
+            border_color=COLORS["border"],
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=18)
+        )
+        self.theme_btn.pack(side="left", padx=(0, 5))
 
         # Settings Button
         self.settings_btn = ctk.CTkButton(
@@ -823,6 +903,7 @@ class EquationSolverApp(ctk.CTk):
             hover_color=COLORS["border"],
             border_width=1,
             border_color=COLORS["border"],
+            text_color=COLORS["text"],
             font=ctk.CTkFont(size=18)
         )
         self.settings_btn.pack(side="left")
@@ -835,25 +916,48 @@ class EquationSolverApp(ctk.CTk):
         content.grid_columnconfigure(0, weight=1)
         content.grid_rowconfigure(0, weight=1)
 
-        # PanedWindow für verschiebbare Trennung (verwende tkinter.ttk)
-        from tkinter import ttk
-
-        # Style für PanedWindow im Dark Mode
-        style = ttk.Style()
-        style.configure("Dark.TPanedwindow", background=COLORS["bg_dark"])
-
-        self.paned = ttk.PanedWindow(content, orient=tk.HORIZONTAL)
+        # Verschiebbare Trennung zwischen Gleichungen und Lösung. tk.PanedWindow, nicht ttk: der
+        # Trennbalken des ttk-Widgets folgt auf macOS dem Erscheinungsbild des SYSTEMS (im dunklen
+        # System ein schwarzer Balken auch im hellen Modus des Programms), der des Tk-Widgets
+        # nimmt die Fensterfarbe an
+        self.paned = tk.PanedWindow(content, orient=tk.HORIZONTAL, sashwidth=6, borderwidth=0,
+                                    relief="flat", sashrelief="flat", opaqueresize=True,
+                                    background=theme_color("bg_dark"))
         self.paned.grid(row=0, column=0, sticky="nsew")
 
         # Linkes Panel: Equations (in eigenem Frame für PanedWindow)
-        eq_container = ctk.CTkFrame(self.paned, fg_color="transparent")
+        eq_container = ctk.CTkFrame(self.paned, fg_color=COLORS["bg_dark"], corner_radius=0)
         self._create_equations_panel(eq_container)
-        self.paned.add(eq_container, weight=2)
+        self.paned.add(eq_container, stretch="always", minsize=260)
 
         # Rechtes Panel: Solution (in eigenem Frame für PanedWindow)
-        sol_container = ctk.CTkFrame(self.paned, fg_color="transparent")
+        sol_container = ctk.CTkFrame(self.paned, fg_color=COLORS["bg_dark"], corner_radius=0)
         self._create_solution_panel(sol_container)
-        self.paned.add(sol_container, weight=1)
+        self.paned.add(sol_container, stretch="always", minsize=220)
+
+        # Aufteilung 2 : 1 wie bisher; sie bleibt beim Ändern der Fenstergröße erhalten und folgt
+        # dem Trennbalken, wenn er verschoben wird
+        self._pane_ratio = 2 / 3
+        self.paned.bind("<Configure>", self._place_sash)
+        self.paned.bind("<ButtonRelease-1>", self._remember_sash)
+
+    def _place_sash(self, event=None):
+        """Setzt den Trennbalken auf den gemerkten Anteil der Breite."""
+        width = self.paned.winfo_width()
+        if width > 100:
+            try:
+                self.paned.sash_place(0, int(self._pane_ratio * width), 0)
+            except tk.TclError:
+                pass
+
+    def _remember_sash(self, event=None):
+        """Merkt die Aufteilung, nachdem der Trennbalken verschoben wurde."""
+        width = self.paned.winfo_width()
+        if width > 100:
+            try:
+                self._pane_ratio = min(0.85, max(0.15, self.paned.sash_coord(0)[0] / width))
+            except tk.TclError:
+                pass
 
     def _create_equations_panel(self, parent):
         """Erstellt das Equations Panel."""
@@ -876,6 +980,22 @@ class EquationSolverApp(ctk.CTk):
         ctk.CTkLabel(header, text="  EQUATIONS", font=ctk.CTkFont(size=13, weight="bold"),
                       text_color=COLORS["text"]).pack(side="left")
 
+        # Konstanten des Programms (sigma#, g#, R# ...): Auswahl fügt den Namen an der Schreibmarke ein
+        self.constants_btn = ctk.CTkButton(
+            header,
+            text="Constants ▾",
+            command=self._show_constants_menu,
+            width=104,
+            height=24,
+            fg_color=COLORS["bg_dark"],
+            hover_color=COLORS["border"],
+            border_width=1,
+            border_color=COLORS["border"],
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=11)
+        )
+        self.constants_btn.pack(side="left", padx=(14, 0))
+
         # Syntax-Hinweis
         syntax_hint = ctk.CTkLabel(
             header,
@@ -885,9 +1005,19 @@ class EquationSolverApp(ctk.CTk):
         )
         syntax_hint.pack(side="right")
 
+        # Editor mit Zeilennummern-Leiste links (ein-/ausblendbar)
+        editor = ctk.CTkFrame(eq_frame, fg_color="transparent")
+        editor.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        editor.grid_columnconfigure(1, weight=1)
+        editor.grid_rowconfigure(0, weight=1)
+
+        self.line_numbers = tk.Canvas(editor, width=40, highlightthickness=0, borderwidth=0,
+                                      background=theme_color("bg_frame"))
+        self.line_numbers.grid(row=0, column=0, sticky="ns", padx=(0, 2))
+
         # Text Editor
         self.equations_text = ctk.CTkTextbox(
-            eq_frame,
+            editor,
             font=ctk.CTkFont(family="Courier", size=self.font_size),
             fg_color=COLORS["bg_input"],
             text_color=COLORS["text"],
@@ -896,10 +1026,176 @@ class EquationSolverApp(ctk.CTk):
             border_color=COLORS["border"],
             wrap="none"
         )
-        self.equations_text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.equations_text.grid(row=0, column=1, sticky="nsew")
 
         # Enable undo/redo on the internal text widget
         self.equations_text._textbox.configure(undo=True, maxundo=-1)
+
+        self._watch_line_numbers()
+
+    # === Zeilennummern ===
+
+    def _line_number_signature(self):
+        """Alles, wovon die Leiste abhängt: erste sichtbare Zeile, Zeilenzahl, Schrift, Höhe, Farbe."""
+        text = self.equations_text._textbox
+        return (self.line_numbers_var.get(), text.index("@0,0"), text.index("end-1c").split(".")[0],
+                self.font_size, text.winfo_height(), text.winfo_rooty() - self.line_numbers.winfo_rooty(),
+                ctk.get_appearance_mode())
+
+    def _watch_line_numbers(self):
+        """
+        Hält die Zeilennummern aktuell. Tk meldet Änderungen des Texts nicht als ein Ereignis
+        (Tippen, Einfügen, Rückgängig, Laden, Rollen, Schriftgröße, Fenstergröße) - daher wird
+        zehnmal je Sekunde eine kleine Signatur verglichen und nur bei Änderung neu gezeichnet.
+        """
+        try:
+            signature = self._line_number_signature()
+            if signature != self._line_number_state:
+                self._line_number_state = signature
+                self._draw_line_numbers()
+            self._line_number_job = self.after(100, self._watch_line_numbers)
+        except tk.TclError:
+            self._line_number_job = None          # Fenster wird geschlossen
+
+    def _line_number_positions(self):
+        """[(Zeilennummer, y in der Leiste)] der sichtbaren Zeilen des Editors."""
+        text = self.equations_text._textbox
+        offset = text.winfo_rooty() - self.line_numbers.winfo_rooty()
+        positions = []
+        line = int(text.index("@0,0").split(".")[0])
+        last = int(text.index("end-1c").split(".")[0])
+        while line <= last:
+            info = text.dlineinfo(f"{line}.0")
+            if info is None:
+                break                             # unterhalb des sichtbaren Bereichs
+            positions.append((line, offset + info[1]))
+            line += 1
+        return positions
+
+    def _draw_line_numbers(self):
+        """Zeichnet die Nummern der sichtbaren Zeilen neben den Editor (gleiche Schrift, rechtsbündig)."""
+        canvas = self.line_numbers
+        canvas.delete("all")
+        if not self.line_numbers_var.get():
+            return
+        font = self._line_number_font()
+        last = int(self.equations_text._textbox.index("end-1c").split(".")[0])
+        width = font.measure("0" * max(2, len(str(last)))) + 12
+        canvas.configure(width=width, background=theme_color("bg_frame"))
+        color = theme_color("text_dim")
+        for line, y in self._line_number_positions():
+            canvas.create_text(width - 6, y, anchor="ne", text=str(line), font=font, fill=color)
+
+    def _line_number_font(self):
+        """Schrift der Leiste: die des Editors, wie er am Bildschirm steht (Skalierung von customtkinter)."""
+        try:
+            return tkfont.Font(font=self.equations_text._textbox.cget("font"))
+        except tk.TclError:
+            return tkfont.Font(family="Courier", size=self.font_size)
+
+    def refresh_line_numbers(self):
+        """Zeichnet die Leiste sofort neu (sonst beim nächsten Vergleich nach höchstens 0.1 s)."""
+        self.update_idletasks()
+        self._line_number_state = self._line_number_signature()
+        self._draw_line_numbers()
+
+    def destroy(self):
+        """Beendet die Überwachung der Zeilennummern, bevor das Fenster geschlossen wird."""
+        if self._line_number_job is not None:
+            try:
+                self.after_cancel(self._line_number_job)
+            except Exception:
+                pass
+            self._line_number_job = None
+        super().destroy()
+
+    def line_number_texts(self) -> list:
+        """Die gerade gezeichneten Zeilennummern (für Tests)."""
+        return [self.line_numbers.itemcget(item, "text") for item in self.line_numbers.find_all()]
+
+    def toggle_line_numbers(self, show: Optional[bool] = None):
+        """Blendet die Zeilennummern ein bzw. aus (View > Line Numbers, F7)."""
+        if show is None:
+            show = not self._line_numbers_shown
+        self._line_numbers_shown = bool(show)
+        self.line_numbers_var.set(bool(show))
+        if show:
+            self.line_numbers.grid()
+        else:
+            self.line_numbers.grid_remove()
+        self._line_number_state = None
+        self.status_label.configure(text=f"Line numbers {'on' if show else 'off'}")
+
+    # === Hell / Dunkel ===
+
+    def toggle_theme(self, light: Optional[bool] = None):
+        """
+        Schaltet zwischen dunklem und hellem Erscheinungsbild um (View > Light Mode, F6, ☀/☾):
+        hell = weißer Grund, schwarze Schrift - für den Projektor im Hörsaal.
+        """
+        if light is None:
+            light = ctk.get_appearance_mode() != "Light"
+        ctk.set_appearance_mode("light" if light else "dark")
+        self.light_mode_var.set(bool(light))
+        self.theme_btn.configure(text="☾" if light else "☀")
+        self.paned.configure(background=theme_color("bg_dark"))     # Trennbalken in der Fensterfarbe
+        self._refresh_backgrounds()
+        self.refresh_line_numbers()               # Leiste sofort in den neuen Farben
+        self.status_label.configure(text=f"{'Light' if light else 'Dark'} mode")
+
+    def _refresh_backgrounds(self):
+        """
+        Nach dem Umschalten: Widgets, die ihre Hintergrundfarbe als festen Wert übernommen haben,
+        leiten sie neu vom Elternteil ab. customtkinter färbt nur Farbpaare (hell, dunkel) selbst um;
+        ein Karteireiter (CTkTabview) reicht seine Farbe aber als festen Wert des gerade gültigen
+        Erscheinungsbilds weiter, und an einem rollbaren Bereich endet die Weitergabe an die Kinder.
+        Ohne dies blieben Flächen im alten Erscheinungsbild stehen (schwarze Ergebniszeilen im
+        hellen Modus). Von oben nach unten, damit die Kinder die neue Farbe der Eltern vorfinden.
+        """
+        mode = ctk.get_appearance_mode()
+
+        def visit(widget):
+            for child in widget.winfo_children():
+                try:
+                    if isinstance(child, ctk.CTkBaseClass):
+                        background = child.cget("bg_color")
+                        if isinstance(background, str) and background != "transparent":
+                            child.configure(bg_color="transparent")     # "transparent" = vom Elternteil
+                    elif isinstance(child, ctk.CTkScrollableFrame):
+                        child._set_appearance_mode(mode)
+                except Exception:
+                    pass                          # ein Widget ohne diese Optionen: nichts zu tun
+                visit(child)
+
+        visit(self)
+
+    # === Konstanten ===
+
+    def _constants_menu(self, parent) -> tk.Menu:
+        """Menü der Konstanten des Programms: Name, Wert, Einheit, Bedeutung - Auswahl fügt name# ein."""
+        menu = tk.Menu(parent, tearoff=0)
+        for constant in physical_constants.CONSTANTS.values():
+            label = (f"{physical_constants.sheet_name(constant.name):<8} {constant.value:.10g} "
+                     f"{pretty_unit(constant.unit)}   -   {constant.description}")
+            menu.add_command(label=label, command=lambda name=constant.name: self.insert_constant(name))
+        return menu
+
+    def _show_constants_menu(self):
+        """Klappt die Auswahl unter der Schaltfläche Constants auf."""
+        menu = self._constants_menu(self)
+        button = self.constants_btn
+        try:
+            menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def insert_constant(self, name: str):
+        """Fügt eine Konstante (sigma#) an der Schreibmarke in das Gleichungsblatt ein."""
+        self.equations_text.insert("insert", physical_constants.sheet_name(name))
+        self.equations_text.focus_set()
+        constant = physical_constants.CONSTANTS[name]
+        self.status_label.configure(
+            text=f"{physical_constants.sheet_name(name)} = {constant.value:.10g} {pretty_unit(constant.unit)}")
 
     def _create_solution_panel(self, parent):
         """Erstellt das Solution Panel mit TabView."""
@@ -929,6 +1225,7 @@ class EquationSolverApp(ctk.CTk):
             segmented_button_fg_color=COLORS["bg_dark"],
             segmented_button_selected_color=COLORS["accent"],
             segmented_button_unselected_color=COLORS["bg_frame"],
+            text_color=COLORS["text"],
             corner_radius=8
         )
         self.tab_view.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
@@ -1013,9 +1310,12 @@ class EquationSolverApp(ctk.CTk):
         self.info_label.pack(padx=10, pady=8)
 
         # Scrollable Frame für Variablen-Tabelle
+        # Farbe als Paar (hell, dunkel), nicht "transparent": ein Karteireiter gibt seine Farbe nur als
+        # festen Wert des gerade gültigen Erscheinungsbilds weiter - alles in einem rollbaren Bereich
+        # behielt sonst beim Umschalten den alten Grund (Ergebniszeilen schwarz im hellen Modus)
         self.results_scroll = ctk.CTkScrollableFrame(
             self.results_tab,
-            fg_color="transparent",
+            fg_color=COLORS["bg_input"],
             corner_radius=0
         )
         self.results_scroll.grid(row=2, column=0, sticky="nsew", padx=5)
@@ -1043,7 +1343,7 @@ class EquationSolverApp(ctk.CTk):
         # Scrollable Frame für Residuals
         self.residuals_scroll = ctk.CTkScrollableFrame(
             self.residuals_tab,
-            fg_color="transparent",
+            fg_color=COLORS["bg_input"],     # wie results_scroll: Farbpaar statt "transparent"
             corner_radius=0
         )
         self.residuals_scroll.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
@@ -1500,12 +1800,18 @@ class EquationSolverApp(ctk.CTk):
         menubar.add_cascade(label="Edit", menu=edit_menu)
         edit_menu.add_command(label="Clear All", command=self.clear_all)
         edit_menu.add_command(label="Insert Example", command=self._insert_example)
+        edit_menu.add_cascade(label="Insert Constant", menu=self._constants_menu(edit_menu))
 
         # View Menü
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu)
         view_menu.add_command(label="Increase Font Size", command=self.increase_font_size, accelerator="Ctrl++")
         view_menu.add_command(label="Decrease Font Size", command=self.decrease_font_size, accelerator="Ctrl+-")
+        view_menu.add_separator()
+        view_menu.add_checkbutton(label="Line Numbers", variable=self.line_numbers_var, accelerator="F7",
+                                  command=lambda: self.toggle_line_numbers(self.line_numbers_var.get()))
+        view_menu.add_checkbutton(label="Light Mode (Projector)", variable=self.light_mode_var, accelerator="F6",
+                                  command=lambda: self.toggle_theme(self.light_mode_var.get()))
 
         # Solve Menü
         solve_menu = tk.Menu(menubar, tearoff=0)
@@ -1535,6 +1841,8 @@ class EquationSolverApp(ctk.CTk):
             "<Control-o>": self.open_file,
             "<Control-s>": self.save_file,
             "<F5>": self.solve,
+            "<F6>": self.toggle_theme,
+            "<F7>": self.toggle_line_numbers,
             "<Control-plus>": self.increase_font_size,
             "<Control-minus>": self.decrease_font_size,
             "<Control-equal>": self.increase_font_size,
@@ -1761,7 +2069,7 @@ class EquationSolverApp(ctk.CTk):
             equations, variables, initial_values, sweep_vars, original_equations, unit_values = parse_equations(equations_text, parse_units=True)
             # Verwendet das Blatt Einheiten? (vor der Anzeige - die trägt berechnete Größen mit
             # Einheit in unit_values ein)
-            sheet_has_units = any(uv.original_unit for uv in unit_values.values())
+            sheet_has_units = self._sheet_has_units(unit_values)
 
             # Startwerte stehen im Blatt (Block {$Startwerte ... $}, von
             # Solve > Initial Values geschrieben) - der Text ist die einzige Quelle
@@ -1801,6 +2109,9 @@ class EquationSolverApp(ctk.CTk):
             # Spezialfall: Keine Gleichungen, nur Konstanten und/oder Sweep-Variablen
             # (beide zusammen anzeigen - der Sweep darf nicht verloren gehen)
             if not valid and n_equations == 0 and (initial_values or sweep_vars):
+                length_error = solver_module.sweep_length_error(sweep_vars)
+                if length_error:
+                    raise ValueError(length_error)
                 result = dict(initial_values)
                 result.update(sweep_vars)
                 # ohne Gleichungen ist der Charakter einer in K eingegebenen Temperatur offen:
@@ -1862,7 +2173,7 @@ class EquationSolverApp(ctk.CTk):
                                                         open_temperatures=open_k,
                                                         undetermined_temperature='delta_K')
                 start_units = {**all_units, **{v: definite.get(v) for v in open_k}}
-                if any(uv.original_unit for uv in unit_values.values()):
+                if self._sheet_has_units(unit_values):
                     temperature_hints += self._missing_unit_hints(
                         original_equations, {**known_units, **{c: '' for c in self._dimensionless_constants(
                             constants, sweep_vars) if c not in known_units}}, open_k)
@@ -1896,7 +2207,7 @@ class EquationSolverApp(ctk.CTk):
                     temperature_hints.append(
                         f"'{unmangle(remove_comments(source)).strip()}': Die Wellenlänge {number:g} ohne "
                         f"Einheit gilt als {number:g} m = {number * 1e6:g} µm - Zahlen ohne Einheit sind "
-                        f"SI-Werte. Wellenlängen in µm mit Einheit angeben (z.B. {number:g} µm)")
+                        f"SI-Werte. Wellenlängen mit Einheit angeben ({number * 1e6:g} µm für diesen Wert)")
                 # Summe von Temperaturpunkten ohne festgelegten Ursprung (T_3 = T_1 + T_2): Fehler
                 point_sums = self._point_sum_errors(original_equations, known_units, open_k,
                                                     unit_values, all_units, equations_text)
@@ -1983,7 +2294,18 @@ class EquationSolverApp(ctk.CTk):
             # Generische Diagnose: Struktur/Numerik (bei Fehler) + Namens-Hinweise
             diagnosis_errors = []
             if sweep_vars and analysis is not None:
-                analysis.hints = (temperature_hints + self._single_phase_quality_hints(original_equations, solution)
+                # Hinweise wie ohne Studie, auch die Namens-Hinweise (Tippfehler T1 statt T_1)
+                sweep_name_hints = []
+                if DIAGNOSTICS_AVAILABLE:
+                    try:
+                        sweep_name_hints = name_hints(equations, variables,
+                                                      set(constants) | set(sweep_vars) | set(optimized),
+                                                      original_equations, equations_text)
+                    except Exception:
+                        sweep_name_hints = []
+                analysis.hints = (temperature_hints + sweep_name_hints
+                                  + self._single_phase_quality_hints(original_equations, solution)
+                                  + self._supercooled_hints(original_equations, solution)
                                   + self._equilibrium_range_hints(original_equations, solution))
             if DIAGNOSTICS_AVAILABLE and not sweep_vars:
                 try:
@@ -1993,6 +2315,7 @@ class EquationSolverApp(ctk.CTk):
                     if analysis is not None:
                         analysis.hints = (temperature_hints + hints
                                           + self._single_phase_quality_hints(original_equations, solution)
+                                          + self._supercooled_hints(original_equations, solution)
                                           + self._equilibrium_range_hints(original_equations, solution))
                 except Exception:
                     diagnosis_errors = []
@@ -2108,22 +2431,85 @@ class EquationSolverApp(ctk.CTk):
             context = _get_eval_context()
         except Exception:
             return []
-        values = {}
-        for name, value in solution.items():
-            try:
-                values[name] = float(value[0]) if isinstance(value, np.ndarray) else float(value)
-            except (TypeError, ValueError, IndexError):
-                continue
+        # alle Punkte einer Parameterstudie (nicht nur der erste)
+        n_points = max((value.size for value in solution.values()
+                        if isinstance(value, np.ndarray) and value.ndim == 1), default=1)
         hints = []
         for parsed, original in original_equations.items():
-            for start, _, close, _ in _iter_call_spans(parsed, {'quality'}):
-                try:
-                    x = float(eval(parsed[start:close + 1], {"__builtins__": {}}, {**context, **values}))
-                except Exception:
-                    continue
-                if x == -1.0:
-                    hints.append(f"'{unmangle(original or parsed)}': quality(...) = -1 - der Zustand liegt "
-                                 f"nicht im Nassdampfgebiet (unterkühlt, überhitzt oder überkritisch)")
+            spans = list(_iter_call_spans(parsed, {'quality'}))
+            if not spans:
+                continue
+            found = False
+            for point in range(n_points):
+                values = {}
+                for name, value in solution.items():
+                    try:
+                        values[name] = (float(value[point]) if isinstance(value, np.ndarray) and value.ndim == 1
+                                        and value.size == n_points else float(value))
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                for start, _, close, _ in spans:
+                    try:
+                        x = float(eval(parsed[start:close + 1], {"__builtins__": {}}, {**context, **values}))
+                    except Exception:
+                        continue
+                    if x == -1.0:
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
+                where = f" (Punkt {point + 1} der Parameterstudie)" if n_points > 1 else ""
+                hints.append(f"'{unmangle(original or parsed)}': quality(...) = -1{where} - der Zustand liegt "
+                             f"nicht im Nassdampfgebiet (unterkühlt, überhitzt oder überkritisch)")
+        return hints
+
+    @staticmethod
+    def _supercooled_hints(original_equations, solution) -> List[str]:
+        """
+        Stoffwerte unter dem Tripelpunkt, für die es keine richtigen Daten gibt: im Gleichgewicht ist
+        der Stoff dort fest (Wasser unter 0.01 °C: Eis), geliefert wird die unterkühlte Flüssigkeit
+        (metastabil). Jede Gleichung mit Stoffwert-Aufrufen wird mit der Lösung ausgewertet (alle
+        Punkte einer Parameterstudie); thermodynamics sammelt dabei diese Zustände - ein Hinweis je
+        Gleichung. Dampf und Sättigung über der festen Phase sind richtig gerechnet (kein Hinweis).
+        """
+        if not solution or not THERMO_AVAILABLE:
+            return []
+        try:
+            from parser import _iter_call_spans
+            from solver import _get_eval_context
+            from thermodynamics import collecting_supercooled
+            context = _get_eval_context()
+        except Exception:
+            return []
+        names = {name for name in THERMO_FUNCTIONS if name != 'molarmass'}
+        n_points = max((value.size for value in solution.values()
+                        if isinstance(value, np.ndarray) and value.ndim == 1), default=1)
+        hints = []
+        for parsed, original in original_equations.items():
+            if not any(True for _ in _iter_call_spans(parsed, names)):
+                continue
+            for point in range(n_points):
+                values = {}
+                for name, value in solution.items():
+                    try:
+                        values[name] = (float(value[point]) if isinstance(value, np.ndarray) and value.ndim == 1
+                                        and value.size == n_points else float(value))
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                with collecting_supercooled() as found:
+                    try:
+                        eval(parsed, {"__builtins__": {}}, {**context, **values})
+                    except Exception:
+                        pass
+                if found:
+                    fluid, temperature_si, limit, what = min(found, key=lambda note: note[1])
+                    where = f" (Punkt {point + 1} der Parameterstudie)" if n_points > 1 else ""
+                    hints.append(
+                        f"'{unmangle(original or parsed)}': Zustand unter {what} von {fluid} "
+                        f"({temperature_si - 273.15:.4g} °C < {limit - 273.15:.4g} °C){where} - im Gleichgewicht "
+                        f"ist der Stoff dort fest, dafür gibt es keine Stoffdaten. Der Wert gilt für die "
+                        f"unterkühlte Flüssigkeit (metastabil), nicht für den stabilen Zustand")
                     break
         return hints
 
@@ -2216,6 +2602,15 @@ class EquationSolverApp(ctk.CTk):
         return values, lambda equation, trial: _calculate_residual(equation, trial, context)
 
     @staticmethod
+    def _sheet_has_units(unit_values: dict) -> bool:
+        """
+        Verwendet das Blatt Einheiten? Die Konstanten des Programms (sigma#, g#) tragen ihre Einheit
+        immer - sie machen ein reines Zahlenblatt nicht zu einem Blatt mit Einheiten (sonst gälten
+        dort alle Vorgaben ohne Einheit als dimensionslos: Einheitenwarnungen für T = 300).
+        """
+        return any(uv.original_unit for var, uv in unit_values.items() if not is_constant_name(var))
+
+    @staticmethod
     def _dimensionless_constants(constants, sweep_vars=()) -> List[str]:
         """
         Konstanten ohne Einheit, die in einem Blatt mit Einheiten als dimensionslos gelten.
@@ -2306,7 +2701,7 @@ class EquationSolverApp(ctk.CTk):
         if not CONSTRAINT_PROPAGATION_AVAILABLE:
             return
         known_units = {var: uv.calc_unit for var, uv in unit_values.items() if uv.calc_unit}
-        if any(uv.original_unit for uv in unit_values.values()):
+        if self._sheet_has_units(unit_values):
             # Konstanten und Parameterstudien/Wertelisten ohne Einheit: dimensionslos
             for var in self._dimensionless_constants(constants, sweep_vars):
                 known_units.setdefault(var, '')
@@ -2379,6 +2774,42 @@ class EquationSolverApp(ctk.CTk):
                 self.current_unit_values[var] = UnitValue.from_si_base(first, unit)
             except Exception:
                 pass
+        self._kelvin_display |= self._kelvin_like_inputs(original_equations, units, safe, solution)
+
+    def _kelvin_like_inputs(self, original_equations: dict, units: dict, safe: dict, solution: dict) -> set:
+        """
+        Berechnete Temperaturgrößen, deren Charakter (absolut/Differenz) nicht bestimmbar ist und
+        die nur mit ebensolchen, in K eingegebenen Größen zusammenhängen: Anzeige wie eingegeben
+        in K (dT = 10 K, dT_h = dT/2 erschien als -268.15 °C; ebenso x = 2*dT, c = a - b).
+        Zusammenhang über die Gleichungen (gemeinsames Vorkommen), fortgesetzt über weitere nicht
+        bestimmbare Größen; trifft die Kette auf eine Temperatur mit bestimmtem Charakter oder eine
+        in °C/°F eingegebene, bleibt es bei der Vorgabe (absolut, nach Settings).
+        """
+        temperatures = {v for v in solution if units.get(v) in ('K', 'delta_K')}
+        undetermined = {v for v in temperatures if units.get(v) == 'K' and safe.get(v) == 'delta_K'}
+        entered = set(self._kelvin_display)
+        candidates = undetermined - entered
+        if not candidates or not entered:
+            return set()
+        neighbours = {v: set() for v in temperatures}
+        for parsed in original_equations:
+            names = set(re.findall(r'(?<![\w.])[A-Za-z_]\w*', parsed)) & temperatures
+            for name in names:
+                neighbours[name] |= names - {name}
+        def only_inputs(var):
+            seen, stack, found = {var}, [var], False
+            while stack:
+                for other in neighbours[stack.pop()] - seen:
+                    seen.add(other)
+                    if other in entered:
+                        found = True
+                    elif other in candidates:
+                        stack.append(other)
+                    else:
+                        return False        # bestimmter Charakter bzw. in °C/°F eingegeben
+            return found
+
+        return {var for var in candidates if only_inputs(var)}
 
     # Einheiten, für die die Anzeige-Einstellungen (Settings) gelten
     _TEMPERATURE_UNITS = {'K', 'degC', 'degF', 'kelvin', 'celsius', 'fahrenheit', '°C', '°F'}  # noqa
@@ -2517,7 +2948,7 @@ class EquationSolverApp(ctk.CTk):
 
         # Variablen-Tabelle
         row_idx = 0
-        for var in sorted(solution.keys()):
+        for var in sorted(solution.keys(), key=display_name):     # wie angezeigt: cp, lambda, sigma#
             val = solution[var]
 
             # Zeile erstellen
@@ -2531,7 +2962,8 @@ class EquationSolverApp(ctk.CTk):
                 text_color=COLORS["text"],
                 anchor="w", width=150
             )
-            var_label.pack(side="left", padx=5)
+            # eingepasst wird der Name zuletzt (unten): reicht die Breite nicht, weicht er - sonst
+            # wurde der WERT links beschnitten (5.670374e-08 erschien als "670374e-08")
 
             # Wert und Einheit für die Anzeige - beide aus DERSELBEN Einheit
             display_val, display_unit = self._display_values(var, val)
@@ -2577,6 +3009,8 @@ class EquationSolverApp(ctk.CTk):
                     button_hover_color=COLORS["accent"],
                     dropdown_fg_color=COLORS["bg_frame"],
                     dropdown_hover_color=COLORS["accent"],
+                    text_color=COLORS["text"],
+                    dropdown_text_color=COLORS["text"],
                     command=lambda u, v=var: self._on_unit_changed(v, u)
                 )
                 unit_dropdown.set(display_unit)
@@ -2606,6 +3040,8 @@ class EquationSolverApp(ctk.CTk):
                     button_hover_color=COLORS["accent"],
                     dropdown_fg_color=COLORS["bg_frame"],
                     dropdown_hover_color=COLORS["accent"],
+                    text_color=COLORS["text"],
+                    dropdown_text_color=COLORS["text"],
                     command=lambda u, v=var: self._on_unit_changed(v, u)
                 )
                 unit_dropdown.set('-')
@@ -2625,6 +3061,7 @@ class EquationSolverApp(ctk.CTk):
             )
             val_label.pack(side="right", padx=5)
             self.value_labels[var] = val_label
+            var_label.pack(side="left", padx=5)
 
             row_idx += 1
 
@@ -2635,8 +3072,17 @@ class EquationSolverApp(ctk.CTk):
 
         unit_value = self.current_unit_values[var]
         try:
-            # Konvertiere zum neuen Unit ('-' = dimensionslose Zahl)
-            if new_unit == '-':
+            # Eine Quelle für alle Größen: der SI-Wert der Lösung. Der gespeicherte UnitValue einer
+            # variierten Größe (VARY x = a .. b Einheit) ist ihre untere Grenze - die Auswahl
+            # zeigte dann die Grenze statt des Optimums. Temperaturdifferenzen ohne Nullpunkt.
+            solution = (self._last_results_args or ({},))[0] or {}
+            value_si = solution.get(var)
+            is_difference = (getattr(unit_value, '_calc_unit', '') == 'delta_K'
+                             or 'delta' in (unit_value.original_unit or '').lower())
+            if value_si is not None and np.ndim(value_si) == 0 and not is_difference:
+                new_val = float(value_si) if new_unit == '-' else self._si_to_unit(float(value_si), new_unit)
+            elif new_unit == '-':
+                # Konvertiere zum neuen Unit ('-' = dimensionslose Zahl)
                 new_val = unit_value.to('dimensionless')
             else:
                 new_val = unit_value.to(new_unit)
@@ -2848,7 +3294,7 @@ class EquationSolverApp(ctk.CTk):
         auto_texts = {}   # automatisch (grau) eingetragener Text je Variable
         shown_texts = {}  # angezeigter Text gespeicherter Startwerte (unverändert -> Blockzeile bleibt)
 
-        for var in sorted(all_vars):
+        for var in sorted(all_vars, key=display_name):
             row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
             row.pack(fill="x", pady=2)
 
@@ -2881,10 +3327,7 @@ class EquationSolverApp(ctk.CTk):
             entry.bind("<Key>", lambda e, ent=entry: ent.configure(text_color=COLORS["text"]))
             entries[var] = entry
 
-            if unit is None:
-                unit_text = "???"
-            else:
-                unit_text = pretty_unit(unit) if unit else "-"
+            unit_text = self._si_unit_text(unit)
             ctk.CTkLabel(row, text=unit_text, width=100, anchor="w",
                          text_color=COLORS["accent"]).pack(side="left", padx=5)
 
@@ -2957,6 +3400,41 @@ class EquationSolverApp(ctk.CTk):
                      fg_color=COLORS["accent"]).pack(side="left", padx=5)
         ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy).pack(side="right", padx=5)
         ctk.CTkButton(btn_frame, text="OK", command=apply_values).pack(side="right")
+
+    @staticmethod
+    def _si_unit_text(unit: Optional[str]) -> str:
+        """
+        Einheit der SI-Zahlen im Dialog Initial Values. Die abgeleitete Einheit einer Größe kann ein
+        Anzeige-Label sein (kW, bar, kJ/kg, %): neben dem SI-Startwert 100000 stand "kW". Gezeigt
+        wird die Einheit, in der die Zahl gilt (W, Pa, J/kg, -); "???" ohne bekannte Einheit.
+        """
+        if unit is None:
+            return "???"
+        if not unit or unit == 'dimensionless':
+            return "-"
+        try:
+            from units import ureg, normalize_unit, angle_exponent
+            unit_value = UnitValue.from_input(1.0, unit)
+            if scale_origin(unit):
+                return 'K'                              # °C/°F: die Zahl ist Kelvin
+            if unit_value.calc_value == 1.0:
+                return pretty_unit(unit)                # bereits die SI-Einheit
+            calc = (unit_value.calc_unit or '').strip()
+            if calc in ('%', '‰', '', 'dimensionless'):
+                return "-"
+            if angle_exponent(unit) and calc == unit.strip():
+                return pretty_unit(re.sub(r'\bdeg\b', 'rad', calc))
+            if ' ' not in calc:
+                return pretty_unit(calc)
+            quantity = ureg.Quantity(1.0, normalize_unit(unit))
+            for label in ('J/mol', 'J/(mol*K)', 'kg/mol', 'mol/s', 'C/mol', 'A/m^2', 'J/m^2', 'J/m^3', 'J/m'):
+                if quantity.dimensionality == ureg.Quantity(1.0, label).dimensionality:
+                    return pretty_unit(label)           # kohärente SI-Einheit mit eigenem Zeichen
+            # sonst: SI-Basiseinheiten
+            base = format(quantity.to_base_units().units, '~')
+            return base.replace(' ', '').replace('**', '^')
+        except Exception:
+            return pretty_unit(unit)
 
     @staticmethod
     def _start_value_line(var: str, val_str: str, value: float, unit: Optional[str]) -> str:
@@ -3215,10 +3693,9 @@ T_wb = HumidAir(T_wb, T=T_air, rh=rh, p_tot=p_tot)
 T_surface = 500 °C
 epsilon = 0.85
 A = 2 m^2
-sigma = 5.67E-8 W/(m^2*K^4)
 
-{Stefan-Boltzmann radiation}
-Q_rad = epsilon * sigma * A * T_surface^4
+{Stefan-Boltzmann radiation; sigma# is a constant of the program (button Constants)}
+Q_rad = epsilon * sigma# * A * T_surface^4
 
 {Peak wavelength (Wien's law)}
 lambda_max = Wien(T_surface)

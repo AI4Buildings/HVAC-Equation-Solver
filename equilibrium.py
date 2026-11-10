@@ -299,6 +299,58 @@ def _minimize_direct(A, c, gas, b):
     return np.maximum(result.x, 0.0)
 
 
+def _interior_start(A, gas, b):
+    """
+    Zulässiger Punkt A*n = b, n >= 0, in dem JEDES Gas eine möglichst große Menge hat (lineares
+    Programm: größte Mindestmenge der Gase). Er enthält die kondensierten Stoffe, ohne die die Gase
+    die Elementbilanz nicht erfüllen könnten (CaO neben CaCO3, damit CO2 entstehen kann; Graphit bei
+    Kohlenstoff-Überschuss). None, wenn kein Punkt mit lauter positiven Gasmengen existiert.
+    """
+    from scipy.optimize import linprog
+    k = A.shape[1]
+    gas_index = np.where(gas)[0]
+    objective = np.zeros(k + 1)
+    objective[k] = -1.0
+    A_ub = np.zeros((len(gas_index), k + 1))
+    for row, i in enumerate(gas_index):
+        A_ub[row, i], A_ub[row, k] = -1.0, 1.0
+    try:
+        lp = linprog(objective, A_ub=A_ub, b_ub=np.zeros(len(gas_index)),
+                     A_eq=np.hstack([A, np.zeros((A.shape[0], 1))]), b_eq=b,
+                     bounds=[(0, None)] * (k + 1), method='highs')
+    except Exception:
+        return None
+    if lp.status != 0 or not lp.x[k] > 1e-12 * np.max(np.abs(b)):
+        return None
+    return np.maximum(lp.x[:k], 0.0)
+
+
+def _is_optimal(A, c, gas, n) -> bool:
+    """
+    Erfüllt n die Optimalitätsbedingungen der Gibbs-Minimierung? Es gibt Elementpotentiale lambda mit
+    mu_i = a_i*lambda für alle vorhandenen Stoffe (Gase: mu_i = c_i + ln(n_i/N), kondensiert: c_i);
+    ein fehlender kondensierter Stoff ist nicht stabil (c_i >= a_i*lambda), ein fehlendes Gas hätte
+    nur eine Spur (N*exp(a_i*lambda - c_i)). Toleranz 1e-6 (in RT bzw. relativ zur größten Menge).
+    """
+    n_gas = float(np.sum(n[gas]))
+    largest = float(np.max(n))
+    if not (n_gas > 0 and largest > 0):
+        return False
+    present = n > 1e-8 * largest
+    mu = c.copy()
+    shown = gas & present
+    mu[shown] = c[shown] + np.log(n[shown] / n_gas)
+    lam = np.linalg.lstsq(A[:, present].T, mu[present], rcond=None)[0]
+    if np.max(np.abs(A[:, present].T @ lam - mu[present])) > 1e-6:
+        return False
+    slack = c - A.T @ lam
+    absent = ~present
+    if np.any(slack[absent & ~gas] < -1e-6):
+        return False
+    traces = n_gas * np.exp(np.clip(-slack[absent & gas], -745.0, 700.0))
+    return not np.any(traces > 1e-6 * largest)
+
+
 def _feasibility_error(A, b, present, in_species=(), out_species=()) -> str:
     """
     Ist die Elementbilanz A*n = b mit n >= 0 erfüllbar (NNLS)? Sonst Meldung mit dem Element, das
@@ -428,51 +480,82 @@ def _solve(out_species: Sequence[ideal_gas.Species], b_full: Dict[str, float], T
             result[i] = value * total
         return result
 
-    lam, ln_n = _initial_potentials(A_g, c_g, b)
-    active: List[int] = []
-    n_c = np.zeros(0)
-    converged = False
-    seen = set()
-    for _ in range(2 * len(cond_index) + 3):
-        A_c = A[:, active] if active else np.zeros((len(present), 0))
-        c_c = c[active] if active else np.zeros(0)
-        lam, ln_n, n_c, converged = _newton(A_g, A_c, c_g, c_c, b, lam, ln_n, n_c)
-        if not converged:
-            try:
-                lam, ln_n, n_c, converged = _robust(A_g, c_g, A_c, c_c, b, lam)
-            except (EquilibriumError, ValueError, FloatingPointError):
-                converged = False
-        if not converged:
-            break
-        # Kondensierte Stoffe: aktive mit negativer Menge entfernen, stabile inaktive hinzufügen
-        if active and np.min(n_c) < 0:
-            drop = int(np.argmin(n_c))
-            active.pop(drop)
-            n_c = np.delete(n_c, drop)
-        else:
-            inactive = [i for i in cond_index if i not in active]
-            driving = [(c[i] - A[:, i] @ lam, i) for i in inactive]
-            candidates = [(d, i) for d, i in driving if d < -1e-9]
-            if not candidates:
+    def iterate(lam, ln_n, active, n_c):
+        """Aktive-Mengen-Verfahren ab der gegebenen Menge kondensierter Stoffe; (Mengen oder None)."""
+        active, converged, seen = list(active), False, set()
+        for _ in range(2 * len(cond_index) + 3):
+            A_c = A[:, active] if active else np.zeros((len(present), 0))
+            c_c = c[active] if active else np.zeros(0)
+            lam, ln_n, n_c, converged = _newton(A_g, A_c, c_g, c_c, b, lam, ln_n, n_c)
+            if not converged:
+                try:
+                    lam, ln_n, n_c, converged = _robust(A_g, c_g, A_c, c_c, b, lam)
+                except (EquilibriumError, ValueError, FloatingPointError):
+                    converged = False
+            if not converged:
                 break
-            add = min(candidates)[1]
-            active.append(add)
-            n_c = np.append(n_c, 0.0)
-        key = tuple(sorted(active))
-        if key in seen:
-            break
-        seen.add(key)
-
-    n = np.zeros(len(species))
-    if converged and (not active or np.min(n_c) >= -1e-14):
+            # Kondensierte Stoffe: aktive mit negativer Menge entfernen, stabile inaktive hinzufügen
+            if active and np.min(n_c) < 0:
+                drop = int(np.argmin(n_c))
+                active.pop(drop)
+                n_c = np.delete(n_c, drop)
+            else:
+                inactive = [i for i in cond_index if i not in active]
+                driving = [(c[i] - A[:, i] @ lam, i) for i in inactive]
+                candidates = [(d, i) for d, i in driving if d < -1e-9]
+                if not candidates:
+                    break
+                add = min(candidates)[1]
+                active.append(add)
+                n_c = np.append(n_c, 0.0)
+            key = tuple(sorted(active))
+            if key in seen:
+                break
+            seen.add(key)
+        if not (converged and (not active or np.min(n_c) >= -1e-14)):
+            return None
+        amounts = np.zeros(len(species))
         z = np.clip(A_g.T @ lam - c_g, -745.0, 700.0)
-        n[gas] = np.exp(ln_n) * np.exp(z)
+        amounts[gas] = np.exp(ln_n) * np.exp(z)
         for value, i in zip(n_c, active):
-            n[i] = max(value, 0.0)
-    else:
-        # Rückfall: direkte Minimierung (wie fmincon) - Ergebnis prüfen
-        n = _minimize_direct(A, c, gas, b)
-        if np.max(np.abs(A @ n - b) / np.maximum(b, 1e-300)) > 1e-6:
+            amounts[i] = max(value, 0.0)
+        return amounts
+
+    def from_point(point):
+        """Aktive-Mengen-Verfahren ab einem zulässigen Punkt (Mengen aller Stoffe)."""
+        n_gas = float(np.sum(point[gas]))
+        present_now = point > 1e-9 * np.max(point)
+        if not (n_gas > 0 and present_now[gas].any()):
+            return None
+        mu = c.copy()
+        shown = gas & present_now
+        mu[shown] = c[shown] + np.log(point[shown] / n_gas)
+        lam0 = np.linalg.lstsq(A[:, present_now].T, mu[present_now], rcond=None)[0]
+        active0 = [i for i in cond_index if present_now[i]]
+        return iterate(lam0, float(np.log(n_gas)), active0, point[active0])
+
+    n = iterate(*_initial_potentials(A_g, c_g, b), [], np.zeros(0))
+    if n is None:
+        # Die Gase allein erfüllen die Elementbilanz nicht (ein Element nur in kondensierten Stoffen:
+        # CaCO3 -> CaO + CO2; Kohlenstoff im Überschuss) - das Verfahren oben beginnt ohne Kondensat
+        # und findet dann keinen Start. Zulässiger innerer Startpunkt mit den dafür nötigen
+        # kondensierten Stoffen (_interior_start), von dort dasselbe Verfahren über die
+        # Elementpotentiale. Letzter Rückfall: direkte Minimierung (wie fmincon) als Startpunkt.
+        # Ein Ergebnis gilt nur, wenn es die Optimalitätsbedingungen erfüllt - sonst Fehler statt
+        # eines Näherungswerts ohne Meldung.
+        interior = _interior_start(A, gas, b)
+        if interior is not None:
+            n = from_point(interior)
+        if n is None:
+            try:
+                rough = _minimize_direct(A, c, gas, b)
+            except Exception:
+                rough = None
+            if rough is not None and np.max(np.abs(A @ rough - b) / np.maximum(b, 1e-300)) <= 1e-6:
+                n = from_point(rough)
+                if n is None and _is_optimal(A, c, gas, rough):
+                    n = rough
+        if n is None:
             raise EquilibriumError(
                 f"EQUILIBRIUM bei T = {T:.6g} K, p = {p:.6g} Pa: keine Konvergenz der Gibbs-Minimierung")
     result = np.zeros(len(out_species))

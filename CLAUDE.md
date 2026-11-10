@@ -50,6 +50,7 @@ equation_solver/
 ├── data/nasa/           # thermo.inp, LICENSE.txt, NOTICE.txt (NASA CEA, Apache 2.0, unverändert)
 ├── humid_air.py         # CoolProp HumidAirProp Wrapper für feuchte Luft
 ├── radiation.py         # Schwarzkörper-Strahlungsfunktionen (Planck, vektorisiert)
+├── physical_constants.py  # Konstanten des Programms (sigma#, g#, R# ...) mit Wert und Einheit
 ├── units.py             # Einheitenhandling und Konvertierung (v3.0)
 ├── unit_constraints.py  # Einheiten-Propagation und Konsistenzprüfung (v3.0)
 ├── diagnostics.py       # Generische Fehleranalyse (Struktur, Numerik, Namens-Hinweise)
@@ -109,8 +110,26 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 
 ### Parser (parser.py)
 - Converts equation syntax to Python: `^` → `**`, `ln` → `log`
-- Comments: `"..."` and `{...}` (auch verschachtelt und mehrzeilig)
-- Dezimalkomma wird als Fehler gemeldet (Punkt verwenden); `·` als Malzeichen; `lg` = `log10`
+- Comments: `"..."` and `{...}` (auch verschachtelt und mehrzeilig). Ein Zeichenautomat für beide
+  Arten (`remove_comments`): `"` beginnt nur AUSSERHALB von `{...}` einen Kommentar - ein Zollzeichen
+  (`{Rohr 1/2" }`) fasste früher alles bis zum nächsten `"` zusammen, Zeilen dazwischen fielen still weg.
+  `#` ist kein Kommentarzeichen und wird mit Zeile gemeldet (Python verwarf sonst den Rest der Zeile,
+  das letzte Wort dahinter galt als Einheit: `m = 5 # Masse in g` -> 5 g)
+- **Konstanten des Programms** (`physical_constants.py`, Wunsch des Nutzers 10.11.2026): im Blatt mit
+  angehängtem `#` (`sigma#`, `g#`, `R#`, `k#`, `N_A#`, `F#`, `h#`, `c#`, `e#`, `C_1#`, `C_2#`, `b#`, `p_n#`,
+  `T_n#`) - ein eigener Namensraum: eine Größe `sigma`, `g`, `R`, `e`, `c` des Blatts bleibt frei und
+  kann eine Konstante nicht überschreiben. `mangle_keywords` benennt `name#` in `_cn_name` um (Anzeige
+  über `unmangle`/`display_name` wieder `name#`); `_parse_equations` trägt jede verwendete Konstante
+  als Vorgabe mit SI-Wert und Einheit ein - für Solver, Einheiten-Ableitung, Parameterstudien und
+  Anzeige eine gewöhnliche gegebene Größe (auch in Stoffwert- und EQUILIBRIUM-Argumenten).
+  `sigma# = ...` (auch mit Einheit, als Studie, als Startwert) ist ein Fehler; `Sigma#`, `foo#` ->
+  "Unbekannte Konstante" mit Liste; ein sonstiges `#` bleibt "kein Kommentarzeichen". Werte: SI 2019 /
+  CODATA 2018, sigma und R wie in radiation.py / ideal_gas.py (`sigma#*T^4` ist exakt
+  `Stefan_Boltzmann(T)`). Die Einheit einer Konstante macht ein Zahlenblatt nicht zu einem Blatt mit
+  Einheiten (`main._sheet_has_units`). Eine Quelle für Menü, Hilfe und README-Tabelle
+  (`physical_constants.table_lines`)
+- Dezimalkomma wird als Fehler gemeldet (Punkt verwenden); `·` als Malzeichen; `lg` = `log10`;
+  Operatoren außerhalb der Sprache (`&`, `|`, `<<`, `~`, `not`) mit Fundstelle (`_UNSUPPORTED_OPERATORS`)
 - **Fallunterscheidung** `IF(a, b, x, y, z)`: x für a < b, y für a = b, z für a > b
   (`parser.if_function`, elementweise für Arrays; NaN/komplexes a oder b -> NaN). Jede
   Schreibweise `if(`/`If(` wird in `mangle_keywords` zu `IF(` (sonst Python-Schlüsselwort);
@@ -134,7 +153,28 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - **Namen nur aus a-z, A-Z, 0-9 und _** (`parser._check_ascii_names`): griechische Buchstaben und
   Umlaute (Φ, η, Q_wärme) werden beim Einlesen mit Zeile gemeldet (sonst fielen sie still aus den
   Gleichungen); Einheiten wie µm sind erlaubt
-- `ceil`, `floor`, `round` (z.B. Anzahl Geräte); Einheit wie das Argument
+- `ceil`, `floor`, `round` (z.B. Anzahl Geräte); Einheit wie das Argument. `round` rundet kaufmännisch
+  (`parser.commercial_round`: 2.5 -> 3, -2.5 -> -3; Festlegung 10.11.2026, früher numpy zur geraden Zahl)
+- **Funktionsname als Größe** (`cp = cp(air, T=T_1, p=p_1)`, danach `cp_2 = cp(...)`): steht der Name
+  nicht vor einer Klammer, ist er eine Größe und wird wie ein Schlüsselwort intern umbenannt
+  (`mangle_keywords`: `cp` -> `_kw_cp`, Anzeige wieder `cp`). Früher verdrängte der Wert die Funktion im
+  Auswertungskontext: "'float' object is not callable", je nach Reihenfolge der Zeilen. Das erste
+  Argument eines Stoffwert-/HumidAir-Aufrufs bleibt ein Name (`HumidAir(cp, ...)`), Text in Hochkommas
+  (Einheiten erzeugter Gleichungen) unverändert; `value(t, min)`: die Einheit wird zurückbenannt
+- Funktionsnamen: mathematische klein (`SIN(30)` -> Meldung mit der richtigen Schreibweise);
+  Stoffwert-, HumidAir- und Strahlungsfunktionen in jeder Schreibweise (`parser._call_name`:
+  `HUMIDAIR`, `BlackBody`, `WIEN` - früher "ist keine Funktion")
+- Zahlen: `1e400` (inf) ist als Vorgabe, in einer Werteliste und als Literal in einer Gleichung ein
+  Fehler mit Zeile (früher "cannot convert float infinity to integer"); `inf`, `nan`, `infinity` sind
+  Namen, keine Zahlen (`_DECIMAL_NUMBER` statt `float()` im ersten Durchgang)
+- Parameterstudie `10:1:0` (Schrittweite führt vom Endwert weg) bzw. Schrittweite 0: Meldung mit Zeile
+  und Vorschlag (`VectorSyntaxError` ist ein `EquationSyntaxError`; früher ohne Zeile bzw.
+  "Unbekannte Einheit ':10'")
+- **Einzelner Name rechts** (`enthalpy(water, T=T_1, p=p_1) = h_1`): intern steht der Name links
+  (`(h_1) - (...)`), damit direkte Auswertung, Tearing und Mehrfach-Tearing die Gleichung wie
+  `h_1 = ...` behandeln - die Lösbarkeit hing sonst von der Schreibweise ab (6 von 134 Lehrbeispielen
+  scheiterten mit vertauschten Seiten). Anzeige und Meldungen nennen die Zeile wie im Blatt
+  (`solver._written_reversed` für "links = ..., rechts = ...")
 - **Fortsetzungszeilen**: eine Gleichung geht in einer offenen Klammer weiter, wenn die Zeile mit
   `(`, `,` oder einem Operator endet bzw. die nächste damit beginnt (`parser._join_bracket_lines`,
   Original für Meldungen ebenso zusammengefügt); eine vergessene `)` ohne Fortsetzung bleibt ein
@@ -170,7 +210,14 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   (numerischer Ausdruck + Einheit) are treated as constants
 - **Doppelte Vorgabe** derselben Größe (`x = 5` ... `x = 3`): die zweite Zeile ist eine Prüfgleichung
   - gleiche Werte zulässig, verschiedene -> "Widersprüchliches System" mit der Zeile (früher gewann
-  still die letzte); bei Parameterstudien/Wertelisten ein Fehler
+  still die letzte); bei Parameterstudien/Wertelisten ein Fehler. Mit Einheit steht sie intern als
+  `quantity(Zahl, Einheit)` (dieselbe Größe wie die erste Vorgabe: `T = 20 °C` zweimal ist Temperatur
+  = Temperatur, früher Fehlalarm "Kombination absoluter Temperaturen")
+- `name = quantity(Zahl, Einheit)` bleibt eine Gleichung (`parser._angle_dependent`): als beim Einlesen
+  ausgewertete Zahl ginge die Einheit verloren (`b = quantity(45, deg)`, `sin(b)` rechnete 0.785 Grad)
+- Argument-Ausdrücke von Stoffwert-/HumidAir-Aufrufen werden wie jeder Ausdruck gelesen
+  (`_reduce_special_calls_to_tokens`): `T=max(T_1, T_2)`, `p=p_0*exp(-k)` - Funktionsnamen darin sind
+  keine Unbekannten; Zahlen wie `1.E-3`, `2.e5` sind Zahlen (kein Bezeichner E/e)
 - Eine Zeile ohne `=` auf oberster Ebene ist ein Fehler, auch wenn `=` nur in einem Aufruf steht
   (`+ enthalpy(water, T=T_1, p=p_1)` als Fortsetzung ohne Klammer fiel früher still weg; Meldung
   nennt die Fortsetzung in einer offenen Klammer)
@@ -249,7 +296,28 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
      (`_all_satisfied`): Residuum <= 1e-12 der Termgröße ohne Untergrenze, mindestens eine Gleichung
      mit Termen ungleich null - verschwinden alle Terme, ist es Underflow (`exp(-x^2) = 0`,
      `1e-300*sin(y)`), kein Plateau; bei x = 0 keine Aussage (kein Maßstab). Ebenso in der 1-D-Suche
-     (f und Nachbarpunkt exakt 0, Terme ungleich 0)
+     (f und Nachbarpunkt exakt 0, Terme ungleich 0).
+     **Größe ohne Wirkung** (`_without_effect`): verschwinden alle Terme, fehlt dieser Maßstab - dann
+     zählt, ob Residuum UND Terme für Werte jeder Größenordnung und beider Vorzeichen exakt null bleiben
+     (`0*x = 0`: Massenstrom 0 in `Q = m*c*(T_2 - T_1)` mit Q = 0). Dann ist die Größe nicht bestimmt
+     -> "Lösung nicht eindeutig" (früher "Lösung gefunden" mit beliebigem Wert: 1 K, 20 °C, 0.25 je nach
+     Schreibweise; in einer Studie am Punkt m = 0). Underflow gilt nur weit draußen und bleibt ohne
+     Lösung. In `_non_unique_solution` ist eine Nullzeile der Jacobi-Matrix (keine Blockgröße wirkt auf
+     die Gleichung: `a*y = 0` mit a = 0) fehlender Rang, kein Grund für "eindeutig"; in der 1-D-Suche:
+     an ALLEN gültigen Testpunkten exakt null -> nicht eindeutig.
+     Schrittweite der Jacobi-Matrix: bis 40 Vergrößerungen (je Faktor 100), bis die Größe wirkt -
+     eine numerisch verschwindende Größe (3.5e-30 statt 0) galt nach zwölf als Plateau
+   - **Asymptote** (`_isolated_root`): ein Block aus einer Gleichung mit einer Unbekannten, den der
+     simultane Löser annimmt, muss wie in der 1-D-Suche eine echte Nullstelle sein (|f| klein gegen
+     |f| bei x ± 5 %) - `eps = 1 - exp(-NTU)` mit eps = 1 bzw. `tanh(x) = 1` lieferten sonst einen
+     beliebigen großen Wert als Lösung (NTU = 25.5); jetzt "nicht eindeutig" (ab NTU ≈ 37 ist die
+     Gleichung in Gleitkommazahlen exakt erfüllt)
+   - **Größe hebt sich heraus** (`_cancels_out`): `x = x + 1` ist weit draußen (x = 5e30) nur durch
+     Rundung "erfüllt" - kein Bereich von Lösungen, sondern ein Widerspruch. Kriterium: an allen
+     auswertbaren Punkten (jede Größenordnung, beide Vorzeichen) weicht das Residuum höchstens um die
+     Rundung der Terme vom Wert am best aufgelösten Punkt ab, und dieser liegt an mindestens sechs
+     Punkten klar darüber. Meldung "hebt sich aus der Gleichung heraus" (auch über eine Tearing-Kette:
+     `x = y + 1`, `y = x`); echte Plateaus bleiben "nicht eindeutig"
 5. **Iteration**: Schritte 2-4 werden wiederholt bis alle Gleichungen gelöst sind
 
 #### Robuste Wurzelfindung für einzelne Gleichungen
@@ -265,8 +333,12 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
   über einen Plausibilitätscheck verworfen, ebenso Underflow-Plateaus abklingender Funktionen)
 - **Wurzelauswahl**: Bei mehreren Wurzeln wird die dem Startwert nächstgelegene gewählt
   (Tie-Break bis auf Rundung gleicher Abstände: positive Wurzel); `sin(alpha) = 0.5` liefert 30,
-  nicht 150 oder −210. Auch die schnelle Newton-Phase: eine Newton-Wurzel gilt nur, wenn im
-  Intervall Startwert ± Abstand kein weiterer Vorzeichenwechsel liegt (sonst Bracket-Suche).
+  nicht 150 oder −210. Auch die schnelle Newton-Phase: eine Newton-Wurzel gilt nur, wenn die Funktion
+  im Intervall Startwert ± Abstand monoton ist (`nearer_root_possible`: 65 zum Startwert hin verdichtete
+  Stützstellen, kein weiterer Vorzeichenwechsel UND kein Richtungswechsel) - sonst entscheidet die
+  Bracket-Suche. Früher nur Vorzeichenwechsel an gleichabständigen Stützstellen: bei periodischen
+  Funktionen sprang Newton über viele Perioden (`tan(be) = 40` ab 0.5 -> 13948 statt 88.57; 37 von
+  1700 Gleichungen cos/tan(al) = c), gleiche Abstände ließen den Verlauf monoton erscheinen (Aliasing).
   **Blöcke per Tearing**: Abstand ALLER Blockgrößen zu ihren Startwerten (je relativ zum
   Startwert, `block_anchors`; Gleichstand: größere Werte in Blattreihenfolge) - nicht nur der
   Tearing-Größe, sonst hinge die Lösung von der Schreibweise ab (`u = v^2` mit `v = u - 6` bzw.
@@ -347,7 +419,19 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - **Komplexe Zwischenwerte** (z.B. `Ra^(1/6)` mit negativem `Ra`) gelten als ungültige
   Auswertung, nicht als Absturz
 - **Konsistenzprüfung**: Constraint-Gleichungen (0 Unbekannte) mit großem Residuum
-  führen zu "Widersprüchliches System" statt stillschweigendem Erfolg
+  führen zu "Widersprüchliches System" statt stillschweigendem Erfolg. Maß (`_check_violated`,
+  `CHECK_TOLERANCE` = 1e-3, Festlegung 10.11.2026): Abweichung relativ zum größeren Betrag der beiden
+  Seiten (`_check_scale`); ist eine Seite null (`... = 0`), stehen sich die positiven und negativen
+  Summanden der obersten Ebene gegenüber - `m_3 = m_1 + m_2` und `m_1 + m_2 - m_3 = 0` werden gleich
+  bewertet. Ein gerundeter Kontrollwert (4.18 statt 4.1823) gilt als erfüllt, 4.3 nicht. Dazu das
+  Rauschen der Auswertung (1e-6 der inneren Termgröße, numerisch null gegenüber gleichartigen
+  Größen). Früher 1e-4 relativ zur INNEREN Termgröße: bei `Q = m*c*(T_1 - T_2)` zählte `m*c*T_1` in
+  Kelvin - 3 % Abweichung galten als erfüllt. Folge der Kelvin-Rechnung: bei Temperaturen sind
+  1e-3 etwa 0.3 K
+- **Prüfgleichung gegen eine Wurzelwahl** (`_checks_first`): widerspricht eine Prüfgleichung einer
+  Größe, die iterativ aus einer Gleichung mit mehreren Wurzeln bestimmt wurde (`x^2 = 4` -> 2, danach
+  `x^3 = -8`), wird einmal mit der Prüfgleichung vor dieser Gleichung neu gelöst - sonst hinge
+  "widersprüchlich" von der Reihenfolge im Blatt ab. Echte Widersprüche bleiben
 - **Parameterstudien**: Warm-Start - die Lösung des Vorpunkts ist Startwert des nächsten
   Punkts (verhindert Sprünge zwischen Lösungsästen)
 - **Auswertungsfehler** (0/0, CoolProp-/HumidAir-Fehlermeldungen) werden in der Meldung
@@ -362,6 +446,9 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - Sweep-Variablen werden als Konstanten für jeden Punkt behandelt
 - Für jeden Sweep-Punkt wird `solve_system` mit Block-Dekomposition aufgerufen
 - Vektorisierte Auswertung für direkte Funktionen ohne Iteration
+- Alle Studien/Wertelisten müssen gleich lang sein (`solver.sweep_length_error`) - geprüft VOR der
+  vektorisierten Auswertung und auch in Blättern ohne Gleichungen (früher blieben verschieden lange
+  Spalten stehen, wenn keine Gleichung beide zugleich enthielt)
 
 ### Optimierung (optimizer.py)
 
@@ -376,17 +463,25 @@ Anweisung im Blatt (eigene Zeile, nach ',' Fortsetzung in der nächsten Zeile):
   Zielfunktion = Wert der Zielgröße. Raster über den ganzen Bereich (21 Punkte bzw. ~100
   bei mehreren Größen, Schlangenlinie), dann lokal: Brent beschränkt (1 Größe) bzw. Powell
   beschränkt (mehrere) in normierten Koordinaten [0, 1]; log. Raster bei > 2 Dekaden.
-  Kandidaten ohne Lösung gelten als schlecht (Strafwert), nicht als Abbruch
+  Kandidaten ohne Lösung gelten als schlecht (Strafwert), nicht als Abbruch.
+  Mehrere Größen (`_local_search`): Powell abwechselnd mit Nelder-Mead vom jeweils besten Punkt,
+  fertig erst, wenn ein Verfahren konvergiert UND das vorige nicht mehr verbessert - Powell allein
+  blieb in schmalen, schräg oder gekrümmt liegenden Tälern stehen und meldete ein "Minimum", das
+  keines war (`(x+y-3)^2 + 1000*(x-y)^2 + 1`: 7.5 % zu hoch; Rosenbrock 0.011 statt 0). Ohne
+  Konvergenz: kein Erfolg, Meldung "Die Suche ist nicht konvergiert"
 - Meldungen: Minimum/Maximum, "x an der Unter-/Obergrenze", Zahl der Lösungen und der
   Kandidaten ohne Lösung; Zielgröße konstant -> "ändert sich nicht" (Teillösung)
 - Mehrere Anweisungen: der Reihe nach; Prüfung, ob jede Zielgröße bei den Endwerten ihr
-  Optimum behält (sonst lokale Runden, max. 5), und Kopplungstest durch Verschieben der
-  Größen der anderen Anweisungen -> Hinweis "beeinflussen sich gegenseitig"
+  Optimum behält (sonst lokale Runden, max. `MAX_ROUNDS` = 20), und Kopplungstest durch Verschieben
+  der Größen der anderen Anweisungen -> Hinweis "beeinflussen sich gegenseitig". Sind die Runden
+  erschöpft, ohne dass das Ergebnis stimmig ist: kein Erfolg, Meldung "noch kein stimmiges Ergebnis"
+  (früher wurde der Zwischenstand als Gleichgewicht ausgegeben)
 - Mit Parameterstudie/Wertelisten: Optimum je Punkt (`optimize_parametric` ->
   `solve_parametric(point_solver=..., extra_result_vars=...)`), Optimum des Vorpunkts als
   zusätzlicher Kandidat
 - Zeitlimit `OPTIMIZE_TIME_LIMIT` = 120 s je Optimierung (je Punkt); danach bestes Ergebnis
-  mit Meldung "Zeitlimit der Optimierung ..."
+  mit Meldung "Zeitlimit der Optimierung ..." - das beste GERECHNETE der laufenden Anweisung
+  (früher blieb der Startpunkt, die Bereichsmitte, stehen)
 - `solver._inferred_units` speichert die Einheiten-Propagation je Gleichungssatz zwischen
   (sonst ~80 % der Rechenzeit bei vielen Lösungen desselben Systems)
 
@@ -412,11 +507,46 @@ Sonderbehandlung für bestimmte Gleichungstypen.
 Überbestimmte, aber widerspruchsfreie Teile sind erlaubt (der Solver prüft die
 zusätzlichen Gleichungen); bei Widerspruch nennt die Meldung beide Seiten.
 
+Zeilennummern der Meldungen (`_source_line_numbers`): über den Text der Originalzeile, nur in Zeilen,
+die Code tragen - derselbe Text in einem mehrzeiligen Kommentar (auskommentierte erste Fassung) ist
+nicht die Gleichung. Eine wörtlich doppelte Zeile erscheint mit jeder ihrer Zeilen ("Zeilen 2, 3, 4").
+
 ### Thermodynamik (thermodynamics.py)
 - CoolProp wrapper with intuitive syntax
 - Functions: `enthalpy`, `entropy`, `density`, `volume`, `intenergy`, `quality`, `temperature`, `pressure`, `viscosity`, `conductivity`, `prandtl`, `cp`, `cv`, `soundspeed`, `gibbs` (g = h - T·s; mit
   REFERENCE um dh - T·ds verschoben), `molarmass(fluid)` (kg/mol SI, Anzeige kg/kmol; auch CoolProp)
 - Input parameters: `T`, `p`, `h`, `s`, `x`, `rho`, `d`, `u`, `v`
+- **Nur in einer Phase definiert** (`_SINGLE_PHASE_ONLY`): cp, cv, viscosity, conductivity, prandtl,
+  soundspeed sind im Nassdampfgebiet (0 < x < 1, auch aus p,h oder T,rho) eine Meldung mit Verweis auf
+  x=0 bzw. x=1 - CoolProp lieferte dort Zahlen ohne Bedeutung (Wasser 100 °C: cp = 11.8 kJ/(kg K) bei
+  x = 0.3, 2.65 bei x = 0.5). Festlegung 10.11.2026
+- **Unter dem Tripelpunkt** (Festlegung 10.11.2026: "wichtig ist, dass es richtig ist, und wenn nicht,
+  dass es einen Hinweis gibt"): im Gleichgewicht ist der Stoff dort Dampf oder fest.
+  - **Dampf** (T unter der Tripeltemperatur, p höchstens der Sublimationsdruck) wird richtig gerechnet:
+    CoolProp nimmt dort (T, p) nicht an, wohl aber (T, rho) - die Dichte so, dass der Druck stimmt
+    (`_vapour_density`).
+  - **Sättigung** (x gegeben): p und T liegen auf der Sublimationslinie (`_sublimation_pressure`,
+    `_sublimation_temperature`): `pressure(water, T=-10 °C, x=1)` = 259.9 Pa über Eis, `temperature(water,
+    p=400 Pa, x=1)` = Reifpunkt -5.05 °C, x = 1 ist der Dampf über Eis. Es gibt im Gleichgewicht nur
+    EINEN Sättigungsdruck - die 286 Pa der über den Tripelpunkt verlängerten Siedelinie (unterkühltes
+    Wasser, +10 %; bei -20 °C +22 %) lieferte das Programm am 10.11. kurzzeitig mit Hinweis; der Nutzer
+    hat das zu Recht beanstandet. Passt zu HumidAir (p_w bei rh = 1 = Sublimationsdruck mal f).
+    Daten der festen Phase führt CoolProp nur für Wasser (Eis nach IAPWS, `HAProps_Aux('p_ws')`,
+    `_has_solid_data`) - eine Frage der Datenlage, keine Sonderregel für einen Stoff.
+  - **Kondensierte Phase** (Flüssigkeitsgebiet mit T, p; x < 1; Stoffe ohne Daten der festen Phase):
+    keine richtigen Daten. Geliefert wird die unterkühlte Flüssigkeit (metastabil), solange sie
+    thermodynamisch stabil gerechnet wird (cp > 0, (dp/drho)_T > 0, `_stable_state`) und nicht unter
+    der stoffabhängigen Grenze liegt (`_metastable_limit`: Wasser -40.6 °C) - mit Hinweis "ⓘ ... nicht
+    für den stabilen Zustand" (`main._supercooled_hints`; `thermodynamics.collecting_supercooled`
+    sammelt die Zustände beim Auswerten mit der Lösung, alle Punkte einer Studie). Darunter (Wasser
+    -52 °C lieferte Dichte 3790 kg/m³) und im Gebiet der festen Phase (zwischen Sublimations- und
+    Tripeldruck) eine Meldung. Mit Schmelzdruckkurve (CoolProp: Wasser, CO2, N2, Propan;
+    `_melting_temperature`) zählt die Schmelztemperatur beim Druck des Zustands: Wasser bei -0.5 °C und
+    200 bar ist stabil flüssig (Schmelztemperatur -1.54 °C) - kein Hinweis; ohne Daten der festen Phase ist "Dampf oder fest" nicht entscheidbar
+    (Meldung).
+  - Toleranz relativ 1e-4: 0 °C gilt bei Wasser (0.01 °C) nicht als unter dem Tripelpunkt
+    (`enthalpy(water, T=0 °C, x=0)` war früher ein Fehler). Kältemittel bei Minusgraden sind nicht
+    betroffen. Geprüft gegen die unabhängig programmierte IAPWS-Formel (R14-08), ISO 13788 und HumidAir
 - Stoffname mit Präfix `IG:` -> `ideal_gas.py` (vor CoolProp, ohne REFERENCE)
 
 ### Ideale Gase und kondensierte Stoffe (ideal_gas.py, Präfix IG:)
@@ -456,7 +586,9 @@ zusätzlichen Gleichungen); bei Widerspruch nennt die Meldung beide Seiten.
 ### Chemisches Gleichgewicht (equilibrium.py, Anweisung EQUILIBRIUM)
 - Anweisung im Blatt (`parser.parse_equilibria`, eigene Zeile wie MINIMIZE; IN/OUT auch in eigenen
   Zeilen, nach ',' Fortsetzung, Leer- und Kommentarzeilen dazwischen erlaubt):
-  `EQUILIBRIUM T=..., p=...  IN IG:A = Menge, ...  OUT IG:B = Variable, ...`. Schlüsselwörter nur
+  `EQUILIBRIUM T=..., p=...  IN IG:A = Menge, ...  OUT IG:B = Variable, ...`. Kommentare in den
+  Anweisungszeilen bleiben beim Leeren stehen (`parser._comments_only`: ein mehrzeiliger Kommentar,
+  der in einer Anweisungszeile beginnt oder endet, verlor sonst seine Klammer). Schlüsselwörter nur
   vor einem Namen (`EQUILIBRIUM` allein oder mit Text, IN/OUT vor dem Stoff): Variablen `equilibrium`,
   `in`, `out` bleiben möglich. `parse_equations` macht die Zeilen zu Leerzeilen und hängt je OUT-Stoff
   eine Gleichung `var = equilibrium('IG:B', 'IG:A|...', 'IG:B|...', T, p, Mengen...)` an (Fehler darin
@@ -505,6 +637,17 @@ zusätzlichen Gleichungen); bei Widerspruch nennt die Meldung beide Seiten.
   Ergebnisse zwischengespeichert (`_equilibrium_or_error`; die 1-D-Suche rief einen unzulässigen Punkt
   hundertfach). Derselbe Stoff mehrfach unter IN: Mengen addiert (zwei Eintrittsströme); IN-Mengen
   in verschiedenen Einheiten (mol neben mol/s) -> Einheitenwarnung
+- Erfüllen die Gase allein die Elementbilanz nicht (ein Element nur in kondensierten Stoffen:
+  CaCO3 -> CaO + CO2; Kohlenstoff im Überschuss), findet das Verfahren ohne Kondensat keinen Start:
+  dann zulässiger innerer Startpunkt (`_interior_start`: lineares Programm, größte Mindestmenge der
+  Gase) mit den dafür nötigen kondensierten Stoffen, von dort dasselbe Verfahren über die
+  Elementpotentiale. Der letzte Rückfall (trust-constr) dient nur noch als Startpunkt bzw. gilt nur,
+  wenn er die Optimalitätsbedingungen erfüllt (`_is_optimal`) - früher wurde sein Ergebnis nur auf die
+  Elementbilanz geprüft (Kalkbrennen: 0.67 mol CO2 bei jeder Temperatur; C + O2 mit C-Überschuss unter
+  800 K "keine Konvergenz"). Geprüft gegen K = exp(-Δg°/RT) mit denselben NASA-Daten (6 Stellen)
+- Geladene Stoffe (Ionen, Elektronen: Element E in thermo.inp, z.B. `IG:Ar+`, `IG:e-`) unter IN oder
+  OUT werden beim Einlesen abgelehnt (Festlegung 10.11.2026): das Verfahren führt keine Ladungsbilanz,
+  ihre Menge kam stets als 0 heraus. Stoffwerte der Ionen bleiben verfügbar
 - Taupunkt: n_L = 0 gilt für jedes T oberhalb -> "Lösung nicht eindeutig" (Plateau, siehe Solver);
   Umkehraufgabe mit kleiner Menge (n_L = 1e-9*n_W) wird gelöst (Annahme stetiger Vorzeichenwechsel)
 - Elementzusammensetzung aus thermo.inp (Spalten 11-50, `Species.elements`), `standard_gibbs_RT`
@@ -540,7 +683,11 @@ zusätzlichen Gleichungen); bei Widerspruch nennt die Meldung beide Seiten.
   ("als Anteil (0.5) oder mit Einheit (50 %)")
 - **Sättigung** (`humid_air._saturation`, für jede Eingabekombination): w > w_s(T, p)·(1 + 1e-6)
   -> Meldung "Zustand übersättigt: w = … > w_s = … bei T, p" (Nebel/Kondensat in der Bilanz
-  vergessen) statt stiller Werte; gesättigte Luft ergibt rh = 1 (CoolProp lehnt rh = 1 + ε ab)
+  vergessen) statt stiller Werte; gesättigte Luft ergibt rh = 1 (CoolProp lehnt rh = 1 + ε ab) -
+  unter jedem Namen der relativen Feuchte (rh, phi: CoolProp-Schlüssel R) und nur, wenn der Zustand
+  an der Sättigung liegt; ein negativer Wassergehalt ist eine Meldung (früher rh = 1)
+- Zwei Angaben, die beide nur den Wassergehalt beschreiben (w, p_w, T_dp), legen die Temperatur nicht
+  fest: Meldung (früher lief die Suche nach T an ihren Rand: "übersättigt ... bei T = -60 °C")
 
 **Examples:**
 ```
@@ -577,7 +724,8 @@ rho = HumidAir(rho_tot, T=25°C, rh=0.5, p_tot=1bar)
   ergibt einen Hinweis "ⓘ" mit Wert in m und µm (`parser.wavelength_literals`)
 - Einheiten auch direkt in den Argumenten: `Eb(500 °C, 5 µm)`, `Wien(500 °C)`
 - Eingabe: `T = 500 °C` oder `T = 773.15 K`
-- Groß-/Kleinschreibung egal: `Eb` = `eb`, `Blackbody` = `blackbody`
+- Groß-/Kleinschreibung egal: `Eb` = `eb` = `EB`, `Blackbody` = `blackbody` = `BlackBody`
+- Nicht definierte Argumente (NaN, gescheiterter Punkt einer Studie) ergeben NaN (früher Anteil 1 bzw. 0)
 
 ## Einheiten
 
@@ -722,13 +870,35 @@ U = 0.3 W/(m²·K)         {Malpunkt erlaubt}
 sigma = 5.67e-8 W/(m²·K⁴) {hochgestellte Exponenten: alle Ziffern und ⁻ (s⁻¹, kg·m⁻³) -> ^n}
 ```
 
+- **Positivliste der Einheitenzeichen** (Festlegung 10.11.2026, `units.unit_not_allowed`, geprüft in
+  `unit_value_strict` und für `value()`/`quantity()`): pint liest fast jede Buchstabenfolge als Einheit
+  (`5 Min` = Mega-Inch = 127 km, `75 PS` = Petasiemens, `20 qm`, `5 M`, `20 ct/kWh`, `T = 20 Grad` =
+  Giga-Radiant, `35 m^3/(h*P)` mit P = Poise). Als Eingabe gelten nur: die Zeichen aus den eigenen
+  Tabellen (`_program_unit_symbols`) und `_EXTRA_UNITS` (d, a, sr, in, ppm, ha, PJ, EJ, gon, turn);
+  ein SI-Vorsatz (`_SI_PREFIXES`) vor einer SI-Einheit (`_PREFIXABLE_UNITS`), wenn pint das Zeichen
+  genauso liest (`hbar` ist bei pint die Planck-Konstante); zusammengeschriebene Zeichen wie bisher
+  (kgK). Eine Ziffer 1 direkt nach einem Zeichen ist kein Exponent (`h3 = 2 h1`: Malzeichen vergessen
+  - früher 2 Stunden). `KW`, `KJ`, `KPa` werden mit Hinweis auf die Schreibweise gemeldet (früher
+  still K·W), ausgeschriebene Namen mit dem Zeichen (`sec` -> s). Die Liste gilt nur für eingegebene
+  Einheiten, nicht für intern erzeugte Labels. Alle 81 verschiedenen Einheiten der 134 Lehrbeispiele
+  sind zulässig. Aliase (U/min, rpm, W/mK) gelten als Ganzes. Griechisches μ (U+03BC) wie das
+  Mikro-Zeichen (U+00B5); `in` (Zoll) auch in `value(d, in)`
 - Unbekannte Einheiten sind ein **Fehler** ("Unbekannte Einheit 'qcm'") - früher wurde
   der Zahlenwert stillschweigend unumgerechnet übernommen. Auch eine Einheit, die pint liest, aber
   nicht nach SI umrechnen kann, ist ein Fehler (nie unumgerechnet weiterrechnen).
-- Nenner ohne Klammern (`units._denominator_units`): pint liest ihn als Ganzes (`kg/kWh`, `1/kPa`,
-  `kg/MJ`, `W/hPa` - Präfixe bleiben Präfixe; früher k = Boltzmann-Konstante, M = molar); nur einen
-  unbekannten Nenner zerlegt das Programm in bekannte Einheiten (`kJ/kgK`, `W/cmK`, `W/m²°C`).
-  Feste Schreibweise: `W/mK` ist W/(m·K), nicht W/Millikelvin
+- Zusammengeschriebene Zeichen (`units._compound_symbol`, im Zähler, im Nenner und in Klammern gleich:
+  `kJ/kgK` = `kJ/(kgK)`): was pint als Ganzes kennt, liest pint (`kg/kWh`, `1/kPa`, `kg/MJ`, `W/hPa` -
+  Präfixe bleiben Präfixe; früher k = Boltzmann-Konstante, M = molar). Ein unbekanntes Zeichen (`kgK`,
+  `cmK`, `kg°C`) zerlegt das Programm nur an einer Zeichengrenze (vor einem Großbuchstaben bzw. vor
+  °C/°F) und nur in Einheitenzeichen, die es selbst verwendet (`_program_unit_symbols`, aus den eigenen
+  Tabellen). Wörter wie Tag, Std, sek, Pers, Jahr sind damit unbekannte Einheiten - früher wurden sie in
+  alles zerlegt, was pint kennt (`l/Tag` = Tesla·Jahr·Gramm, `km/Std` = Stokes·Tag, ohne Meldung).
+  Feste Schreibweise: m vor einer Temperatureinheit in einer zusammengesetzten Einheit ist das Meter
+  (`W/mK`, `W/(mK)`, `W/m°C` = W/(m·K), nicht W/Millikelvin); `mK` allein bleibt Millikelvin
+- `UnitValue.from_si_base` rechnet für jede Einheit zurück (auch `°C/h`, `kW/°C`: Quantity statt
+  Multiplikation, sonst Nullpunkt und Faktor aus `unit_affine`) - nie der SI-Wert unter dem Label
+- Einheiten-Auswahl (`get_compatible_units`): Liste gleicher Dimension UND gleichen Winkel-Exponenten
+  (rad ist in pint dimensionslos - 1/h, rpm, Hz bekamen sonst die Liste von rad/s)
 - °C/°F in zusammengesetzten Einheiten sind Kelvin-Differenzen (`2 °C/h`, `1/°C`, `W/(m²·°C)`)
 - Drehzahl: `rpm`, `U/min` = 1/min, `rps`, `U/s` = 1/s (Umdrehungen je Zeit, u = π·D·n; pint
   rechnete rpm als 2π/min und U als Enzym-Einheit)
@@ -845,6 +1015,34 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
 - nicht bestimmbar: berechnete Größen gelten als absolut (°C nach Settings; Startwerte wie
   absolut), in K eingegebene Größen werden wie eingegeben in K angezeigt
   (`main._kelvin_display`) - eine in K eingegebene Differenz erscheint nie als -263 °C
+- Anzeige: berechnete Größen, deren Charakter nicht bestimmbar ist und die über die Gleichungen nur mit
+  ebensolchen, in K eingegebenen Größen zusammenhängen, erscheinen wie eingegeben in K
+  (`main._kelvin_like_inputs`: `dT = 10 K`, `dT_h = dT/2` erschien als -268.15 °C; ebenso `2*dT`,
+  `a - b`). Trifft die Kette auf eine Temperatur mit bestimmtem Charakter oder eine in °C eingegebene,
+  bleibt es bei der Vorgabe
+- Anzeige: eine als Summe von Temperaturen DEFINIERTE Größe (`dT = T_1 - T_2`), deren Charakter sonst
+  nicht bestimmt ist, erhält ihn aus ihren Summanden (`_settle_defined_sums`) statt eines eigenen
+  Vorgabewerts - sonst wäre Punkt - Punkt ein Punkt (`T_2 = T_1*(p_2/p_1)^k`, `dT = T_1 - T_2`:
+  324 K erschienen als 51 °C). In K eingegebene Summanden ohne bestimmten Charakter bleiben offen
+- Anzeige: die Produktregel gilt nicht in einem Gesetz auf der Verhältnisskala Kelvin
+  (`_ratio_scale_law`): steht eine sicher absolute Temperatur als Faktor in einem Produkt/Quotienten
+  ohne Temperatur-Dimension (`p_1/T_1 = p_2/T_2`, `1 - T_u/T_m`), sind die übrigen Temperaturen dort
+  keine Differenzen (sonst T_2 "Differenz" und `dT = T_1 - T_2` absolut: 58.9 K als -214 °C). Ebenso
+  eine Mischung, deren Gewichte sich nicht zu eins ergänzen (`m_3*T_3 = m_1*T_1 + m_2*T_2` mit
+  m_3 ungleich m_1 + m_2, verschiedene Wärmekapazitäten): T_3 ist absolut (früher über die
+  Produktregel in K angezeigt)
+- Schwingt die Iteration der Charaktere (zwei Größen bestimmen sich gegenseitig aus verschiedenen
+  Regeln), sind die wechselnden Größen nicht bestimmt (früher hing das Ergebnis von der Zahl der
+  Durchläufe ab)
+- Faktor auf der Verhältnisskala (`DimensionInfo.ratio`): eine dimensionslose Zahl, gebildet mit einer
+  ABSOLUTEN Temperatur (`T_2/T_1`, `ln(T_2/T_1)`, `1 - T_u/T_m`). Differenz mal diesem Faktor ist
+  nicht notwendig eine Differenz - `T_m = (T_2 - T_1)/ln(T_2/T_1)` (thermodynamische
+  Mitteltemperatur) bleibt offen und ist absolut verwendbar (früher Fehlalarm "Kombination
+  absoluter Temperaturen", sobald T_m als `T=` oder in `T_m - T_u` stand). Die mittlere
+  logarithmische Temperaturdifferenz (Quotient zweier Differenzen) bleibt eine Differenz
+- Grenze: `T_id = p*v/R` (kein Faktor mit sicher absoluter Temperatur) mit `dT = T_1 - T_id` ist
+  strukturell nicht von `theta` aus `Q = m*c*theta` mit `T_2 = T_1 - theta` zu unterscheiden -
+  gelesen wird die zweite Form (dT absolut); eindeutig ist die Schreibweise `dT = T_id - T_1`
 - Umrechnung im Excel-Stil `T + 273.15` (`scale_offset_literals`): eine Zahl gleich dem
   Nullpunkt einer Temperaturskala (273.15, 459.67 - aus pint) in einer Summe mit einer
   Temperatur -> Hinweis "ⓘ": T ist bereits in K, die Zahl verschiebt den Nullpunkt erneut
@@ -881,14 +1079,18 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
 
 1. **T und p auf der Sättigungslinie** (Sattdampf mit T und p angegeben) -> Meldung "Dampfgehalt
    angeben (x=1 ...)" statt der englischen CoolProp-Meldung.
-   **Nassdampf unterhalb des Tripelpunkts** (T < T_triple bzw. p < p_triple mit x gegeben) wird gemeldet
-   (Wasser: Eis) - Grenzen aus CoolProp je Fluid.
+   **Unter dem Tripelpunkt**: Dampf und Sättigung über der festen Phase richtig (Wasser -10 °C:
+   259.9 Pa über Eis); wo die kondensierte Phase gebraucht wird, die unterkühlte Flüssigkeit mit
+   Hinweis "ⓘ"; Meldung im Gebiet der festen Phase und jenseits der Stabilität (siehe Thermodynamik).
+   Für die feste Phase selbst gibt es keine Stoffdaten.
    **Dampfgehalt x**: nur Rundungsfehler (±1e-6) werden auf [0, 1] begrenzt; x deutlich
    außerhalb (x = 2, x = quality(...) = -1 eines einphasigen Zustands) ist eine Meldung
    "Dampfgehalt x = … liegt außerhalb von 0 ... 1" (thermodynamics.py) - für den Solver ein
    ungültiger Iterationspunkt. `quality()` liefert außerhalb des Nassdampfgebiets -1
-   (CoolProp; unterkühlt, überhitzt, überkritisch) - dann Hinweis "ⓘ" (`main._single_phase_quality_hints`:
-   jeder quality-Aufruf wird mit der Lösung ausgewertet).
+   (unterkühlt, überhitzt, überkritisch) - für jedes Eingabepaar (CoolProp liefert für rho mit u/h/s
+   10000; `calculate_property` bildet alles außerhalb 0 ... 1 auf -1 ab) - dann Hinweis "ⓘ"
+   (`main._single_phase_quality_hints`: jeder quality-Aufruf wird mit der Lösung ausgewertet, in einer
+   Parameterstudie an allen Punkten).
 
 2. **Volumen als Input**: `v` wird intern zu Dichte umgerechnet (`rho = 1/v`), da CoolProp mit Dichte arbeitet.
 
@@ -909,6 +1111,34 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
 ## GUI-Features
 
 - File: New, Open, Save, Save As (.hes, .txt)
+- **Konstanten einfügen**: Schaltfläche "Constants ▾" über den Gleichungen bzw. Edit > Insert Constant -
+  Menü mit Name, Wert, Einheit, Bedeutung; die Auswahl fügt `name#` an der Schreibmarke ein
+  (`insert_constant`)
+- **Zeilennummern** neben den Gleichungen (`self.line_numbers`, ein tk.Canvas links vom Editor;
+  View > Line Numbers bzw. F7, Vorgabe: eingeblendet). Gezeichnet aus `dlineinfo` der sichtbaren Zeilen
+  in der Schrift des Editors; `_watch_line_numbers` vergleicht zehnmal je Sekunde eine kleine Signatur
+  (erste sichtbare Zeile, Zeilenzahl, Schrift, Höhe, Erscheinungsbild) und zeichnet nur bei Änderung -
+  Tk meldet Textänderungen nicht als ein Ereignis. `refresh_line_numbers()` zeichnet sofort (Tests)
+- **Hell/Dunkel** (`toggle_theme`: Schaltfläche ☀/☾, View > Light Mode (Projector), F6): `COLORS` enthält
+  je Farbe (hell, dunkel); `ctk.set_appearance_mode` färbt alle customtkinter-Widgets um, auch offene
+  Dialoge. Hell = weißer Grund, schwarze Schrift (Projektor im Hörsaal). Nur Tk-eigene Teile brauchen
+  `theme_color()` (Canvas der Zeilennummern, ttk-Stil). Neue Widgets: Farben immer aus `COLORS`, bei
+  Schaltflächen/Auswahlfeldern auf Flächenfarben `text_color=COLORS["text"]` setzen (das Standard-Weiß
+  wäre auf hellem Grund unlesbar)
+  **Farben in Karteireitern und rollbaren Bereichen**: ein Karteireiter (CTkTabview) gibt seine Farbe
+  als FESTEN Wert des gerade gültigen Erscheinungsbilds weiter, und an einem CTkScrollableFrame endet
+  die Weitergabe an die Kinder - mit `fg_color="transparent"` blieben Ergebniszeilen, Tabellenkopf und
+  Residuals im hellen Modus schwarz (Bild des Nutzers 10.11.2026). Daher: rollbare Bereiche mit
+  eigenem Farbpaar (`fg_color=COLORS["bg_input"]`), und `toggle_theme` leitet übernommene feste
+  Hintergrundfarben neu ab (`_refresh_backgrounds`). Der Trennbalken zwischen den Panels ist ein
+  `tk.PanedWindow` (der des ttk-Widgets folgt auf macOS dem Erscheinungsbild des Systems: schwarzer
+  Balken im hellen Modus); Aufteilung 2 : 1 über `_place_sash`/`_remember_sash`. Geprüft wird in
+  `test_gui.py` an den TATSÄCHLICH gezeichneten Farben (`drawn_color_problems`: Tk-Optionen der
+  Zeichenflächen, Beschriftungen, Textfelder) - nicht an den Einstellungen der Widgets, die den Fehler
+  nicht zeigten
+- Ergebniszeile: Wert und Einheit werden vor dem Namen eingepasst - bei schmaler Spalte weicht der Name,
+  der Wert wird nie beschnitten (`5.670374e-08` erschien als "670374e-08")
+- Ergebniszeilen in der Reihenfolge der angezeigten Namen (`cp`, `lambda`, `sigma#`), nicht der internen
 - Beispielblatt ("☰ Examples" / Edit > Insert Example): Wasser/Dampf, feuchte Luft, Strahlung,
   Heizkurve (value/quantity, Spreizung in K), Rohrströmung (IF), wirtschaftliche Dämmdicke
   (MINIMIZE), NH3 mit REFERENCE, ideale Gase (IG: Heizwert CH4, Zellspannung H2/O2, Dampfreformer
@@ -943,6 +1173,14 @@ der Struktur (`unit_constraints._resolve_temperature_weights`, ohne Namen):
   Anzeige fest: `q_V = 600 kJ/m^3` -> kJ/m³ statt bar (gleiche Dimension
   wie Druck - die Größenart folgt nicht aus der Dimension, p = R*T/v bleibt bar). Rundungsrest
   nach Offset-Umrechnung (-1.7e-13 °C) wird als 0 angezeigt (`main._si_to_unit`)
+- Quotient zweier Größen mit Einheit: `m3` ist dieselbe Einheit wie `m^3` (`_composed_label` über
+  `normalize_unit`; `n = V_dot/V` mit m3/h und m3 erschien als 1/s statt 1/h). Winkel-Ergebnisse
+  lassen sich auch als Zahl "-" anzeigen (Kennzahl mit rad/s im Produkt: `Re = omega*d^2/nu`)
+- Dialog Initial Values: die Spalte Unit nennt die Einheit der SI-Zahl (`_si_unit_text`: W, Pa, J/kg,
+  "-") - die abgeleitete Einheit kann ein Anzeige-Label sein, "kW" stand neben 100000
+- Einheiten-Auswahl je Größe (`_on_unit_changed`): rechnet aus dem SI-Wert der Lösung - eine Quelle für
+  alle Größen (der gespeicherte UnitValue einer variierten Größe ist ihre untere Grenze; die Auswahl
+  zeigte sie statt des Optimums)
 - Ergebnisanzeige: Wert und Einheit stammen immer aus derselben Einheit. Die Settings
   (°C/K, bar/Pa, kJ/J, kW/W) gelten für Temperaturen, Drücke, J/kJ, J/kg, J/(kg·K), W/kW;
   andere Einheiten (MW, kWh, W/(m²K), W/K, ...) bleiben wie eingegeben bzw. abgeleitet.

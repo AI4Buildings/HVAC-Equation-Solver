@@ -51,6 +51,11 @@ class DimensionInfo:
     # Temperatur aus Produkt/Quotient dimensionsbehafteter Größen (q*R, Q/(m*cp)):
     # in einer Summe mit einer bestimmten Temperatur zählt sie als Differenz
     product: bool = False
+    # Dimensionslose Zahl, gebildet mit einer ABSOLUTEN Temperatur auf der Verhältnisskala Kelvin
+    # (T_2/T_1, ln(T_2/T_1), 1 - T_u/T_m): ein Faktor eines Gesetzes in Kelvin. Eine Differenz mal
+    # diesem Faktor ist nicht notwendig eine Differenz ((T_2 - T_1)/ln(T_2/T_1) ist die
+    # thermodynamische Mitteltemperatur) - der Charakter des Produkts bleibt offen
+    ratio: bool = False
 
     @property
     def is_known(self) -> bool:
@@ -567,6 +572,8 @@ def _eval_chain(terms, ctx: _Ctx) -> DimensionInfo:
     d = _dim(ref.quantity, weight, same or None)
     if weight is None and len(nonlit) == 1 and ref.product:
         d = replace(d, product=True)
+    if _is_dimless_q(ref.quantity) and any(t.ratio for _, t in nonlit):
+        d = replace(d, ratio=True)
     return d
 
 
@@ -600,6 +607,8 @@ def _scale_weight(w: Optional[float], factor: DimensionInfo, divide: bool = Fals
         if divide:
             return w / factor.value if factor.value != 0 else None
         return w * factor.value
+    if factor.ratio:
+        return None      # Gesetz auf der Verhältnisskala Kelvin: Charakter offen
     return 0.0 if w == 0 else None
 
 
@@ -648,7 +657,8 @@ def _composed_label(l: DimensionInfo, r: DimensionInfo, q, divide: bool = False)
     try:
         if any(q.dimensionality == ureg.Quantity(1.0, u).dimensionality for u in _SETTINGS_DIMS):
             return None
-        a, b = ureg.Quantity(1.0, l.unit), ureg.Quantity(1.0, r.unit)
+        # über normalize_unit: m3/h ist dieselbe Einheit wie m^3/h (pint liest nur die zweite)
+        a, b = ureg.Quantity(1.0, normalize_unit(l.unit)), ureg.Quantity(1.0, normalize_unit(r.unit))
         items = dict(((a / b) if divide else (a * b))._units)
         dims = {name: ureg.Quantity(1.0, name).dimensionality for name in items}
         if len(items) == 1:
@@ -690,6 +700,8 @@ def _mul(l: DimensionInfo, r: DimensionInfo) -> DimensionInfo:
     d = _dim(q, weight, _scaled_label(l, r, q) or _composed_label(l, r, q))
     if product:
         d = replace(d, product=True)
+    if (l.ratio or r.ratio) and _is_dimless_q(q):
+        d = replace(d, ratio=True)
     if l.literal and r.literal:
         val = l.value * r.value if l.value is not None and r.value is not None else None
         d = replace(d, literal=True, value=val, weight=0.0)
@@ -714,6 +726,9 @@ def _div(l: DimensionInfo, r: DimensionInfo) -> DimensionInfo:
     d = _dim(q, weight, _scaled_label(l, r, q, divide=True) or _composed_label(l, r, q, divide=True))
     if product:
         d = replace(d, product=True)
+    if _is_dimless_q(q) and (l.ratio or r.ratio or any(
+            _is_temp_q(x.quantity) and x.weight == 1.0 and not x.literal for x in (l, r))):
+        d = replace(d, ratio=True)
     if l.literal and r.literal:
         val = None
         if l.value is not None and r.value not in (None, 0):
@@ -732,6 +747,8 @@ def _pow(base: DimensionInfo, exp: DimensionInfo) -> DimensionInfo:
         except Exception:
             return DimensionInfo(None)
         d = _dim(q, base.weight if n == 1 else None)
+        if base.ratio and _is_dimless_q(q):
+            d = replace(d, ratio=True)
         if base.literal:
             try:
                 val = base.value ** n if base.value is not None else None
@@ -745,7 +762,8 @@ def _pow(base: DimensionInfo, exp: DimensionInfo) -> DimensionInfo:
     if exp.quantity is not None and not _is_dimless_q(exp.quantity):
         return DimensionInfo(None)
     if _is_dimless_q(base.quantity):
-        return DimensionInfo('', _dimless_q(), literal=base.literal and exp.literal)
+        return DimensionInfo('', _dimless_q(), literal=base.literal and exp.literal,
+                             ratio=base.ratio or exp.ratio)
     return DimensionInfo(None)
 
 
@@ -855,7 +873,8 @@ def _eval_call(node, ctx: _Ctx) -> DimensionInfo:
     if fname in _TRANSCENDENTAL:
         dims = [_eval(a, ctx) for a in args]
         lit = bool(dims) and all(d.literal for d in dims)
-        return DimensionInfo('', _dimless_q(), literal=lit, weight=0.0 if lit else None)
+        return DimensionInfo('', _dimless_q(), literal=lit, weight=0.0 if lit else None,
+                             ratio=any(d.ratio for d in dims))
 
     if fname == 'sqrt':
         if not args:
@@ -868,6 +887,8 @@ def _eval_call(node, ctx: _Ctx) -> DimensionInfo:
         except Exception:
             return DimensionInfo(None)
         d = _dim(q)
+        if a.ratio and _is_dimless_q(q):
+            d = replace(d, ratio=True)
         if a.literal:
             val = math.sqrt(a.value) if a.value is not None and a.value >= 0 else None
             d = replace(d, literal=True, value=val, weight=0.0)
@@ -1751,6 +1772,29 @@ def _product_difference_candidates(side, prio: int, out, known, free: Set[str]):
                 out[name].extend((p, w) for p, w in candidates if w in (0.0, 1.0))
 
 
+def _ratio_scale_law(parsed, known) -> bool:
+    """
+    Steht eine sicher ABSOLUTE Temperatur (Gewicht 1) als Faktor in einem Produkt/Quotienten, dessen
+    Dimension keine Temperatur ist (p_1/T_1 = p_2/T_2, V_1/T_1, 1 - T_u/T_m)? Dann rechnet die
+    Gleichung auf der Verhältnisskala Kelvin: die Regel "Temperatur im Produkt = Differenz" gilt dort
+    nicht - die absolute Temperatur im selben Produkt widerlegt sie. Sonst hielte sie T_2 aus
+    p_1/T_1 = p_2/T_2 für eine Differenz, und dT = T_1 - T_2 erschiene als absolute Temperatur
+    (58.9 K als -214 °C).
+    """
+    for side in parsed:
+        for node in ast.walk(side):
+            if not (isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Mult, ast.Div))):
+                continue
+            if not any(isinstance(operand, ast.Name) and operand.id in known
+                       and known[operand.id].quantity is not None and _is_temp_q(known[operand.id].quantity)
+                       and known[operand.id].weight == 1.0 for operand in (node.left, node.right)):
+                continue
+            whole = _eval_collect(node, known)[0]
+            if whole.quantity is not None and not _is_temp_q(whole.quantity):
+                return True
+    return False
+
+
 def _power_absolute_candidates(side, prio: int, out, known, free: Set[str]):
     """
     Eine Temperatur-Variable mit ganzzahligem Exponenten >= 2 (sigma*T^4) ist eine absolute
@@ -1801,10 +1845,13 @@ def _weight_candidates(parsed, known, free: Set[str], out, products: bool = Fals
     # Prio 3: mehrere offene Temperaturgrößen in der Summe
     if integral:
         _integral_weight_candidates(terms, 3, out, known, free)
-    # Prio 4 (nur für die Anzeige): Temperatur im Produkt ohne Temperatur-Dimension = Differenz
+    # Prio 4 (nur für die Anzeige): Temperatur im Produkt ohne Temperatur-Dimension = Differenz -
+    # nicht in einem Gesetz auf der Verhältnisskala Kelvin (_ratio_scale_law)
     if products:
+        law = _ratio_scale_law(parsed, known)
         for side in (left, right):
-            _product_difference_candidates(side, 4, out, known, free)
+            if not law:
+                _product_difference_candidates(side, 4, out, known, free)
             _power_absolute_candidates(side, 5, out, known, free)
 
 
@@ -1911,6 +1958,7 @@ def _resolve_temperature_weights(parsed_eqs, all_dims: Dict[str, DimensionInfo],
             free.append(v)
     free_set = set(free)
     current: Dict[str, Optional[float]] = {v: None for v in free}
+    previous: Dict[str, Optional[float]] = dict(current)
 
     for _ in range(max_iterations):
         known = {}
@@ -1946,9 +1994,56 @@ def _resolve_temperature_weights(parsed_eqs, all_dims: Dict[str, DimensionInfo],
             new[v] = sorted(counts, key=lambda x: (-counts[x], x != 1.0, x != 0.0, x))[0]
         if new == current:
             break
-        current = new
+        previous, current = current, new
+    else:
+        # Kein Fixpunkt: zwei Größen bestimmen sich gegenseitig aus verschiedenen Regeln (dT aus
+        # dT = T_1 - T_2 und aus Q = m*c*dT, T_2 aus dem Gasgesetz) - das Ergebnis hinge von der Zahl
+        # der Durchläufe ab. Wer zwischen den letzten beiden wechselt, ist nicht bestimmt
+        current = {v: (w if previous.get(v) == w else None) for v, w in current.items()}
 
     return {**fixed, **current}
+
+
+def _settle_defined_sums(parsed_eqs, all_dims: Dict[str, DimensionInfo], user: Dict[str, DimensionInfo],
+                         weights: Dict[str, Optional[float]], entered_in_kelvin: Set[str]
+                         ) -> Dict[str, Optional[float]]:
+    """
+    Anzeige: eine als Summe von Temperaturen DEFINIERTE Größe (dT = T_1 - T_2), deren Charakter
+    sonst nicht bestimmt ist, erhält ihn aus ihren Summanden. Nicht bestimmbare berechnete Größen
+    gelten als absolut (Festlegung) - auf Summe und Summanden unabhängig angewandt widerspricht das
+    der Summe: Punkt - Punkt wäre ein Punkt (T_2 = T_1*r, dT = T_1 - T_2: 324 K erschienen als
+    51 °C). In K eingegebene Summanden ohne bestimmten Charakter bleiben offen (keine Aussage).
+    Generisch aus der Form "Name = Summe", ohne Namen; wiederholt, bis sich nichts mehr ändert.
+    """
+    weights = dict(weights)
+    for _ in range(len(parsed_eqs) + 1):
+        changed = False
+        known = {}
+        for v, d in all_dims.items():
+            if v in weights and _is_temp_q(d.quantity):
+                w = weights[v]
+                if w is None and v not in entered_in_kelvin:
+                    w = 1.0                       # nicht bestimmbar, berechnet: absolut
+                known[v] = replace(d, weight=w)
+            else:
+                known[v] = d
+        for left, right in parsed_eqs:
+            for target, other in ((left, right), (right, left)):
+                if not (isinstance(target, ast.Name) and target.id in weights
+                        and weights[target.id] is None and target.id not in entered_in_kelvin
+                        and isinstance(other, ast.BinOp) and isinstance(other.op, (ast.Add, ast.Sub))):
+                    continue
+                try:
+                    total = _eval_collect(other, known)[0]
+                except Exception:
+                    continue
+                if (total.quantity is not None and _is_temp_q(total.quantity) and not total.literal
+                        and total.weight in (0.0, 1.0)):
+                    weights[target.id] = total.weight
+                    changed = True
+        if not changed:
+            break
+    return weights
 
 
 def _temperature_label(weight: Optional[float], undetermined: str) -> str:
@@ -1984,6 +2079,8 @@ def _propagate(parsed_eqs, known_units: Dict[str, str], open_temperatures=frozen
     all_dims = {**user, **inferred}
     weights = _resolve_temperature_weights(parsed_eqs, all_dims, user, products=products,
                                            zero_point=zero_point, keys=keys)
+    if products:
+        weights = _settle_defined_sums(parsed_eqs, all_dims, user, weights, set(open_temperatures))
     result = {}
     for v, d in inferred.items():
         label = d.unit if d.unit is not None else ''

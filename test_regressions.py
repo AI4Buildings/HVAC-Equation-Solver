@@ -282,7 +282,8 @@ check("Beispiel A=20cm2, alpha=10 W/m2K -> Q_dot = 0.1 W", s_ and abs(sol.get('Q
 # Unbekannte / unpassende Einheiten sind ein Fehler (früher: still dimensionslos)
 for text, fragment in (("A = 20 qcm", "Unbekannte Einheit 'qcm'"),
                        ("T = 20:10:40 xyz", "Unbekannte Einheit 'xyz'"),
-                       ("h = enthalpy(water, T=20 Grad, p=1 bar)", "Einheit 'Grad' passt nicht"),
+                       ("h = enthalpy(water, T=20 Grad, p=1 bar)", "Unbekannte Einheit 'Grad'"),
+                       ("h = enthalpy(water, T=20 m, p=1 bar)", "Einheit 'm' passt nicht"),
                        ("h = enthalpy(water, T=20 °C, p=1 kg)", "Einheit 'kg' passt nicht"),
                        ("E = Eb(500 °C, 5 bar)", "Einheit 'bar' passt nicht")):
     try:
@@ -1169,12 +1170,11 @@ eqs, variables, consts, _, orig, _ = parse_equations("x + y = 5\nx - y = 1\nx + 
 s_, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
 check("Überbestimmt mit Folgegleichung, echter Widerspruch bleibt erkannt", not s_ and "x + 2*y = 8" in msg, msg)
 
-# Nassdampf unterhalb des Tripelpunkts (Wasser unter 0 °C: Eis) wird gemeldet
-try:
-    enthalpy('water', T=269.15, x=0)
-    check("enthalpy(water, T=-4 °C, x=0) -> Meldung Tripelpunkt", False)
-except ValueError as exc:
-    check("enthalpy(water, T=-4 °C, x=0) -> Meldung Tripelpunkt", "Tripelpunkt" in str(exc), str(exc))
+# Unter dem Tripelpunkt liefert die Datenbank die unterkühlte Flüssigkeit (Wasser -4 °C:
+# h = -16.9 kJ/kg; früher eine Meldung) - ein Fehler erst, wo die Werte unbrauchbar werden
+# (siehe "Codeprüfung November 2026, zweite Runde")
+check("enthalpy(water, T=-4 °C, x=0): unterkühlte Flüssigkeit", abs(enthalpy('water', T=269.15, x=0) + 16900) < 150,
+      str(enthalpy('water', T=269.15, x=0)))
 check("Nassdampf knapp über dem Tripelpunkt rechnet", abs(enthalpy('water', T=273.16, x=0)) < 10)
 
 # Gescheiterter Kern sperrt nur seine Größen - unabhängige Kerne werden weiter gelöst
@@ -1642,7 +1642,8 @@ for _text, _part in (("n = 1 mol\nEQUILIBRIUM T=300 K, p=1 bar\n  IN IG:N2 = 0,0
                      ("n = 1 mol\nEQUILIBRIUM T=900 K, p=1 bar\n  IN IG:N2 n\n  OUT IG:N2 = a", "erwartet Stoff = Menge")):
     check(f"EQUILIBRIUM-Meldung: {_part}", _part in parse_error(_text), parse_error(_text))
 eqs, variables, consts, _, orig, _ = parse_equations("equilibrium = 3\nx = equilibrium + 1")
-check("Variable mit dem Namen equilibrium bleibt möglich", consts.get('equilibrium') == 3.0 and 'x' in variables,
+check("Variable mit dem Namen equilibrium bleibt möglich",
+      {display_name(n): v for n, v in consts.items()} == {'equilibrium': 3.0} and 'x' in variables,
       str((consts, variables)))
 # Argument mit falscher Dimension (allgemein): T = 1 bar in enthalpy(), Masse als EQUILIBRIUM-Menge
 from unit_constraints import check_all_unit_consistency as _check_units
@@ -1810,6 +1811,594 @@ ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations
 _units = propagate_all_units_complete(orig, {k: u.calc_unit for k, u in uvals.items() if u.calc_unit})
 check("Strahlung mit sigma in W/(m²·K⁴): q in W/m²", ok and abs(sol['q'] - 5.67e-8 * 773.15**4) < 1e-6
       and _units.get('q') in ('W/m^2', 'watt / meter ** 2'), f"{msg} {sol} {_units.get('q')}")
+
+
+# ---------------------------------------------------------------------------
+print("=== Codeprüfung November 2026 ===")
+# ---------------------------------------------------------------------------
+from parser import remove_comments as _rc
+
+
+def _solve_text(text, initial=None):
+    eqs, variables, consts, sweeps, orig, _ = parse_equations(text)
+    if sweeps:
+        return solve_parametric(eqs, variables, sweeps, initial, constants=consts, original_equations=orig)
+    return solve_system(eqs, variables, initial, constants=consts, original_equations=orig)
+
+
+# Zollzeichen in einem {...}-Kommentar: kein Beginn eines "..."-Kommentars (Zeilen fielen still weg)
+check('Kommentar {Rohr 1/2" }: Folgezeilen bleiben',
+      _rc('{Rohr 1/2" }\nd_1 = 15 mm\n{Rohr 3/4" }\nd_2 = 20 mm') == '\nd_1 = 15 mm\n\nd_2 = 20 mm')
+_, _, consts, _, _, _ = parse_equations('{Rohr 1/2" }\nd_1 = 15 mm\n{Rohr 3/4" }\nd_2 = 20 mm')
+check('Kommentar mit Zollzeichen: beide Vorgaben gelesen', set(consts) == {'d_1', 'd_2'}, str(consts))
+check('Kommentar: "..." mit { darin, mehrzeilig, Zeilenzahl bleibt',
+      _rc('x = 1 "mit {Klammer"\ny = 2 "zwei\nZeilen"\nz = 3') == 'x = 1 \ny = 2 \n\nz = 3')
+check('Kommentar: {Der "Carnot"-Faktor} bleibt ein Kommentar', _rc('{Der "Carnot"-Faktor}\nx = 1') == '\nx = 1')
+ok, sol, msg = _solve_text('p = 2 bar\n{Anschluss 1" }\np = 3 bar\n{Anschluss 2" }')
+check('Widerspruch zwischen zwei Vorgaben bleibt sichtbar (Zollzeichen im Kommentar)',
+      not ok and 'Widersprüchliches System' in msg, msg)
+
+# '#' ist kein Kommentarzeichen (das letzte Wort dahinter galt als Einheit)
+for _text in ("m = 5 # Masse in g, nicht kg\nF = m*10", "t = 30 # min", "a = 2\ny = a*2 # plus a"):
+    check(f"'#' wird gemeldet: {_text.splitlines()[-1]}", "'#' ist kein Kommentarzeichen" in parse_error(_text),
+          parse_error(_text))
+check("'#' in einem Kommentar ist erlaubt", parse_error('y = 2 {# Anmerkung}\nz = 3 "# auch"') == '')
+
+# Zusammengeschriebene Einheiten: nur an Zeichengrenzen und nur in Einheitenzeichen des Programms
+for _unit in ("l/Tag", "km/Std", "l/sek", "W/Pers", "m3/hPers", "kg/Stk", "kWh/Jahr"):
+    check(f"Unbekannte Einheit {_unit} wird gemeldet (nicht in Einzelzeichen zerlegt)",
+          'Unbekannte Einheit' in parse_error(f"x = 5 {_unit}"), parse_error(f"x = 5 {_unit}"))
+for _text, _si in (("0.04 W/(mK)", 0.04), ("0.04 W/mK", 0.04), ("1 W/m°C", 1.0), ("1 W/(m°C)", 1.0),
+                   ("1 kW/(mK)", 1000.0), ("1 kJ/(kgK)", 1000.0), ("1 kJ/kgK", 1000.0), ("1 W/(cmK)", 100.0),
+                   ("1 W/cmK", 100.0), ("1 W/m2K", 1.0), ("1 W/m²°C", 1.0), ("1 kJ/kg°C", 1000.0),
+                   ("1 mK", 0.001), ("3.6 kWh/m2a", 3.6 * 3.6e6 / (365.25 * 86400)), ("120 l/d", 0.12 / 86400)):
+    _, _, consts, _, _, _ = parse_equations(f"x = {_text}")
+    check(f"Einheit {_text} -> {_si:.6g} SI", abs(consts['x'] - _si) <= 1e-12 * abs(_si), str(consts))
+# Anzeige: zusammengesetzte Einheiten mit °C/°F (früher der SI-Wert unter dem eingegebenen Label)
+for _unit, _value in (("°C/h", 2.0), ("°C/min", 2.0), ("°F/h", 2.0), ("kW/°C", 2.0), ("W/(m²·°C)", 2.0)):
+    _uv = UnitValue.from_input(_value, _unit)
+    _back = UnitValue.from_si_base(_uv.calc_value, _unit).original_value
+    check(f"Anzeige in {_unit}: SI zurück in die Einheit", abs(_back - _value) < 1e-12, f"{_uv.calc_value} -> {_back}")
+
+# name = quantity(Zahl, Einheit) ist eine Größe mit Einheit (keine beim Einlesen ausgewertete Zahl)
+eqs, variables, consts, _, orig, _ = parse_equations("b = quantity(45, deg)\nc = sin(b)")
+ok, sol, msg = solve_system(eqs, variables, constants=consts, original_equations=orig)
+check("b = quantity(45, deg): sin(b) = 0.7071 (nicht sin(0.785 Grad))",
+      ok and 'b' in variables and abs(sol['c'] - np.sqrt(0.5)) < 1e-12, f"{msg} {sol}")
+_units_q = propagate_all_units_complete(dict(parse_equations("p = quantity(2, bar)\nA = 0.01 m^2\nF = p*A")[4]),
+                                        {'A': 'm^2'})
+check("p = quantity(2, bar): Einheit folgt aus quantity (F in N)", _units_q.get('F') == 'N', str(_units_q))
+
+# Unbekannte mal exakt null: nicht bestimmt (früher beliebiger Wert als "Lösung gefunden")
+for _text, _var in (("m = 0\nc = 4180\nT_1 = 293.15\nQ = 0\nQ = m*c*(T_2 - T_1)", 'T_2'),
+                    ("a = 0\nb = 0\na*x^2 + x*a = b", 'x'),
+                    ("m = 0\nc = 4180\nT_1 = 293.15\nQ = 0\nm*c*T_2 - m*c*T_1 = Q\nT_3 = T_2 + 10", 'T_2'),
+                    ("a = 0\nx + y = 3\na*y = 0", 'y')):
+    ok, sol, msg = _solve_text(_text)
+    check(f"Faktor null -> 'Lösung nicht eindeutig' ({_text.splitlines()[-1]})",
+          not ok and 'nicht eindeutig' in msg and _var in msg, msg)
+ok, sol, msg = _solve_text("m = 0:0.5:1\nc = 4180\nT_1 = 293.15\nQ = 0\nQ = m*c*(T_2 - T_1)")
+check("Faktor null am ersten Punkt einer Studie: Punkt 1 gemeldet, übrige gelöst",
+      'Punkt 1' in msg and 'nicht eindeutig' in msg and abs(sol['T_2'][2] - 293.15) < 1e-9, msg)
+for _text, _expected in (("m = 1e-9\nc = 4180\nT_1 = 293.15\nQ = 0\nQ = m*c*(T_2 - T_1)", 293.15),
+                         ("Q = 0\nm = 2\nc = 4180\nQ = m*c*dT", 0.0), ("y = 5\nx*y = 0", 0.0)):
+    ok, sol, msg = _solve_text(_text)
+    _name = (set(sol) - {'m', 'c', 'T_1', 'Q', 'y'}).pop()
+    check(f"Gegenprobe: eindeutige Lösung bleibt ({_text.splitlines()[-1]})",
+          ok and abs(sol[_name] - _expected) < 1e-9, f"{msg} {sol}")
+ok, sol, msg = _solve_text("exp(-x^2) = 0")
+check("Gegenprobe: Underflow bleibt ohne Lösung (kein 'nicht eindeutig')", not ok and 'nicht eindeutig' not in msg, msg)
+
+# Nächstgelegene Wurzel auch bei periodischen Funktionen (Newton sprang über viele Perioden)
+for _text, _var, _expected in (("h = 20\nb = 0.5\ntan(be) = h/b", 'be', np.degrees(np.arctan(40.0))),
+                               ("cos(al) = -0.999", 'al', np.degrees(np.arccos(-0.999))),
+                               ("F_x = -96.5\nF = 100\nF_x = F*cos(al)", 'al', np.degrees(np.arccos(-0.965))),
+                               ("tan(al) = -20", 'al', np.degrees(np.arctan(-20.0))),
+                               ("tan(al) = 9", 'al', np.degrees(np.arctan(9.0))),
+                               ("cos(al) = 0.3971986986986986", 'al', np.degrees(np.arccos(0.3971986986986986)))):
+    eqs, variables, consts, _, orig, _ = parse_equations(_text)
+    ok, sol, msg = solve_system(eqs, variables, {_var: 0.5}, constants=consts, original_equations=orig)
+    check(f"Nächstgelegene Wurzel: {_text.splitlines()[-1]} -> {_expected:.4f}",
+          ok and abs(sol[_var] - _expected) < 1e-6, f"{msg} {sol.get(_var)}")
+
+# quality(): außerhalb des Nassdampfgebiets einheitlich -1 (CoolProp liefert für rho mit u/h/s 10000)
+ok, sol, msg = _solve_text("v = 0.5\nu = 2732857.6\nx = quality(water, v=v, u=u)")
+check("quality(water, v=, u=) im Einphasengebiet = -1", ok and sol['x'] == -1.0, f"{msg} {sol}")
+ok, sol, msg = _solve_text("v = 0.5\nu = 1500000\nx = quality(water, v=v, u=u)")
+check("quality(water, v=, u=) im Nassdampfgebiet: Dampfgehalt", ok and 0 < sol['x'] < 1, f"{msg} {sol}")
+
+# HumidAir: Sättigung für jeden Namen der relativen Feuchte; negativer Wassergehalt ist ein Fehler
+ok, sol, msg = _solve_text("T_2 = 276.15\np = 100000\nx_2 = HumidAir(x, T=T_2, phi=1, p=p)\n"
+                           "phi_2 = HumidAir(phi, T=T_2, x=x_2, p=p)\nrh_2 = HumidAir(rh, T=T_2, x=x_2, p=p)")
+check("HumidAir(phi, ...) und (rh, ...) an der Sättigung = 1", ok and sol['phi_2'] == 1.0 and sol['rh_2'] == 1.0,
+      f"{msg} {sol}")
+ok, sol, msg = _solve_text("T = 293.15\np = 100000\nw = -0.002\ny = HumidAir(rh, T=T, w=w, p_tot=p)")
+check("HumidAir mit negativem Wassergehalt: Meldung statt rh = 1", not ok and 'negativ' in msg, msg)
+
+# EQUILIBRIUM: Gase allein erfüllen die Elementbilanz nicht (Element nur in Feststoffen, C-Überschuss)
+_g = lambda name, T: ideal_gas.standard_gibbs_RT(ideal_gas.find_species(name), T)
+for _T in (900.0, 1000.0, 1100.0):
+    _n = _eqm.equilibrium_amounts(['IG:CaCO3(cr)', 'IG:CaO(cr)', 'IG:CO2', 'IG:N2'], ['IG:CaCO3(cr)', 'IG:N2'],
+                                  _T, 1e5, [1.0, 1.0])
+    _K = np.exp(-(_g('CaO(cr)', _T) + _g('CO2', _T) - _g('CaCO3(cr)', _T)))
+    check(f"Kalkbrennen bei {_T:.0f} K: n_CO2 aus K = p_CO2/p° ({_K / (1 - _K):.6f} mol)",
+          abs(_n['IG:CO2'] - _K / (1 - _K)) < 1e-9 and abs(_n['IG:CaO(cr)'] - _n['IG:CO2']) < 1e-12, str(_n))
+for _T in (500.0, 800.0, 1000.0):
+    _n = _eqm.equilibrium_amounts(['IG:CO', 'IG:CO2', 'IG:C(gr)'], ['IG:C(gr)', 'IG:O2'], _T, 1e5, [1.0, 0.3])
+    _K = np.exp(-(2 * _g('CO', _T) - _g('CO2', _T) - _g('C(gr)', _T)))
+    _co = _brentq(lambda n: n ** 2 / ((0.6 - n) / 2) / (n + (0.6 - n) / 2) - _K, 1e-300, 0.6 * (1 - 1e-15),
+                  xtol=1e-300, rtol=1e-14)
+    check(f"Boudouard-Gleichgewicht mit Kohlenstoff-Überschuss bei {_T:.0f} K (n_CO = {_co:.6g})",
+          abs(_n['IG:CO'] - _co) <= 1e-8 * _co and abs(_n['IG:C(gr)'] - (1 - _co - (0.6 - _co) / 2)) < 1e-9, str(_n))
+
+# Funktionen in Argumenten von Stoffwertfunktionen sind keine Unbekannten; Zahlen wie 1.E-3
+for _text, _names in (("h = enthalpy(water, T=max(T_1, T_2), p=p)", {'h', 'T_1', 'T_2', 'p'}),
+                      ("rho = density(air, T=T, p=p_0*exp(-k))", {'rho', 'T', 'p_0', 'k'}),
+                      ("h = HumidAir(h, T=T, w=min(w_1, w_2), p_tot=p)", {'h', 'T', 'w_1', 'w_2', 'p'}),
+                      ("y = a*1.E-3 + 2.e5*b + 1e-3*e", {'y', 'a', 'b', 'e'})):
+    check(f"Variablen von '{_text}'", extract_variables(tokenize_equation(_text.replace('=', '-', 1)) if False
+                                                          else tokenize_equation(_text.split('=', 1)[0])
+                                                          + ' ' + tokenize_equation(_text.split('=', 1)[1])) == _names,
+          str(extract_variables(tokenize_equation(_text.split('=', 1)[1]))))
+ok, sol, msg = _solve_text("T_1 = 293.15\nT_2 = 353.15\np = 100000\nh = enthalpy(water, T=max(T_1, T_2), p=p)")
+check("enthalpy(water, T=max(T_1, T_2), p=p) wird gerechnet", ok and abs(sol['h'] - 335054.2) < 1, f"{msg} {sol}")
+
+# Parameterstudien verschiedener Länge: immer gemeldet (auch auf dem vektorisierten Weg)
+ok, sol, msg = _solve_text("a = 1:3\nb = 1:5\ny = 2*a\nz = 3*b")
+check("Verschieden lange Parameterstudien ohne gemeinsame Gleichung: Meldung", not ok and 'gleich viele Werte' in msg, msg)
+
+# Zweite Vorgabe mit Einheit ist dieselbe Größe (T = 20 °C zweimal: keine Summe von Temperaturpunkten)
+from unit_constraints import temperature_sum_conflicts as _tsc
+eqs, variables, consts, _, orig, uv = parse_equations("T = 20 °C\nT = 20 °C\ny = 2*T")
+check("T = 20 °C zweimal: Prüfgleichung, kein Temperatursummen-Fehler",
+      len(eqs) == 2 and not _tsc(orig, {'T': 'K'}, set()) and solve_system(eqs, variables, constants=consts,
+                                                                             original_equations=orig)[0], str(eqs))
+ok, sol, msg = _solve_text("T = 20 °C\nT = 25 °C\ny = T")
+check("T = 20 °C und T = 25 °C: Widerspruch mit beiden Werten", not ok and '298.15' in msg, msg)
+
+# Operatoren außerhalb der Gleichungssprache: verständliche Meldung statt Python-Interna
+for _op in ("&", "|", "<<", ">>", "@"):
+    check(f"Operator {_op}: Meldung mit Fundstelle", f"Operator '{_op}' wird nicht unterstützt" in parse_error(f"x = 3\ny = x {_op} 2"),
+          parse_error(f"x = 3\ny = x {_op} 2"))
+check("Operator not/~: Meldung", "wird nicht unterstützt" in parse_error("x = 3\ny = not x")
+      and "wird nicht unterstützt" in parse_error("x = 3\ny = ~x"))
+
+
+# Asymptote: ein Block aus einer Gleichung muss eine echte Nullstelle haben (kein beliebiger großer Wert)
+for _text in ("eps = 1\neps = 1 - exp(-NTU)", "tanh(x) = 1"):
+    ok, sol, msg = _solve_text(_text)
+    check(f"Nur asymptotisch erfüllbar: keine 'Lösung gefunden' ({_text.splitlines()[-1]})", not ok, f"{msg} {sol}")
+ok, sol, msg = _solve_text("eps = 0.999\neps = 1 - exp(-NTU)")
+check("Gegenprobe: eps = 0.999 -> NTU = ln(1000)", ok and abs(sol['NTU'] - np.log(1000.0)) < 1e-9, f"{msg} {sol}")
+ok, sol, msg = _solve_text("x^2 - 2*x + 1 = 0")
+check("Gegenprobe: Doppelwurzel bleibt eine Lösung", ok and abs(sol['x'] - 1) < 1e-4, f"{msg} {sol}")
+
+# Blockgröße numerisch null (rechte Seite s - 2 = 0): eindeutig, kein Plateau
+for _text, _zero in (("s = 2\nu*exp(v) + u^3 = s - 2\nv^3 + v + u^3 = 2", 'u'),
+                     ("T_1 = 300\nT_2 = 300\nG = 5\nQ*cosh(dT) + Q^3 = G*(T_1 - T_2)\ndT^3 + dT + Q^2 = 10", 'Q')):
+    ok, sol, msg = _solve_text(_text)
+    check(f"Blockgröße {_zero} = 0 (numerisch 1e-30): Lösung gefunden, nicht 'nicht eindeutig'",
+          ok and abs(sol[_zero]) < 1e-12, f"{msg} {sol}")
+
+# Einheiten-Auswahl: 1/h, rpm, Hz sind keine Winkel je Zeit
+from units import get_compatible_units as _gcu
+for _unit in ("1/h", "1/min", "rpm", "U/min", "Hz"):
+    check(f"Auswahl für {_unit}: 1/s, 1/h, 1/min - nicht rad/s", 'rad/s' not in _gcu(_unit) and '1/s' in _gcu(_unit),
+          str(_gcu(_unit)))
+check("Auswahl für rad/s bleibt rad/s, deg/s", _gcu('rad/s') == ['rad/s', 'deg/s'], str(_gcu('rad/s')))
+
+# EQUILIBRIUM: mehrzeiliger Kommentar, der in einer Anweisungszeile beginnt bzw. endet
+for _text in ("T = 1000 K\np = 1 bar\nEQUILIBRIUM T=T, p=p\n  IN IG:CH4 = 1 mol, IG:H2O = 2 mol\n"
+              "  OUT IG:CH4 = a, IG:H2O = b, IG:CO = c, IG:CO2 = d, IG:H2 = f {Mengen\n  im Gleichgewicht}\ny = 2*a",
+              "T = 1000 K\np = 1 bar\n{Reformer\nbei 1 bar} EQUILIBRIUM T=T, p=p\n  IN IG:CH4 = 1 mol, IG:H2O = 2 mol\n"
+              "  OUT IG:CH4 = a, IG:H2O = b, IG:CO = c, IG:CO2 = d, IG:H2 = f\ny = 2*a"):
+    try:
+        ok, sol, msg = _solve_text(_text)
+    except Exception as _exc:
+        ok, sol, msg = False, {}, str(_exc)
+    check("EQUILIBRIUM mit mehrzeiligem Kommentar an der Anweisung", ok and abs(sol['y'] - 2 * sol['a']) < 1e-12
+          and 0.04 < sol['a'] < 0.05, f"{msg}")
+
+print("\n=== Codeprüfung November 2026, zweite Runde ===")
+import units as _units
+import thermodynamics as _th
+from diagnostics import _source_line_numbers, _format_lines, describe_unsolved
+from parser import commercial_round, mangle_keywords, unmangle
+from radiation import Blackbody_cumulative
+from humid_air import HumidAir as _HA
+
+
+def _text_error(text):
+    """Meldung beim Einlesen bzw. Lösen (leer bei Erfolg)."""
+    try:
+        ok, sol, msg = _solve_text(text)
+    except Exception as exc:
+        return str(exc)
+    return "" if ok else msg
+
+
+# --- Zeilennummern: derselbe Text in einem mehrzeiligen Kommentar, doppelte Zeile ---
+_text = "{erste Fassung:\nx + y = a\nz = x*2\n}\na = 2\nb = 3\nx + y = a\nz = x*2"
+_, _, _, _, _orig, _ = parse_equations(_text)
+_lines = _source_line_numbers(_orig, _text)
+check("Zeilennummer: Gleichung, nicht der gleichlautende Kommentar", sorted(_lines.values()) == [7, 8], str(dict(_lines)))
+_text = '"Variante 1:\nT_3 = T_1 + T_2\n"\nT_1 = 20\nT_2 = 40\nT_3 = T_1 + T_2'
+_, _, _, _, _orig, _ = parse_equations(_text)
+check('Zeilennummer: Kommentar in "..." über mehrere Zeilen', list(_source_line_numbers(_orig, _text).values()) == [6])
+_text = "a = 1\ny = ln(-a)\ny = ln(-a)\nz = y"
+eqs, variables, consts, _, _orig, _ = parse_equations(_text)
+_msg = describe_unsolved(eqs, variables, dict(consts), _orig, _text)
+check("Doppelte Zeile: 'Zeilen 2, 3, 4' (nicht 2, 2, 4)", "Zeilen 2, 3, 4" in _msg, _msg)
+_text = "{alt: x + y = a}\na = 2\nx + y = a\nz = x*2"
+_, _, _, _, _orig, _ = parse_equations(_text)
+check("Zeilennummer: Kommentar in einer Zeile (Gegenprobe)", sorted(_source_line_numbers(_orig, _text).values()) == [3, 4])
+
+# --- Zahlen außerhalb des Bereichs; inf und nan sind Namen ---
+for _text in ("x = 1e400\ny = 2*x", "p = 1e400 bar\ny = 2*p", "x = -1e999\ny = x + 1", "a = 2\ny = 1e400*a", "x = [1 1e400 3]\ny = 2*x"):
+    _msg = parse_error(_text)
+    check(f"Zahl zu groß gemeldet: {_text.splitlines()[0] if '1e' in _text.splitlines()[0] else _text.splitlines()[1]}",
+          "darstellbaren Bereichs" in _msg and "Zeile" in _msg, _msg)
+ok, sol, msg = _solve_text("x = 1e308\ny = x/1e300")
+check("1e308 bleibt eine Zahl (Gegenprobe)", ok and abs(sol['y'] - 1e8) < 1, msg)
+for _name in ("inf", "nan", "infinity"):
+    ok, sol, msg = _solve_text(f"{_name} = 3\ny = {_name}\nz = 2*y")
+    check(f"'{_name}' ist ein Name, keine Zahl (y = {_name})", ok and sol.get('y') == 3.0 and sol.get('z') == 6.0, f"{msg} {sol}")
+ok, sol, msg = _solve_text("x = -5\ny = 2*x")
+check("Negative Zahl bleibt eine Vorgabe", ok and sol['x'] == -5.0 and sol['y'] == -10.0, msg)
+
+# --- Parameterstudie: Schrittweite ---
+for _text, _part in (("a = 1\nT = 10:1:0\ny = T + a", "Schrittweite 1"), ("a = 1\n\nT = 10:1:0 °C\ny = T", "Schrittweite 1"),
+                     ("a = 1\nT = 0:0:10\ny = T + a", "Schrittweite 0"), ("a = 1\nT = 10:0\ny = T + a", "Endwert kleiner")):
+    _msg = parse_error(_text)
+    _line = 3 if '\n\n' in _text else 2
+    check(f"Parameterstudie {_text.splitlines()[-2]}: Meldung mit Zeile {_line}", _part in _msg and f"Zeile {_line}:" in _msg, _msg)
+ok, sol, msg = _solve_text("a = 1\nT = 10:-2:0\ny = T + a")
+check("Fallende Parameterstudie 10:-2:0 (Gegenprobe)", ok and np.allclose(sol['y'], [11, 9, 7, 5, 3, 1]), msg)
+
+# --- Größe hebt sich heraus: Widerspruch, kein "Bereich von Lösungen" ---
+for _text in ("x = x + 1", "a = 2\nx = x + a", "x - x = 1", "m = 2\nQ = Q + m*4.19*10", "x = y + 1\ny = x"):
+    _msg = _text_error(_text)
+    check(f"'{_text.splitlines()[-1]}': hebt sich heraus -> Widerspruch", "hebt sich" in _msg and "nicht eindeutig" not in _msg, _msg)
+for _text, _part in (("y = 3\ny = max(0, x - 5) + 3", "nicht eindeutig"), ("min(x, 5) = x", "nicht eindeutig"), ("x = x\ny = 2", "nicht eindeutig"),
+                     ("m = 0\nQ = 0\nQ = m*4190*(T_2 - 300)", "nicht eindeutig")):
+    _msg = _text_error(_text)
+    check(f"'{_text.splitlines()[-1]}': bleibt 'nicht eindeutig' (Gegenprobe)", _part in _msg and "hebt sich" not in _msg, _msg)
+ok, sol, msg = _solve_text("x = 2*x - 3")
+check("x = 2*x - 3 wird gelöst (Gegenprobe)", ok and abs(sol['x'] - 3) < 1e-9, msg)
+
+# --- Funktionsnamen in jeder Schreibweise (HumidAir, Strahlung); Meldung bei SIN, Sqrt ---
+_ref = _solve_text("T = 1000 K\nF = Blackbody(T, 0.4 µm, 0.7 µm)")[1]['F']
+for _name in ("BlackBody", "BLACKBODY", "blackBody"):
+    ok, sol, msg = _solve_text(f"T = 1000 K\nF = {_name}(T, 0.4 µm, 0.7 µm)")
+    check(f"{_name}(...) wie Blackbody(...)", ok and sol['F'] == _ref, msg)
+_ref = _solve_text("h = HumidAir(h, T=20 °C, rh=0.5, p_tot=1 bar)")[1]['h']
+for _name in ("HUMIDAIR", "Humidair", "humidAir"):
+    ok, sol, msg = _solve_text(f"h = {_name}(h, T=20 °C, rh=0.5, p_tot=1 bar)")
+    check(f"{_name}(...) wie HumidAir(...)", ok and sol['h'] == _ref, msg)
+ok, sol, msg = _solve_text("T = 1000 K\nE = EB(T, 2 µm)\nL = WIEN(T)\nS = stefan_Boltzmann(T)")
+check("EB, WIEN, stefan_Boltzmann", ok and abs(sol['L'] - 2.897771955e-6) < 1e-12 and abs(sol['S'] - 56703.74419) < 1e-3, msg)
+for _name, _lower in (("SIN", "sin"), ("Sqrt", "sqrt"), ("Exp", "exp")):
+    _msg = parse_error(f"y = {_name}(4)")
+    check(f"{_name}(...): Meldung nennt {_lower}", "klein schreiben" in _msg and f"{_lower}(" in _msg, _msg)
+ok, sol, msg = _solve_text("Sin = 3\ny = Sin*2 + sin(30)")
+check("Größe Sin neben sin() (Gegenprobe)", ok and abs(sol['y'] - 6.5) < 1e-12, msg)
+
+# --- griechisches my (U+03BC) wie das Mikro-Zeichen; in (Zoll) in value()/quantity() ---
+for _text, _name, _value in (("L = 5 μm\ny = 2*L", 'y', 1e-5), ("T = 1000 K\nE = Eb(T, 2 μm)", 'E', None),
+                             ("eta = 18 μPa*s\ny = 2*eta", 'y', 3.6e-5), ("L = 5e-6 m\nz = value(L, μm)", 'z', 5.0)):
+    ok, sol, msg = _solve_text(_text)
+    _expected = _solve_text(_text.replace('μ', 'µ'))[1][_name] if _value is None else _value
+    check(f"griechisches my: {_text.splitlines()[0] if _name == 'y' else _text.splitlines()[-1]}",
+          ok and abs(sol[_name] - _expected) <= 1e-9 * abs(_expected), msg)
+for _text, _name, _value in (("d = 0.0508 m\nz = value(d, in)", 'z', 2.0), ("d = quantity(2, in)\ny = 2*d", 'y', 0.1016),
+                             ("d = 2 in\ny = 2*d", 'y', 0.1016)):
+    ok, sol, msg = _solve_text(_text)
+    check(f"Zoll: {_text.splitlines()[0] if 'quantity' in _text else _text.splitlines()[-1]}", ok and abs(sol[_name] - _value) < 1e-9, msg)
+
+# --- Prüfgleichung widerspricht einer Wurzelwahl: unabhängig von der Reihenfolge ---
+for _text, _x in (("x^2 = 4\nx^3 = -8", -2.0), ("x^3 = -8\nx^2 = 4", -2.0), ("abs(x) = 3\nx + 5 = 2", -3.0),
+                  ("sin(x) = 0.5\ncos(x) = -0.8660254037844387", 150.0), ("a = 4\nx^2 = a\ny = 2*x\nx^3 = -8", -2.0)):
+    ok, sol, msg = _solve_text(_text)
+    check(f"Reihenfolge: {_text.replace(chr(10), ' ; ')} -> x = {_x:g}", ok and abs(sol['x'] - _x) < 1e-6, f"{msg} {sol}")
+for _text in ("x^2 = 4\nx^3 = 27", "x^3 = 27\nx^2 = 4", "x + 1 = 3\nx + 1 = 4", "x^2 = 4\ny = x + 1\ny = 7"):
+    ok, sol, msg = _solve_text(_text)
+    check(f"Echter Widerspruch bleibt: {_text.replace(chr(10), ' ; ')}", not ok and "Widerspr" in msg, msg)
+
+# --- Prüfgleichungen: 1e-3 der beiden Seiten (Festlegung 10.11.2026) ---
+_base = "m = 0.1 kg/s\nc = 4.18 kJ/(kg*K)\nT_1 = 60 °C\nT_2 = 50 °C\n"
+for _q, _fine in (("4.18 kW", True), ("4.1823 kW", True), ("4.183 kW", True), ("4180 W", True), ("4.19 kW", False),
+                  ("4.3 kW", False), ("4.17 kW", False)):
+    ok, sol, msg = _solve_text(_base + f"Q_dot = m*c*(T_1 - T_2)\nQ_dot = {_q}")
+    check(f"Prüfgleichung Q_dot = {_q} neben 4.18 kW: {'erfüllt' if _fine else 'Widerspruch'}",
+          ok == _fine and (_fine or "Widerspr" in msg), msg)
+for _form in ("Q_dot = m*c*(T_1 - T_2)", "Q_dot - m*c*(T_1 - T_2) = 0", "m*c*(T_1 - T_2) = Q_dot", "Q_dot = m*c*T_1 - m*c*T_2"):
+    ok, sol, msg = _solve_text(_base + f"Q_dot = 4.3 kW\n{_form}")
+    check(f"4.3 kW statt 4.18 kW ist ein Widerspruch in der Form {_form}", not ok and "Widerspr" in msg, msg)
+for _a, _b, _fine in (("5", "5", True), ("5", "5.004", True), ("5", "5.006", False), ("5", "3", False),
+                      ("1 bar", "100000 Pa", True), ("1 bar", "1.002 bar", False), ("0", "0", True)):
+    ok, sol, msg = _solve_text(f"x = {_a}\nx = {_b}\ny = 2*x")
+    check(f"Doppelte Vorgabe x = {_a} / x = {_b}: {'erfüllt' if _fine else 'Widerspruch'}", ok == _fine, msg)
+for _m3, _fine in (("3.002", True), ("3.004", False)):
+    for _form in ("m_3 = m_1 + m_2", "m_1 + m_2 - m_3 = 0", "m_1 + m_2 = m_3"):
+        ok, sol, msg = _solve_text(f"m_1 = 1 kg/s\nm_2 = 2 kg/s\nm_3 = {_m3} kg/s\n{_form}")
+        check(f"Massenbilanz {_form} mit m_3 = {_m3}: {'erfüllt' if _fine else 'Widerspruch'}", ok == _fine, msg)
+ok, sol, msg = _solve_text("T_1 = 300 K\nT_2 = 300.0000000001 K\nm = 2 kg\nc = 700 J/(kg*K)\nQ = m*c*(T_2 - T_1)\nQ = 0")
+check("Q = 0 neben einer Bilanz mit Rundungsrest: erfüllt", ok, msg)
+ok, sol, msg = _solve_text("T_1 = 300 K\nT_2 = 300.01 K\nm = 2 kg\nc = 700 J/(kg*K)\nQ = m*c*(T_2 - T_1)\nQ = 0")
+check("Q = 0 neben einer Bilanz mit 14 J: Widerspruch", not ok and "Widerspr" in msg, msg)
+
+# --- round: kaufmännisch ---
+check("round kaufmännisch: 0.5 -> 1, 2.5 -> 3, -2.5 -> -3, 2.4999 -> 2",
+      [float(commercial_round(v)) for v in (0.5, 1.5, 2.5, 3.5, -0.5, -2.5, 2.4999, 2.5001, 0.49999999999999994, 0.0)]
+      == [1, 2, 3, 4, -1, -3, 2, 3, 0, 0])
+ok, sol, msg = _solve_text("x = 2.5\ny = round(x)\nz = round(-x)\nw = round(2.4999)\nv = round(0.5)")
+check("round im Blatt (Variable, Konstante)", ok and (sol['y'], sol['z'], sol['w'], sol['v']) == (3, -3, 2, 1), str(sol))
+ok, sol, msg = _solve_text("x = 0.5:1:4.5\ny = round(x)")
+check("round in einer Parameterstudie", ok and np.array_equal(sol['y'], [1, 2, 3, 4, 5]), str(sol.get('y')))
+
+# --- Name zugleich Größe und Funktion ---
+for _text in ("T_1 = 20 °C\nT_2 = 80 °C\ncp = cp(air, T=T_1, p=1 bar)\ncp_2 = cp(air, T=T_2, p=1 bar)",
+              "T_1 = 20 °C\nT_2 = 80 °C\ncp_2 = cp(air, T=T_2, p=1 bar)\ncp = cp(air, T=T_1, p=1 bar)",
+              "cp = 1006.1219366872036 J/(kg*K)\nT_2 = 80 °C\ncp_2 = cp(air, T=T_2, p=1 bar)"):
+    ok, sol, msg = _solve_text(_text)
+    _sol = {display_name(k): v for k, v in sol.items()}
+    check(f"cp als Größe und Funktion ({_text.splitlines()[-1]} zuletzt)",
+          ok and abs(_sol.get('cp', 0) - 1006.12) < 0.01 and abs(_sol.get('cp_2', 0) - 1009.44) < 0.01, f"{msg} {_sol}")
+for _text, _name, _value in (("max = 4\ny = max(1, 2) + max", 'y', 6.0), ("sqrt = 4\ny = sqrt(16) + sqrt", 'y', 8.0),
+                             ("pressure = 2 bar\np_3 = pressure(water, T=100 °C, x=0)\ny = p_3/pressure", 'y', 0.507),
+                             ("min = 3\ny = min(min, 5)", 'y', 3.0),
+                             ("t = 5 min\nw = quantity(3, min)\nq = min(t, w)\nz = value(t, min)", 'z', 5.0)):
+    ok, sol, msg = _solve_text(_text)
+    check(f"Funktionsname als Größe: {_text.splitlines()[0]}", ok and abs(sol[_name] - _value) < 1e-3, f"{msg} {sol}")
+ok, sol, msg = _solve_text("T_1 = 25 °C\np = 1 bar\ncp = HumidAir(cp, T=T_1, rh=0.5, p_tot=p)\nQ = 2*cp")
+check("HumidAir(cp, ...): cp bleibt dort der Name der Eigenschaft", ok and abs(sol['Q'] - 2050.46) < 0.01, f"{msg} {sol}")
+check("Anzeige: _kw_cp -> cp, _kw_max -> max", unmangle(mangle_keywords("cp = cp(air, T=T, p=p) + max")) == "cp = cp(air, T=T, p=p) + max"
+      and mangle_keywords("cp = cp(air, T=T, p=p) + max") == "_kw_cp = cp(air, T=T, p=p) + _kw_max")
+check("Text in Hochkommas bleibt (Einheit mol/min)", mangle_keywords("n = quantity(1.0, 'mol/min')") == "n = quantity(1.0, 'mol/min')")
+
+# --- EQUILIBRIUM: geladene Stoffe ---
+for _out in ("IG:Ar = a, IG:Ar+ = b, IG:e- = c", "IG:Ar = a, IG:Ar+ = b"):
+    _msg = parse_error(f"T = 10000 K\np = 1 bar\nEQUILIBRIUM T=T, p=p\nIN IG:Ar = 1 mol\nOUT {_out}")
+    check(f"EQUILIBRIUM mit Ionen wird abgelehnt (OUT {_out})", "geladene" in _msg or "geladener Stoff" in _msg, _msg)
+_msg = parse_error("T = 6000 K\np = 1 bar\nEQUILIBRIUM T=T, p=p\nIN IG:Ar+ = 1 mol, IG:e- = 1 mol\nOUT IG:Ar = a")
+check("EQUILIBRIUM mit Ionen unter IN wird abgelehnt", "Zeile 3" in _msg and "Ladungsbilanz" in _msg, _msg)
+ok, sol, msg = _solve_text("h = enthalpy(IG:Ar+, T=5000 K)")
+check("Stoffwerte eines Ions bleiben verfügbar (Gegenprobe)", ok and sol['h'] > 1e7, msg)
+
+# --- Stoffwerte unter dem Tripelpunkt: richtig, wo es Daten gibt (Dampf, Sättigung über Eis); sonst die
+# --- unterkühlte Flüssigkeit mit Hinweis bzw. eine Meldung (Festlegung 10.11.2026) ---
+def _ice_pressure(T):
+    """Sublimationsdruck von Eis nach IAPWS R14-08(2011), unabhängig von CoolProp programmiert."""
+    theta = T / 273.16
+    return 611.657 * np.exp((-0.212144006e2 * theta**0.333333333e-2 + 0.273203819e2 * theta**0.120666667e1
+                             - 0.610598130e1 * theta**0.170333333e1) / theta)
+
+
+for _t in (-1.0, -5.0, -10.0, -20.0, -40.0, -60.0):
+    _p = _th.pressure('water', T=_t + 273.15, x=1)
+    check(f"Sättigungsdruck von Wasser bei {_t:g} °C über Eis ({_ice_pressure(_t + 273.15):.4g} Pa, IAPWS)",
+          abs(_p - _ice_pressure(_t + 273.15)) <= 1e-6 * _p, str(_p))
+check("Wasser -10 °C: 259.9 Pa über Eis, nicht 286.4 Pa der verlängerten Siedelinie",
+      abs(_th.pressure('water', T=263.15, x=1) - 259.874) < 1e-3 and _th.pressure('water', T=263.15, x=0) == _th.pressure('water', T=263.15, x=1))
+from CoolProp.HumidAirProp import HAPropsSI as _HAPropsSI, HAProps_Aux as _HAProps_Aux
+check("Sättigungsdruck über Eis passt zu HumidAir (p_w bei rh = 1 geteilt durch den Korrekturfaktor f)",
+      abs(_HAPropsSI('P_w', 'T', 263.15, 'P', 1e5, 'R', 1.0) / _HAProps_Aux('f', 263.15, 1e5, 0.0)[0]
+          - _th.pressure('water', T=263.15, x=1)) < 1e-6)
+for _p in (600.0, 400.0, 100.0, 1.0):
+    _T = _th.temperature('water', p=_p, x=1)
+    check(f"Reifpunkt zu {_p:g} Pa: Umkehrung der Sublimationslinie", abs(_th.pressure('water', T=_T, x=1) - _p) < 1e-9 * _p
+          and _T < 273.16, str(_T))
+check("Reifpunkt zu 400 Pa: -5.05 °C", abs(_th.temperature('water', p=400.0, x=1) - 268.0992) < 1e-3)
+# Sattdampf über Eis: Entropie gegenüber dem Dampf über unterkühltem Wasser um R*ln(p_w/p_eis) größer
+_R = 8.314462618 / 0.018015268
+for _T in (268.15, 263.15, 243.15):
+    _ds = _th.entropy('water', T=_T, x=1) - _th.CP.PropsSI('S', 'T', _T, 'Q', 1, 'Water')
+    _expected = _R * np.log(_th.CP.PropsSI('P', 'T', _T, 'Q', 1, 'Water') / _ice_pressure(_T))
+    check(f"Sattdampf über Eis bei {_T - 273.15:g} °C: Entropie zum richtigen Druck", abs(_ds - _expected) < 0.2,
+          f"{_ds} {_expected}")
+check("Sattdampf über Eis bei -10 °C: h = 2482.56 kJ/kg, Dichte nahe am idealen Gas",
+      abs(_th.enthalpy('water', T=263.15, x=1) - 2482559.5) < 1 and
+      abs(_th.density('water', T=263.15, x=1) / (259.8738 / (_R * 263.15)) - 1) < 1e-3)
+# Dampf unter der Tripeltemperatur mit T, p (CoolProp nimmt das Eingabepaar dort nicht an)
+for _T, _p in ((263.15, 100.0), (263.15, 259.0), (253.15, 50.0), (233.15, 5.0)):
+    _rho = _th.density('water', T=_T, p=_p)
+    check(f"Dampf bei {_T - 273.15:g} °C und {_p:g} Pa: Dichte und Druck stimmen überein",
+          abs(_th.pressure('water', T=_T, rho=_rho) - _p) < 1e-9 * _p and abs(_rho / (_p / (_R * _T)) - 1) < 1e-3
+          and _th.quality('water', T=_T, p=_p) == -1.0, str(_rho))
+# kondensierte Phase: keine richtigen Daten - unterkühlte Flüssigkeit, in der Sammelliste für den Hinweis
+for _kwargs, _value in ((dict(T=263.15, p=1e5), -42363.03), (dict(T=263.15, x=0), -42470.59), (dict(T=269.15, x=0), -16900.0)):
+    with _th.collecting_supercooled() as _notes:
+        _h = _th.enthalpy('water', **_kwargs)
+    check(f"Wasser {_kwargs}: unterkühlte Flüssigkeit, für den Hinweis vermerkt", abs(_h - _value) < 150 and len(_notes) == 1
+          and _notes[0][0] == 'Water', f"{_h} {_notes}")
+for _function, _kwargs in ((_th.pressure, dict(T=263.15, x=1)), (_th.enthalpy, dict(T=263.15, x=1)), (_th.enthalpy, dict(T=263.15, p=100.0)),
+                           (_th.temperature, dict(p=400.0, x=1)), (_th.enthalpy, dict(T=273.15, x=0)), (_th.enthalpy, dict(T=278.15, p=1e5))):
+    with _th.collecting_supercooled() as _notes:
+        _function('water', **_kwargs)
+    check(f"{_function.__name__}(water, {_kwargs}): richtig gerechnet, kein Hinweis", not _notes, str(_notes))
+check("Wasser 0 °C, x = 0 rechnet (früher Fehler '0 °C < 0.01 °C')", abs(_th.enthalpy('water', T=273.15, x=0) + 41.59) < 0.1)
+# Schmelzdruckkurve: Wasser schmilzt unter Druck tiefer (200 bar: -1.54 °C) - darüber stabil flüssig
+for _T, _p, _hint in ((272.65, 200e5, False), (271.0, 200e5, True), (263.15, 2000e5, False), (250.0, 2000e5, True), (272.65, 1e5, True)):
+    with _th.collecting_supercooled() as _notes:
+        _th.enthalpy('water', T=_T, p=_p)
+    check(f"Wasser bei {_T - 273.15:.2f} °C und {_p / 1e5:g} bar: {'unterkühlt (Hinweis)' if _hint else 'stabil flüssig (kein Hinweis)'}",
+          bool(_notes) == _hint, str(_notes))
+for _kwargs, _part in ((dict(T=263.15, p=400.0), "Gebiet der festen Phase"), (dict(T=263.15, p=600.0), "Gebiet der festen Phase"),
+                       (dict(T=221.15, p=1e5), "zu weit unter dem Tripelpunkt"), (dict(T=233.15, p=1e5), "zu weit unter dem Tripelpunkt"),
+                       (dict(T=223.15, x=0), "zu weit unter dem Tripelpunkt")):
+    try:
+        _value = _th.enthalpy('water', **_kwargs)
+        check(f"Wasser {_kwargs}: Meldung", False, str(_value))
+    except ValueError as exc:
+        check(f"Wasser {_kwargs}: Meldung '{_part}'", _part in str(exc), str(exc))
+check("Grenze der unterkühlten Flüssigkeit für Wasser bei etwa -41 °C", 230 < _th._metastable_limit('Water') < 235,
+      str(_th._metastable_limit('Water')))
+check("Kältemittel bei Minusgraden unverändert (R134a -10 °C, NH3 -30 °C, CO2 -40 °C)",
+      abs(_th.pressure('R134a', T=263.15, x=1) - 200603.31) < 1 and abs(_th.pressure('R717', T=243.15, x=0) - 119375.60) < 1
+      and abs(_th.pressure('CO2', T=233.15, x=1) - 1004495.73) < 1)
+# Schmelztemperatur steigt bei CO2 mit dem Druck (100 bar: -54.5 °C): darunter fest, auch über der Tripeltemperatur
+for _T, _hint in ((218.0, True), (219.5, False)):
+    with _th.collecting_supercooled() as _notes:
+        _th.enthalpy('CO2', T=_T, p=100e5)
+    check(f"CO2 bei {_T - 273.15:.2f} °C und 100 bar: {'unter der Schmelztemperatur (Hinweis)' if _hint else 'flüssig (kein Hinweis)'}",
+          bool(_notes) == _hint and (not _hint or 'Schmelztemperatur' in _notes[0][3]), str(_notes))
+# Stoffe ohne Daten der festen Phase: verlängerte Siedelinie nur mit Hinweis, Dampf/fest nicht entscheidbar
+with _th.collecting_supercooled() as _notes:
+    _p = _th.pressure('R134a', T=160.0, x=1)
+check("R134a unter seinem Tripelpunkt (-103.3 °C): Wert der verlängerten Siedelinie, für den Hinweis vermerkt",
+      100 < _p < 140 and len(_notes) == 1, f"{_p} {_notes}")
+try:
+    _value = _th.enthalpy('CO2', T=200.0, p=1e5)
+    check("CO2 bei -73 °C und 1 bar (Dampf oder Trockeneis): Meldung", False, str(_value))
+except ValueError as exc:
+    check("CO2 bei -73 °C und 1 bar (Dampf oder Trockeneis): Meldung", "Dampf oder fest" in str(exc), str(exc))
+ok, sol, msg = _solve_text("T = -60:20:20 °C\nh = enthalpy(water, T=T, p=1 bar)")
+check("Parameterstudie über den Tripelpunkt: Punkte zu weit darunter ohne Lösung, die übrigen gerechnet",
+      "teilweise" in msg and "Tripelpunkt" in msg and np.isnan(sol['h'][0]) and np.isnan(sol['h'][1])
+      and abs(sol['h'][2] + 85624) < 1 and abs(sol['h'][4] - 84006) < 1, msg)
+ok, sol, msg = _solve_text("T = -20:10:20 °C\np_s = pressure(water, T=T, x=1)")
+check("Parameterstudie Sättigungsdruck über den Tripelpunkt hinweg (Eis, dann Wasser)",
+      ok and np.allclose(sol['p_s'], [103.239, 259.874, 611.210, 1228.199, 2339.318], rtol=1e-5), str(sol.get('p_s')))
+ok, sol, msg = _solve_text("p_w = 259.8738 Pa\np_w = pressure(water, T=T_r, x=1)")
+check("Reifpunkt iterativ aus dem Sättigungsdruck: -10 °C", ok and abs(sol['T_r'] - 263.15) < 1e-4, f"{msg} {sol}")
+
+# --- cp, cv, Viskosität, Wärmeleitfähigkeit, Prandtl, Schallgeschwindigkeit nur in einer Phase ---
+for _function, _fluid, _kwargs in ((_th.cp, 'water', dict(T=373.15, x=0.5)), (_th.cp, 'water', dict(T=373.15, x=0.3)),
+                                   (_th.viscosity, 'R134a', dict(T=273.15, x=0.4)), (_th.conductivity, 'R134a', dict(T=273.15, x=0.4)),
+                                   (_th.prandtl, 'R134a', dict(T=273.15, x=0.4)), (_th.cv, 'R134a', dict(T=273.15, x=0.4)),
+                                   (_th.soundspeed, 'water', dict(T=373.15, x=0.5)), (_th.cp, 'water', dict(p=101325.0, h=1.5e6)),
+                                   (_th.viscosity, 'water', dict(p=101325.0, h=1.5e6))):
+    try:
+        _value = _function(_fluid, **_kwargs)
+        check(f"{_function.__name__}({_fluid}, {_kwargs}) im Nassdampfgebiet: Meldung", False, str(_value))
+    except ValueError as exc:
+        check(f"{_function.__name__}({_fluid}, {_kwargs}) im Nassdampfgebiet: Meldung", "Nassdampfgebiet" in str(exc), str(exc))
+check("cp, Viskosität an der Phasengrenze und einphasig (Gegenprobe)",
+      abs(_th.cp('water', T=373.15, x=0) - 4215.67) < 0.1 and abs(_th.cp('water', T=373.15, x=1) - 2080.04) < 0.1
+      and abs(_th.viscosity('water', T=373.15, x=0) - 2.8158e-4) < 1e-7 and abs(_th.cp('water', p=1e5, h=2e5) - 4180.75) < 0.1
+      and abs(_th.viscosity('water', p=1e5, h=3e6) - 1.87759e-5) < 1e-9)
+
+# --- Positivliste der Einheitenzeichen (Festlegung 10.11.2026) ---
+_rejected = ['Min', 'PS', 'qm', 'M', 'ct/kWh', 'dB', 'pa', 'Grad', 'grad', 'h1', 'l/Tag', 'km/Std', 'c', 'P', 'm^3/(h*P)', 'hbar',
+             'sek', 'Jahr', 'Pers', 'KW', 'Kw', 'kw', 'KG', 'kWH', 'kwh', 'KJ', 'KPa', 'mM', 'T', 'eV', 'e', 'liter', 'sec']
+check("Positivliste: abgelehnt", all(_units.unit_not_allowed(u) for u in _rejected),
+      str([u for u in _rejected if not _units.unit_not_allowed(u)]))
+_accepted = ['min', 'Pa', 'm2', 'm3/h', 'kg/m3', 'W/m2K', 'W/m^2K^4', 'kJ/kgK', 'W/(mK)', 'W/m°C', 'kWh/a', 'kWh/(m2*a)', 'l/d', 'mbar',
+             'hPa', 'µm', 'μm', 'um', 'kΩ', 'Ohm', 'Ω*cm²', '°C', 'K', '°C/h', '1/K', 'h^-1', 's⁻¹', 'kg·m⁻³', '%', '‰', '%/K',
+             'g/kg', 'kg/kmol', 'kJ/mol', 'J/(mol*K)', 'C/mol', 'A/cm^2', 'mV', 'rad/s', 'deg/h', 'rpm', 'U/min', 'in', 'ft', 'psi',
+             'atm', 'MPa', 'daN', 'Nm', 'GJ', 'PJ', 'MWh', 'TWh', 'GW', 'kcal', 'BTU', 'cP', 'mPa*s', 'mm2/s', 'L', 'ml', 'l/min',
+             'dm3', 'km/h', 'm/s2', 'mg', 't/h', 'mmol', 'd', 'a', 'ms', 'sr', 'W/(m2*sr*µm)', 'kHz', 'lx', 'cd/m2', 'kVA', 'mAh',
+             'µS/cm', 'ppm', 'ha', 'm²K/W', 'N/mm2', 'gon', 'turn', 'BAR', 'kelvin']
+check("Positivliste: zulässig", not any(_units.unit_not_allowed(u) for u in _accepted),
+      str({u: _units.unit_not_allowed(u) for u in _accepted if _units.unit_not_allowed(u)}))
+for _text, _part in (("t = 5 Min\ns = 2*t", "Schreibweise beachten: min"), ("P = 5 KW\ny = 2*P", "Schreibweise beachten: kW"),
+                     ("h1 = 3600 s\nh3 = 2 h1", "Malzeichen"), ("c = 4\nQ = 2 c", "kein zulässiges Einheitenzeichen"),
+                     ("t = 5 sec\ny = 2*t", "als Zeichen schreiben: s"), ("T = 0:10:30 Grad\ny = 2*T", "Unbekannte Einheit 'Grad'"),
+                     ("x = [1 2 3] Std\ny = 2*x", "Unbekannte Einheit 'Std'"), ("t = 300 s\nz = value(t, Min)", "Unbekannte Einheit 'Min'"),
+                     ("d = quantity(3, Zoll)", "Unbekannte Einheit 'Zoll'"), ("E = Eb(1000 K, 5 Mikrometer)", "Unbekannte Einheit"),
+                     ("x = 1\ny = 2*x\n{$Startwerte\ny = 5 Min\n$}", "Unbekannte Einheit 'Min'")):
+    try:
+        _msg = parse_error(_text) or str(parse_start_values(_text) and "")
+    except Exception as exc:
+        _msg = str(exc)
+    check(f"Positivliste im Blatt: {_text.splitlines()[-1] if 'Startwerte' not in _text else 'Startwert 5 Min'}", _part in _msg, _msg)
+ok, sol, msg = _solve_text("k = 0.04 W/mK\nc = 4.19 kJ/kgK\nU = 0.3 W/m2K\nE = 120 kWh/(m2*a)\nV = 150 l/d\nn = 1500 U/min\nF = 3 daN\ny = 2*F")
+check("Übliche Schreibweisen bleiben gültig (Gegenprobe)", ok and abs(sol['y'] - 60) < 1e-9, msg)
+
+# --- Strahlung: nicht definierte Eingabe bleibt nicht definiert ---
+check("Blackbody mit NaN -> NaN (früher 1 bzw. 0)",
+      all(np.isnan(v) for v in (Blackbody(float('nan'), 1e-6, 2e-6), Blackbody(1000.0, float('nan'), 2e-6),
+                                Blackbody(1000.0, 1e-6, float('nan')), Blackbody_cumulative(float('nan'), 2e-6),
+                                Blackbody_cumulative(1000.0, float('nan')))))
+_values = Blackbody(np.array([1000.0, np.nan, 2000.0]), 1e-6, 5e-6)
+check("Blackbody mit Array: nur der NaN-Punkt ist NaN", np.isnan(_values[1]) and abs(_values[0] - 0.6334051) < 1e-6, str(_values))
+
+# --- HumidAir: zwei Angaben zum Wassergehalt legen T nicht fest ---
+for _kwargs in (dict(w=0.01, p_w=1500.0, p_tot=1e5), dict(T_dp=283.15, w=0.0077, p_tot=1e5), dict(T_dp=283.15, p_w=1228.0, p_tot=1e5)):
+    try:
+        _value = _HA('h', **_kwargs)
+        check(f"HumidAir mit {sorted(set(_kwargs) - {'p_tot'})}: Meldung", False, str(_value))
+    except ValueError as exc:
+        check(f"HumidAir mit {sorted(set(_kwargs) - {'p_tot'})}: Meldung 'Wassergehalt'", "Wassergehalt" in str(exc)
+              and "-60" not in str(exc), str(exc))
+check("HumidAir mit rh und T_dp bzw. w und T_wb rechnet (Gegenprobe)",
+      abs(_HA('T', rh=0.5, T_dp=283.15, p_tot=1e5) - 293.939) < 0.01 and abs(_HA('T', w=0.008, T_wb=288.15, p_tot=1e5) - 294.996) < 0.01)
+
+# --- Schreibweise Ausdruck = Name wird gelöst wie Name = Ausdruck ---
+eqs, _, _, _, _orig, _ = parse_equations("T_1 = 20 °C\np_1 = 1 bar\nenthalpy(water, T=T_1, p=p_1) = h_1")
+check("f(T) = h steht intern als (h) - (f(T)), die Anzeige bleibt", eqs[0].startswith("(h_1) - (enthalpy(")
+      and _orig[eqs[0]] == "enthalpy(water, T=T_1, p=p_1) = h_1", str(eqs))
+for _a, _b in (("u = v^2\nv = u - 6", "v^2 = u\nu - 6 = v"), ("x + y = 5\nz = x*y\nx - y = 1", "5 = x + y\nx*y = z\n1 = x - y")):
+    _first, _second = _solve_text(_a), _solve_text(_b)
+    check(f"Vertauschte Seiten: gleiche Lösung ({_b.replace(chr(10), ' ; ')})", _first[0] and _second[0]
+          and all(abs(_first[1][k] - _second[1][k]) < 1e-9 for k in _first[1]), f"{_first[1]} {_second[1]}")
+ok, sol, msg = _solve_text("x = 2\ny = 9*x/x\nx^3 = y")
+check("Meldung nennt links und rechts wie im Blatt (x^3 = y)", not ok and "links = 8, rechts = 9" in msg, msg)
+ok, sol, msg = _solve_text("a = b\nb = 3")
+check("Name = Name bleibt wie geschrieben (Gegenprobe)", ok and sol['a'] == 3.0, msg)
+
+print("\n=== Konstanten des Programms (name#) ===")
+import physical_constants as _pc
+from parser import is_constant_name
+
+check("Tabelle: sigma#, g#, R#, F#, p_n#, T_n# mit Wert und Einheit",
+      (_pc.CONSTANTS['sigma'].value, _pc.CONSTANTS['sigma'].unit) == (5.670374419e-8, 'W/(m^2*K^4)')
+      and _pc.CONSTANTS['g'].value == 9.80665 and _pc.CONSTANTS['R'].value == 8.314462618
+      and _pc.CONSTANTS['F'].value == 96485.33212 and _pc.CONSTANTS['p_n'].value == 101325.0
+      and _pc.CONSTANTS['T_n'].value == 273.15)
+check("Konstanten untereinander stimmig: R = N_A*k, F = N_A*e, C_1 = 2*pi*h*c^2, C_2 = h*c/k, sigma aus k, h, c",
+      all(abs(a / b - 1) < 1e-9 for a, b in (
+          (_pc.CONSTANTS['R'].value, _pc.CONSTANTS['N_A'].value * _pc.CONSTANTS['k'].value),
+          (_pc.CONSTANTS['F'].value, _pc.CONSTANTS['N_A'].value * _pc.CONSTANTS['e'].value),
+          (_pc.CONSTANTS['C_1'].value, 2 * np.pi * _pc.CONSTANTS['h'].value * _pc.CONSTANTS['c'].value**2),
+          (_pc.CONSTANTS['C_2'].value, _pc.CONSTANTS['h'].value * _pc.CONSTANTS['c'].value / _pc.CONSTANTS['k'].value),
+          (_pc.CONSTANTS['sigma'].value, 2 * np.pi**5 * _pc.CONSTANTS['k'].value**4
+           / (15 * _pc.CONSTANTS['h'].value**3 * _pc.CONSTANTS['c'].value**2)))))
+for _constant in _pc.CONSTANTS.values():
+    check(f"Einheit von {_constant.name}# ({_constant.unit}) ist zulässig und SI",
+          not _units.unit_not_allowed(_constant.unit) and abs(UnitValue.from_input(1.0, _constant.unit).calc_value - 1.0) < 1e-12)
+check("Schreibweise: sigma# <-> _cn_sigma, e# und c# neben den Größen e und c",
+      mangle_keywords("y = e#*N_A# + e + c*c#") == "y = _cn_e*_cn_N_A + e + c*_cn_c"
+      and unmangle("y = _cn_e*_cn_N_A + e + c*_cn_c") == "y = e#*N_A# + e + c*c#"
+      and display_name("_cn_sigma") == "sigma#" and is_constant_name("_cn_sigma") and not is_constant_name("sigma"))
+eqs, variables, consts, _, _orig, _uv = parse_equations("T = 500 K\nq = sigma#*T^4")
+check("q = sigma#*T^4: Konstante als Vorgabe mit Einheit, keine Unbekannte",
+      variables == {'q'} and consts.get('_cn_sigma') == 5.670374419e-8 and _uv['_cn_sigma'].original_unit == 'W/(m^2*K^4)'
+      and _orig[eqs[0]] == "q = _cn_sigma*T^4", str((eqs, variables, consts)))
+ok, sol, msg = _solve_text("T_s = 500 °C\nE = Stefan_Boltzmann(T_s)\nE_2 = sigma#*T_s^4")
+check("sigma#*T^4 ist exakt Stefan_Boltzmann(T)", ok and sol['E'] == sol['E_2'] and abs(sol['E'] - 20261.2753) < 1e-3, f"{msg} {sol}")
+ok, sol, msg = _solve_text("sigma = 200 N/mm^2\nA = 50 mm^2\nF = sigma*A\nT = 300 K\nq = sigma#*T^4\ng = 3\ny = g + g#")
+check("Eigene Größen sigma und g neben sigma# und g#", ok and abs(sol['F'] - 10000) < 1e-9 and abs(sol['q'] - 459.300327939) < 1e-6
+      and abs(sol['y'] - 12.80665) < 1e-12, f"{msg} {sol}")
+ok, sol, msg = _solve_text("m = 2 kg\nF_G = m*g#\nM = 28.97 kg/kmol\nrho_n = p_n#*M/(R#*T_n#)\nU = 228600/(2*F#)\nL = b#/5800")
+check("g#, R#, p_n#, T_n#, F#, b#: Gewicht 19.6133 N, Normdichte 1.2925 kg/m3, 1.1846 V, 0.4996 µm",
+      ok and abs(sol['F_G'] - 19.6133) < 1e-9 and abs(sol['rho_n'] - 1.2924975) < 1e-6 and abs(sol['U'] - 1.184636) < 1e-6
+      and abs(sol['L'] - 4.99615854e-7) < 1e-14, f"{msg} {sol}")
+ok, sol, msg = _solve_text("v = 20 m/s\ng#*t = v")
+check("Konstante in einer impliziten Gleichung (g#*t = v)", ok and abs(sol['t'] - 20 / 9.80665) < 1e-9, msg)
+ok, sol, msg = _solve_text("T = 300:100:600 K\nq = sigma#*T^4")
+check("Konstante in einer Parameterstudie", ok and np.allclose(sol['q'], 5.670374419e-8 * np.array([300., 400., 500., 600.])**4), msg)
+ok, sol, msg = _solve_text("rho = density(air, T=T_n#, p=p_n#)\nEQUILIBRIUM T=1000 K, p=p_n#\n IN IG:H2 = 1 mol, IG:O2 = 0.5 mol\n"
+                           " OUT IG:H2O = a, IG:H2 = b, IG:O2 = c")
+check("Konstanten in Stoffwert- und EQUILIBRIUM-Argumenten", ok and abs(sol['rho'] - 1.29307) < 1e-4 and 0.999 < sol['a'] < 1, msg)
+eqs, variables, consts, _, _orig, _uv = parse_equations("T = 300\nq = sigma#*T^4")
+_units_ = propagate_all_units_complete(_orig, {v: u.calc_unit for v, u in _uv.items()})
+check("Blatt ohne Einheiten: die Konstante trägt ihre Einheit, sonst folgt nichts daraus",
+      _uv['_cn_sigma'].original_unit == 'W/(m^2*K^4)' and 'T' not in _uv and not _units_.get('q'), str(_units_))
+for _text, _part in (("sigma# = 5.67e-8\nq = sigma#*2", "kann nicht belegt werden"), ("g# = 9.81 m/s^2\ny = 2*g#", "kann nicht belegt werden"),
+                     ("g# = 1:3\ny = g#", "kann nicht belegt werden"), ("y = Sigma#*2", "gemeint sigma#?"),
+                     ("y = foo#*2", "Unbekannte Konstante 'foo#'"), ("m = 5 # Masse", "kein Kommentarzeichen"),
+                     ("x = 1\n{$Startwerte\ng# = 5\n$}", "kann nicht belegt werden")):
+    try:
+        _msg = parse_error(_text) or str(parse_start_values(_text) and "")
+    except Exception as exc:
+        _msg = str(exc)
+    check(f"Meldung: {_text.splitlines()[0] if 'Startwerte' not in _text else 'Startwert g# = 5'}", _part in _msg and "Zeile" in _msg, _msg)
+_text = "T = 500 K\nq = sigma#*T^4\nz = ln(-q)"
+eqs, variables, consts, _, _orig, _ = parse_equations(_text)
+check("Zeilennummern mit Konstanten (Originalzeile wird wiedergefunden)", sorted(_source_line_numbers(_orig, _text).values()) == [2, 3])
+check("Hilfetabelle der Konstanten: Zeilen <= 70 Zeichen", all(len(line) <= 70 for line in _pc.table_lines(70))
+      and len(_pc.table_lines(70)) == len(_pc.CONSTANTS))
 
 print()
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} Tests bestanden")

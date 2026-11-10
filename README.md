@@ -23,12 +23,15 @@ Equation solver for teaching and rapid calculation of thermodynamic state change
   Levenberg-Marquardt for coupled blocks; contradictory and non-unique systems are reported
 - **Parameter Studies**: Simple sweep syntax (`p = 25:5:50 bar`) and value lists for measured data (`T = [20 25 31] °C`)
 - **Case Distinction**: `IF(a, b, x, y, z)` (`Nu = IF(Re, 2300, Nu_lam, Nu_turb, Nu_turb)`)
+- **Constants**: built-in physical constants with a trailing `#` (`sigma#`, `g#`, `R#`, `F#`, ...) in
+  their own name space - a variable `sigma` or `g` of the sheet cannot overwrite them
 - **Initial Values in the Sheet**: saved with the file as block `{$Startwerte ... $}`
 - **Optimization**: `MAXIMIZE eps_tot VARY m_dot_gly = 0.1 .. 4 kg/s` - also several quantities and per point of a parameter study (measured data)
 - **Unit System**: Automatic unit parsing, propagation and consistency checking; calculations
   always in SI and Kelvin
 - **GUI**: Modern CustomTkinter interface with plotting capabilities; display units selectable
-  per quantity and in the Settings (°C/K, bar/Pa, kJ/J, kW/W)
+  per quantity and in the Settings (°C/K, bar/Pa, kJ/J, kW/W); line numbers beside the equations;
+  dark and light mode (white background and black text for a projector)
 - **Language**: menus in English, messages and hints in German (teaching use at a German-speaking
   university)
 
@@ -72,12 +75,19 @@ python3 main.py
 
 ## User Interface
 
-- **Left panel**: equation sheet (syntax as below, comments in `{...}` or `"..."`)
+- **Left panel**: equation sheet (syntax as below, comments in `{...}` or `"..."`; `#` is not a
+  comment character and is reported - `name#` is a built-in constant). Line numbers beside the
+  equations (messages name the line; *View > Line Numbers* or F7 hides them). The button
+  *Constants* inserts a constant at the cursor
 - **Right panel**, tab *Results*: values with a selectable display unit per quantity, status line
   and messages; tab *Residuals*: equations, blocks and residuals, unit warnings (⚠) and hints (ⓘ)
-- **Menus**: File (`.hes`, `.txt`), Edit (Insert Example), View (font size 6-36 pt), Solve (F5,
-  Initial Values), Plot (plot windows for parameter studies, with zoom/pan/save), Settings
-  (display units), Help (function reference, fluid list with all CoolProp and `IG:` species)
+- **Menus**: File (`.hes`, `.txt`), Edit (Insert Example, Insert Constant), View (font size
+  6-36 pt, Line Numbers, Light Mode), Solve (F5, Initial Values), Plot (plot windows for parameter
+  studies, with zoom/pan/save), Settings (display units), Help (function reference, fluid list with
+  all CoolProp and `IG:` species)
+- **Light / dark mode**: the button ☀ / ☾ in the header, *View > Light Mode (Projector)* or F6
+  switches the whole window between the dark scheme and a light one with white background and
+  black text - e.g. when the sheet is shown with a projector in a lecture hall
 
 ## Architecture
 
@@ -93,6 +103,7 @@ HVAC-Equation-Solver/
 ├── data/nasa/           # thermo.inp, LICENSE.txt, NOTICE.txt (NASA CEA, Apache 2.0)
 ├── humid_air.py         # CoolProp HumidAirProp wrapper
 ├── radiation.py         # Blackbody radiation functions
+├── physical_constants.py  # Built-in constants (sigma#, g#, R#, ...) with value and unit
 ├── units.py             # Unit handling and conversion (v3.0)
 ├── unit_constraints.py  # Unit propagation and consistency checking (v3.0)
 ├── diagnostics.py       # Generic error analysis (structure, numerics, name hints)
@@ -229,7 +240,8 @@ The varied quantities are chosen within their bounds so that the goal (a variabl
 follows from the equations) becomes minimal or maximal; they are not unknowns, so the
 sheet has one equation less per varied quantity. The unit at the end applies to both
 bounds. Method: a grid over the whole range (finds the best of several local optima),
-then an exact local search (Brent for one quantity, Powell for several, both bounded);
+then an exact local search (Brent for one quantity; for several quantities Powell alternating with
+Nelder-Mead until one method converges without improving on the other, all bounded);
 ranges over more than two decades are scanned logarithmically. For every candidate the
 normal solver solves the remaining system (warm start). Optima at a bound are reported.
 Together with a parameter study or value lists the optimum is found for every point,
@@ -492,15 +504,22 @@ The solver uses robust block decomposition:
 - Contradictory systems (e.g. `x+1=3` and `x+1=4`) are reported as errors; redundant but
   consistent equations (an extra balance) are allowed and checked, whichever way they are written
   and wherever they stand in the sheet
-- Linearly dependent equations (`x + y = 1`, `2*x + 2*y = 2`, a balance written twice) and
+- Linearly dependent equations (`x + y = 1`, `2*x + 2*y = 2`, a balance written twice),
   equations that hold on a whole range (a flat `max`/`min`, a condensate amount 0 above the dew
-  point) are reported as "Lösung nicht eindeutig" instead of returning an arbitrary point; in an
+  point) and unknowns multiplied by exactly zero (`Q = m*c*(T_2 - T_1)` with `m = 0`, `Q = 0`)
+  are reported as "Lösung nicht eindeutig" instead of returning an arbitrary point; in an
   over-determined block such a dependent loop becomes the check equation
 - A sign change of a continuous function, pinned down to machine precision, is a root even if
   rounding in the function (e.g. a small condensate amount as the difference of large amounts)
   keeps the residual above the tolerance; poles and jumps (`IF`, `floor`) are not
 - Errors of property functions (outside the valid range, supersaturated humid air) and 0/0
   are reported with the original line
+- The result does not depend on how an equation is written: `enthalpy(water, T=T_1, p=p_1) = h_1`
+  is solved like `h_1 = enthalpy(...)` (a single name on the right-hand side), and a check equation
+  that contradicts a root chosen earlier (`x^2 = 4`, then `x^3 = -8`) is solved first instead of
+  reporting a contradiction that depends on the order of the lines
+- An unknown that cancels out of an equation that is not satisfied (`x = x + 1`) is reported as a
+  contradiction, not as "not unique"
 - Parameter studies use warm starts (previous point's solution as initial value)
 - Initial values from the unit (unknown temperatures at the mean of the given ones) or,
   without units, from the structure: an unknown that stands as a summand next to known
@@ -595,6 +614,22 @@ to all names of the fluid (R717 = ammonia); differences, T, p, x, ρ are unchang
 standard is already IIR for R134a, R32, R410A, CO2, propane and most refrigerants, but not for
 ammonia (h' at 0 °C = 345.7 kJ/kg) and water (IAPWS).
 
+`cp`, `cv`, `viscosity`, `conductivity`, `prandtl` and `soundspeed` exist only in one phase: inside
+the two-phase region (0 < x < 1) they are reported instead of returning numbers without meaning -
+use `x=0` (boiling liquid) or `x=1` (saturated vapour). Below the triple point (water: 0.01 °C) a
+substance is vapour or solid in equilibrium. What the data can give correctly is computed: vapour
+below the triple temperature (`enthalpy(water, T=-10 °C, p=100 Pa)`), and saturation over ice -
+`pressure(water, T=-10 °C, x=1)` is the sublimation pressure 259.9 Pa (not the 286 Pa of the
+extended boiling curve over subcooled water; consistent with `HumidAir`),
+`temperature(water, p=400 Pa, x=1)` the frost point, and `x=1` the vapour over ice. For the solid
+itself there are no property data: where the liquid would be needed (`T`, `p` in the liquid region,
+`x` < 1) the subcooled liquid is returned together with a hint (ⓘ) that this is not the stable
+state; the region of the solid phase and states where the equation of state breaks down (water
+below about −41 °C) are reported as errors. Ice data exist only for water; for other fluids the
+extended boiling curve is returned with the hint. A variable may have the name of
+a function (`cp = cp(air, T=T_1, p=p_1)`, later `cp_2 = cp(...)`): before `(` the name is the
+function, otherwise the variable.
+
 ### Ideal Gases and Condensed Species (`IG:`)
 With the prefix `IG:` (also `IG::`, not case-sensitive) the property functions use the NASA
 database thermo.inp instead of CoolProp; without the prefix nothing changes. About 2000 species
@@ -663,6 +698,8 @@ EQUILIBRIUM T=T_2, p=p
 - Dew point: a condensate amount `n_L = 0` holds for every temperature above the dew point - the
   solver reports "Lösung nicht eindeutig" instead of an arbitrary T; prescribe a small amount
   (`n_L = 1e-6*n_W`) to find the dew point.
+- Ions and electrons (`IG:Ar+`, `IG:e-`) are not supported in `EQUILIBRIUM` (no charge balance) and
+  are reported; their properties (`enthalpy(IG:Ar+, T=...)`) remain available.
 
 ### Humid Air (HumidAir)
 Output: `T`, `h`, `rh`, `w`, `p_w`, `rho_tot`, `rho_a`, `rho_w`, `T_dp`, `T_wb`
@@ -672,9 +709,45 @@ German notation works as well: `x` for the humidity ratio, `phi` for the relativ
 the total pressure, and `v` (specific volume per kg dry air) as output.
 A state with more water vapour than saturated air can hold (w > w_s at T, p) is reported
 ("Zustand übersättigt") instead of returning values - the condensate belongs into the balance.
+Two inputs that both describe the water content (`w`, `p_w`, `T_dp`) do not fix the temperature
+and are reported. The function name may be written in any case (`HumidAir`, `humidair`, `HUMIDAIR`).
 
 ### Mathematics
 `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log10`, `lg`, `sqrt`, `abs`, `ceil`, `floor`, `round`, `max`, `min`, `IF`, `value`, `quantity`, `pi`
+
+`round` rounds half away from zero (2.5 → 3, −2.5 → −3). Function names are lower case
+(`SIN(30)` is reported with the correct spelling).
+
+### Constants (`name#`)
+
+Built-in constants are written with a trailing `#`. They live in their own name space: a variable
+`sigma`, `g` or `R` of the sheet stays free and cannot overwrite a constant, and a constant cannot be
+assigned (`sigma# = ...` is reported). Each constant carries its unit and is listed in the results.
+Insert them with the button *Constants* above the equations or *Edit > Insert Constant*.
+
+| Name | Value (SI) | Unit | Meaning |
+|---|---|---|---|
+| `sigma#` | 5.670374419e-08 | W/(m^2*K^4) | Stefan-Boltzmann constant |
+| `g#` | 9.80665 | m/s^2 | standard gravity |
+| `R#` | 8.314462618 | J/(mol*K) | molar gas constant |
+| `k#` | 1.380649e-23 | J/K | Boltzmann constant |
+| `N_A#` | 6.02214076e+23 | 1/mol | Avogadro constant |
+| `F#` | 96485.33212 | C/mol | Faraday constant |
+| `h#` | 6.62607015e-34 | J*s | Planck constant |
+| `c#` | 299792458 | m/s | speed of light in vacuum |
+| `e#` | 1.602176634e-19 | C | elementary charge |
+| `C_1#` | 3.741771852e-16 | W*m^2 | first radiation constant |
+| `C_2#` | 0.01438776878 | m*K | second radiation constant |
+| `b#` | 0.002897771955 | m*K | Wien displacement constant |
+| `p_n#` | 101325 | Pa | standard pressure (1 atm) |
+| `T_n#` | 273.15 | K | standard temperature (0 °C) |
+
+```
+Q = eps*sigma#*A*(T_1^4 - T_2^4)       {Stefan-Boltzmann; identical to Stefan_Boltzmann(T)}
+F_G = m*g#
+rho_n = p_n#*M/(R#*T_n#)               {density at standard conditions}
+U_0 = -dg/(2*F#)                       {cell voltage}
+```
 
 ### Radiation
 `Eb`, `Blackbody`, `Blackbody_cumulative`, `Wien`, `Stefan_Boltzmann`
@@ -728,8 +801,15 @@ denominator stay prefixes (`kg/kWh`, `1/kPa`, `kg/MJ`), °C in a compound unit i
 difference (`2 °C/h`, `1/°C`, `W/(m²·°C)`), and `rpm` / `U/min` mean revolutions per minute
 (1/min, as in u = π·D·n). Resistances may be written `ohm`, `Ω`, `Ohm`, `kΩ` (e.g. an area
 specific resistance `ASR = 0.5 Ω*cm²`). Assigning the same quantity twice (`x = 5`, later `x = 3`) is reported
-as a contradiction instead of silently using the last value. Unknown units are
-reported as an error instead of being silently ignored, and units in function
+as a contradiction instead of silently using the last value. A check equation (a quantity that is
+given and also follows from the equations) holds if both sides agree within 0.1 %: a rounded
+control value (`Q_dot = 4.18 kW` for 4.1823 kW) is accepted, 4.3 kW is a contradiction - in every
+notation (`Q = m*c*(T_1 - T_2)`, `Q - m*c*(T_1 - T_2) = 0`). Only the unit symbols of the program
+are accepted: the symbols of its own tables (kW, min, m3/h, l/d, kWh/a, °C, ...), an SI prefix
+before an SI unit (`hPa`, `µm`, `kmol`, `MWh`, `daN`), and written-together symbols as before
+(`kJ/kgK`). Everything else is an unknown unit and reported with the line - `5 Min` (pint would
+read mega-inch), `75 PS`, `20 qm`, `5 KW` (hint: `kW`), `T = 20 Grad`, `20 ct/kWh`, and `h3 = 2 h1`
+(a forgotten `*`: a digit 1 after a unit symbol is not an exponent). Units in function
 arguments are checked against the expected dimension (`T=` temperature, `p=`
 pressure, ...). Numbers without unit are SI values, also in equations: in `24/(24 - t_S)`
 with `t_S = 2 h` the 24 is 24 s - a hint (ⓘ) points this out (define `t_d = 24 h`). Python keywords may be used as variable names, e.g.
@@ -752,7 +832,9 @@ Any unit known to [pint](https://pint.readthedocs.io) can be used and is convert
 table lists the usual ones (all checked). Exponents may be written as `^4`, `4` or `⁴` (any
 superscript digits, also negative: `s⁻¹`, `kg·m⁻³`), products
 as `*` or `·`; a denominator without brackets is read as a whole (`W/m^2K` = W/(m²·K),
-`kJ/kgK` = kJ/(kg·K)).
+`kJ/kgK` = kJ/(kg·K)), with or without brackets (`kJ/(kgK)`, `W/(mK)` = W/(m·K)). Symbols written
+together are only split at a capital letter or °C/°F and only into unit symbols the program itself
+uses; words such as `Tag`, `Std`, `Pers` are unknown units (`120 l/Tag` is an error, use `l/d`).
 
 | Category | Examples |
 |----------|----------|

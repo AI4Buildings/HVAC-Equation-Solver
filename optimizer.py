@@ -32,10 +32,11 @@ import solver as _solver
 from parser import display_name
 from solver import SolveTimeout, solve_parametric, solve_system
 
+_LOCAL_ATTEMPTS = 6          # lokale Suchen je Anweisung (abwechselnd Powell / Nelder-Mead)
 OPTIMIZE_TIME_LIMIT = 120.0   # s je Optimierung (je Punkt einer Parameterstudie)
 GRID_POINTS_1D = 21           # Rasterpunkte bei einer variierten Größe
 GRID_BUDGET = 100             # Rasterpunkte gesamt bei mehreren Größen
-MAX_ROUNDS = 5                # Runden bei mehreren, voneinander abhängigen Anweisungen
+MAX_ROUNDS = 20               # Runden bei mehreren, voneinander abhängigen Anweisungen
 _PENALTY = 1e30               # Zielwert eines Kandidaten ohne Lösung (für die lokale Suche)
 _AT_BOUND = 1e-4              # Abstand zur Grenze (Anteil am Bereich) für "am Rand"
 
@@ -151,17 +152,44 @@ def _grid_search(ev: _Evaluator, hint_u: Optional[Tuple[float, ...]]) -> List[fl
     return [ev(p) for p in points]
 
 
-def _local_search(ev: _Evaluator, start_u: Tuple[float, ...], width: float) -> None:
-    """Genaue Suche ab start_u: Brent im Intervall start ± width bzw. Powell (beschränkt)."""
-    if len(start_u) == 1:
+def _local_search(ev: _Evaluator, start_u: Tuple[float, ...], width: float, scale: float = 0.0) -> bool:
+    """
+    Genaue Suche ab start_u: Brent im Intervall start ± width bzw. Powell (beschränkt).
+    Mehrere Größen: eine Suche entlang von Richtungen kann in einem schmalen, schräg oder gekrümmt
+    liegenden Tal stehen bleiben (Auswertungslimit, oder sie meldet Konvergenz ohne Optimum).
+    Deshalb sucht vom gefundenen Punkt ein zweites, anderes Verfahren weiter (Nelder-Mead), danach
+    wieder Powell ... - fertig ist die Suche erst, wenn ein Verfahren konvergiert UND den Wert
+    des vorigen nicht mehr verbessert (relativ zur Größenordnung der Zielgröße). Rückgabe: konvergiert?
+    """
+    k = len(start_u)
+    if k == 1:
         a, b = max(0.0, start_u[0] - width), min(1.0, start_u[0] + width)
         if b > a:
             minimize_scalar(lambda u: ev.penalized((u,)), bounds=(a, b), method='bounded',
                             options={'xatol': 1e-7, 'maxiter': 200})
-        return
-    minimize(lambda u: ev.penalized(tuple(u)), np.array(start_u), method='Powell',
-             bounds=[(0.0, 1.0)] * len(start_u),
-             options={'xtol': 1e-6, 'ftol': 1e-12, 'maxfev': 300 * len(start_u)})
+        return True
+
+    def objective(u):
+        return ev.penalized(tuple(u))
+
+    bounds = [(0.0, 1.0)] * k
+    start = np.array(start_u)
+    for attempt in range(_LOCAL_ATTEMPTS):
+        before = ev.best[0] if ev.best is not None else float('inf')
+        level = max(scale, abs(before)) if np.isfinite(before) else scale
+        if attempt % 2 == 0:
+            result = minimize(objective, start, method='Powell', bounds=bounds,
+                              options={'xtol': 1e-6, 'ftol': 1e-12, 'maxfev': 300 * k})
+        else:
+            result = minimize(objective, start, method='Nelder-Mead', bounds=bounds,
+                              options={'xatol': 1e-7, 'fatol': 1e-12 * level, 'maxfev': 600 * k,
+                                       'adaptive': True})
+        if ev.best is None:
+            return False
+        if result.success and attempt > 0 and before - ev.best[0] <= 1e-9 * level:
+            return True
+        start = np.array(ev.best[1])
+    return False
 
 
 def _optimize_goal(ev: _Evaluator, start_u: Tuple[float, ...], full: bool,
@@ -179,12 +207,12 @@ def _optimize_goal(ev: _Evaluator, start_u: Tuple[float, ...], full: bool,
         if ev.best is None:
             return info
         step = 1.0 / (GRID_POINTS_1D - 1)
-        _local_search(ev, ev.best[1], step)
+        info['converged'] = _local_search(ev, ev.best[1], step, info['scale'])
     else:
         ev(start_u)
         if ev.best is None:
             return info
-        _local_search(ev, ev.best[1], 2.0 / (GRID_POINTS_1D - 1))
+        info['converged'] = _local_search(ev, ev.best[1], 2.0 / (GRID_POINTS_1D - 1), abs(ev.best[0]))
     return info
 
 
@@ -254,6 +282,7 @@ def optimize_system(
     n_solves = n_failed = 0
     timed_out = False
     coupled = False
+    unsettled = False
     failure = None
     try:
         for round_no in range(MAX_ROUNDS if len(goals) > 1 else 1):
@@ -271,12 +300,15 @@ def optimize_system(
                 finally:
                     n_solves += ev.n_solves
                     n_failed += ev.n_failed
+                    if ev.best is not None:
+                        # auch bei Abbruch (Zeitlimit) gilt das Beste dieser Anweisung - sonst
+                        # bliebe der Startpunkt (Bereichsmitte) als "bestes Ergebnis" stehen
+                        current.update(ev.values(ev.best[1]))
+                        best_values[index] = ev.best[0]
+                        warm = ev.warm
                 if ev.best is None:
                     failure = (goal, ev.failure)
                     break
-                current.update(ev.values(ev.best[1]))
-                best_values[index] = ev.best[0]
-                warm = ev.warm
             if failure or len(goals) == 1:
                 break
             # Stimmig? Jede Zielgröße muss bei den endgültigen Werten ihr Optimum behalten
@@ -293,6 +325,7 @@ def optimize_system(
                 break
         else:
             coupled = True
+            unsettled = True     # Runden erschöpft: die Zielgrößen ändern sich noch gegenseitig
     except SolveTimeout:
         timed_out = True
     finally:
@@ -333,9 +366,21 @@ def optimize_system(
     message = "Optimierung: " + "; ".join(parts) + f" - {n_solves} Lösungen des Gleichungssystems"
     if n_failed:
         message += f", davon {n_failed} Kandidaten ohne Lösung"
-    if coupled:
+    if unsettled:
+        success = False
+        message += (f". Die Anweisungen beeinflussen sich gegenseitig - nach {MAX_ROUNDS} Runden noch "
+                    f"kein stimmiges Ergebnis (jede Zielgröße ändert sich, sobald die andere Anweisung "
+                    f"nachzieht); für ein gemeinsames Optimum EINE Zielgröße bilden")
+    elif coupled:
         message += (". Die Anweisungen beeinflussen sich gegenseitig - Ergebnis, bei dem keine "
                     "Zielgröße allein besser wird; für ein gemeinsames Optimum EINE Zielgröße bilden")
+    not_converged = [goal for index, goal in enumerate(goals)
+                     if infos.get(index, {}).get('converged') is False]
+    if not_converged and not timed_out:
+        success = False
+        message += (". Die Suche ist nicht konvergiert (" + ", ".join(
+            f"Zeile {goal.line}" for goal in not_converged) + ") - das Ergebnis ist möglicherweise "
+            "kein Optimum; Bereich enger wählen")
     if flat:
         success = False
         message = "Optimierung nicht möglich. " + " ".join(flat)
