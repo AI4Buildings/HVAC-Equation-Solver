@@ -93,10 +93,10 @@ python3 main.py
 
 ```
 HVAC-Equation-Solver/
-├── main.py              # Tkinter GUI (main application)
+├── main.py              # CustomTkinter GUI (main application)
 ├── parser.py            # Equation syntax → Python conversion
 ├── solver.py            # Block decomposition + bracket search solver
-├── optimizer.py         # MINIMIZE/MAXIMIZE (grid + bounded Brent/Powell, per point)
+├── optimizer.py         # MINIMIZE/MAXIMIZE (grid, then Brent or Powell/Nelder-Mead, per point)
 ├── thermodynamics.py    # CoolProp wrapper with unit conversion
 ├── ideal_gas.py         # Ideal gases / condensed species from NASA thermo.inp (prefix IG:)
 ├── equilibrium.py       # Chemical equilibrium by Gibbs minimisation (statement EQUILIBRIUM)
@@ -104,8 +104,8 @@ HVAC-Equation-Solver/
 ├── humid_air.py         # CoolProp HumidAirProp wrapper
 ├── radiation.py         # Blackbody radiation functions
 ├── physical_constants.py  # Built-in constants (sigma#, g#, R#, ...) with value and unit
-├── units.py             # Unit handling and conversion (v3.0)
-├── unit_constraints.py  # Unit propagation and consistency checking (v3.0)
+├── units.py             # Unit handling and conversion
+├── unit_constraints.py  # Unit propagation and consistency checking
 ├── diagnostics.py       # Generic error analysis (structure, numerics, name hints)
 ├── version.py           # Program version (shown in title and status bar)
 ├── requirements.txt     # Required packages
@@ -117,7 +117,7 @@ HVAC-Equation-Solver/
 ├── test_unit_constraints.py  # Unit propagation / dimension checks
 ├── test_berechnungen.py # Thermodynamics & heat transfer problems vs. reference values
 ├── test_optimierung.py  # Optimization vs. analytic/scipy references
-├── test_gui.py          # Headless GUI tests
+├── test_gui.py          # GUI tests (the window briefly takes the focus)
 ├── CLAUDE.md            # Technical documentation
 ├── README.md            # This file
 └── LICENSE              # MIT (data/nasa/* excluded: Apache 2.0)
@@ -187,6 +187,8 @@ A long equation may continue on the next line inside an open bracket when the li
 ends with `(`, `,` or an operator:
 
 ```
+Re = 5000
+Pr = 0.7
 Nu = IF(Re, 2300, 3.66, 3.66,
         0.023*Re^0.8*Pr^0.4)
 ```
@@ -219,7 +221,11 @@ Several lists are combined point by point.
 ### Case Distinction (IF)
 
 ```
+Re = 5000
+Pr = 0.7
 Re_krit = 2300
+Nu_lam = 3.66
+Nu_turb = 0.023*Re^0.8*Pr^0.4
 Nu = IF(Re, Re_krit, Nu_lam, Nu_turb, Nu_turb)   {laminar below Re_krit}
 ```
 
@@ -231,10 +237,25 @@ not chosen must be computable too (no division by zero).
 ### Optimization (MINIMIZE / MAXIMIZE)
 
 ```
-MAXIMIZE epsilon_tot VARY m_dot_gly = 0.1 .. 4 kg/s
-MAXIMIZE e_tot VARY m_dot_w_2 = 0.5 .. 2 kg/s, m_dot_w_4 = 0.5 .. 2 kg/s
-MINIMIZE q_L VARY s_L = 11 .. 30 mm
+{Economic insulation thickness}
+MINIMIZE K_tot VARY s_ins = 0.01 .. 0.4 m
+lambda_ins = 0.035 W/(m*K)
+R_wall = 0.5 m^2*K/W        {wall without insulation}
+dT_m = 15 K                 {mean temperature difference, heating season}
+t_H = 5000 h                {heating hours per year}
+k_E = 0.10                  {energy price per kWh}
+k_ins = 120                 {insulation price per m3}
+a_n = 0.08                  {annuity factor per year}
+U = 1/(R_wall + s_ins/lambda_ins)
+Q_a = U*dT_m*t_H            {heat loss per m2 and year}
+K_E = k_E*value(Q_a, kWh/m^2)
+K_ins = a_n*k_ins*value(s_ins, m)
+K_tot = K_E + K_ins         {annual cost per m2}
 ```
+
+Result: `s_ins` = 0.148 m, `K_tot` = 3.01 per m² and year (the analytical optimum). General form:
+`MINIMIZE goal VARY x = a .. b unit` or `MAXIMIZE ...`; several varied quantities are separated
+by commas (`MAXIMIZE e_tot VARY m_1 = 0.5 .. 2 kg/s, m_2 = 0.5 .. 2 kg/s`).
 
 The varied quantities are chosen within their bounds so that the goal (a variable that
 follows from the equations) becomes minimal or maximal; they are not unknowns, so the
@@ -901,7 +922,8 @@ delta_K, offset conversions, radiation). `test_berechnungen.py` solves thermodyn
 and heat-transfer problems both with and without units and compares them with
 independently computed reference values (CoolProp, analytical solutions, literature values
 for heating values and fuel cell voltages).
-Each module also has a self-test: `python3 <module>.py`.
+The computing modules also have a self-test: `python3 <module>.py` (parser, solver, optimizer, units,
+unit_constraints, thermodynamics, humid_air, radiation, ideal_gas, equilibrium).
 
 ## License
 

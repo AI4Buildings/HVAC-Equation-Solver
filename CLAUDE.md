@@ -12,12 +12,12 @@ pip install numpy scipy CoolProp matplotlib pint customtkinter
 
 | Bibliothek | Version | Zweck |
 |------------|---------|-------|
-| numpy | >= 1.20 | Array-Operationen, mathematische Funktionen |
-| scipy | >= 1.7 | Numerische Solver (fsolve, brentq) |
-| CoolProp | >= 6.4 | Thermodynamische Stoffdaten |
-| matplotlib | >= 3.5 | Diagramme und Plots (optional) |
-| pint | >= 0.20 | Einheitenhandling und Dimensionsanalyse |
-| customtkinter | >= 5.0 | Moderne GUI |
+| numpy | >= 1.24, < 3 | Array-Operationen, mathematische Funktionen |
+| scipy | >= 1.10, < 2 | Numerische Solver (least_squares, fsolve, brentq) |
+| CoolProp | >= 6.6, < 8 | Thermodynamische Stoffdaten |
+| matplotlib | >= 3.7, < 4 | Diagramme und Plots |
+| pint | >= 0.23, < 1 | Einheitenhandling und Dimensionsanalyse |
+| customtkinter | >= 5.2, < 6 | Moderne GUI |
 | tkinter | - | GUI (in Python Standard-Library enthalten) |
 
 ### Programm starten
@@ -43,7 +43,7 @@ equation_solver/
 ├── main.py              # Tkinter GUI (Hauptanwendung)
 ├── parser.py            # Equation syntax → Python conversion
 ├── solver.py            # Block-Dekomposition + Bracket-Suche Solver
-├── optimizer.py         # MINIMIZE/MAXIMIZE ... VARY ... (Raster + Brent/Powell, je Punkt)
+├── optimizer.py         # MINIMIZE/MAXIMIZE ... VARY ... (Raster, dann Brent bzw. Powell/Nelder-Mead, je Punkt)
 ├── thermodynamics.py    # CoolProp Wrapper mit Einheitenumrechnung
 ├── ideal_gas.py         # Ideale Gase/kondensierte Stoffe aus NASA thermo.inp (Präfix IG:)
 ├── equilibrium.py       # Chemisches Gleichgewicht (Gibbs-Minimierung, Anweisung EQUILIBRIUM)
@@ -62,13 +62,13 @@ equation_solver/
 ├── test_unit_constraints.py  # Tests Einheiten-Propagation/Dimensionsprüfung
 ├── test_berechnungen.py # Berechnungsaufgaben Thermodynamik/Wärmeübertragung
 ├── test_optimierung.py  # Optimierung gegen analytische/scipy-Referenzen
-├── test_gui.py          # GUI-Tests (headless)
+├── test_gui.py          # GUI-Tests (das Fenster holt kurz den Fokus)
 ```
 
 ### Tests
 
 ```bash
-python3 test_regressions.py       # Parser, Solver, Einheiten (~15 s)
+python3 test_regressions.py       # Parser, Solver, Einheiten (~1 min)
 python3 test_unit_constraints.py  # Einheiten-Propagation, Dimensionsprüfung
 python3 test_berechnungen.py      # 82 Aufgaben mit/ohne Einheiten gegen Referenzwerte
 python3 test_optimierung.py       # Optimierung (MINIMIZE/MAXIMIZE), unabhängige Referenzen
@@ -82,7 +82,9 @@ Offset-Konvertierungen, Strahlung) ab. `test_berechnungen.py` rechnet Aufgaben a
 Thermodynamik und Wärmeübertragung jeweils MIT und OHNE Einheiten und vergleicht mit
 unabhängig berechneten Referenzwerten (CoolProp direkt, analytisch; IG: gegen Literaturwerte
 für Heizwert, Zellspannung, JANAF).
-Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
+Zusätzlich haben die Rechenmodule einen Selbsttest: `python3 <modul>.py` (parser, solver, optimizer, units,
+unit_constraints, thermodynamics, humid_air, radiation, ideal_gas, equilibrium; `diagnostics.py` hat keinen,
+`physical_constants.py` druckt seine Tabelle, `main.py` startet das Programm).
 
 ### Entwicklung: Arbeitsweise und Prüfablauf
 
@@ -94,14 +96,17 @@ Zusätzlich hat jedes Modul einen Selbsttest: `python3 <modul>.py`.
 - Neue Funktion: Tests in den Suiten, Hilfe (`FUNCTION_HELP_TEXT`, Zeilen ≤ 70 Zeichen - getestet),
   README.md, CLAUDE.md; das Beispielblatt (`main._insert_example`, Werte in `test_gui.py` geprüft)
   soll die Funktionen zeigen
-- **Lokal, nicht im Repo** (`Testbeispiele/` in `.gitignore`, nie committen): 134 Lehrbeispiele mit
+- **Lokal, nicht in diesem Repo** (`Testbeispiele/` in `.gitignore`, hier nie committen - der Ordner ist ein
+  eigenes, privates Git-Repository): 134 Lehrbeispiele mit
   Lösungsblättern und Testberichten, `Testbeispiele/PROJEKTSTAND.md` (Stand, Festlegungen, offene
   Punkte - bei Weiterarbeit zuerst lesen) und `Testbeispiele/Pruefskripte/alle_pruefungen.sh` -
   vor jedem Push: alle Suiten und alle Lehrbeispiele mit Einheiten, ohne Einheiten (alles SI),
-  mit neutral umbenannten Variablen sowie Vergleich der Anzeige-Einheiten (ca. 45 min)
+  mit neutral umbenannten Variablen sowie Vergleich der Anzeige-Einheiten (rund 20 min, fast durchgehend
+  mit Fenstern, die den Fokus holen)
 - Git: Arbeitsbranch (derzeit `fix/review-2026-10`), `main` per Fast-Forward; Commit, Push,
   Aktualisieren von `main` und Releases nur auf ausdrücklichen Wunsch
-- Release: Versionsnummer in `version.py`, README-Badge und `INSTALLATION.md` ("Version x.y.z"),
+- Release: Versionsnummer in `version.py`, README-Badge, `INSTALLATION.md` ("Version x.y.z") und hier
+  ("Aktuell vx.y.z"),
   Commit "Version x.y.z", annotierter Tag `vx.y.z`, `gh release create vx.y.z --verify-tag`
   (Notizen englisch mit Installation und Lizenzvermerk); Quellarchiv vorher prüfen (`git archive`:
   `data/nasa/thermo.inp` byte-gleich, `.bat` mit CRLF). Aktuell v4.2.0
